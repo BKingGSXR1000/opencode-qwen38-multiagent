@@ -32,9 +32,14 @@ def ready_info(project, did):
     return {}
 
 
-def _phase_ready(project, name, artifact):
+def phase_ready(project, name, artifact, marker):
     data = _kv(Path(project) / ".opencode-v2" / name)
-    return bool(data.get("status") == "complete" and data.get("artifact") == artifact)
+    return bool(
+        data.get("status") == "complete"
+        and data.get("artifact") == artifact
+        and data.get("marker") == marker
+        and data.get("validated", "").startswith("deterministic-")
+    )
 
 
 def load_manifest(project):
@@ -86,8 +91,15 @@ def snapshot(project):
             "launch_deps_missing": missing,
             "eligible": not complete and count < 3 and not missing,
         }
-    acceptance_complete = _phase_ready(project, "ACCEPTANCE.ready", "ACCEPTANCE.md")
-    plan_complete = _phase_ready(project, "IMPLEMENTATION_PLAN.ready", "IMPLEMENTATION_PLAN.md")
+    acceptance_complete = phase_ready(
+        project, "ACCEPTANCE.ready", "ACCEPTANCE.md", "ACCEPTANCE_COMPLETE"
+    )
+    plan_complete = phase_ready(
+        project,
+        "IMPLEMENTATION_PLAN.ready",
+        "IMPLEMENTATION_PLAN.md",
+        "IMPLEMENTATION_PLAN_COMPLETE",
+    )
     tests = test_state(project)
     return {
         "protocol": "V2.6.8",

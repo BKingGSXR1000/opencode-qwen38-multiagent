@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import base64,fcntl,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.parse,urllib.request
 from pathlib import Path
-from control_state import ready_info as state_ready_info
+from control_state import phase_ready, ready_info as state_ready_info
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -48,6 +48,12 @@ def load_manifest():
 
 def ready_info(did):
     return state_ready_info(PROJECT,did) if PROJECT and did else {}
+
+def plan_ready():
+    return bool(PROJECT) and phase_ready(
+        PROJECT,"IMPLEMENTATION_PLAN.ready","IMPLEMENTATION_PLAN.md",
+        "IMPLEMENTATION_PLAN_COMPLETE",
+    )
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
@@ -446,7 +452,7 @@ def enforce_assignment(sid,agent,first_user):
     dispatch_seen.add(sid)
 
     ctrl=Path(PROJECT)/".opencode-v2" if PROJECT else None
-    if not ctrl or not (ctrl/"IMPLEMENTATION_PLAN.ready").exists():
+    if not ctrl or not plan_ready():
         abort_session(sid,"dispatch_guard plan_not_ready",agent)
         csv("DISPATCH_DENY",sid,agent,"plan_not_ready")
         return
@@ -696,7 +702,7 @@ def persisted_reconcile_loop():
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
                 if did and ready_info(did): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} deliverable={did} compactions={comps}"); continue
-                if agent=="implementation-planner" and PROJECT and (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").exists(): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} control_ready=1"); continue
+                if agent=="implementation-planner" and plan_ready(): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} control_ready=1"); continue
                 if comps==1: log(f"COMPACTION_ALLOWED session={sid} agent={agent} count=1"); csv("COMPACTION_ALLOWED",sid,agent,"count=1")
                 elif comps>=2: abort_session(sid,f"child_compaction count={comps}; second incomplete compaction",agent); log(f"RETIRED_COMPACTION session={sid} agent={agent} compactions={comps}")
         except Exception as e: log(f"PERSISTED_RECONCILE_ERROR {e!r}")

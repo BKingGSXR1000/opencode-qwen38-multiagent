@@ -95,8 +95,8 @@ class StatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / ".opencode-v2"
             (root / "work").mkdir(parents=True)
-            (root / "ACCEPTANCE.ready").write_text("status=complete\nartifact=ACCEPTANCE.md\n")
-            (root / "IMPLEMENTATION_PLAN.ready").write_text("status=complete\nartifact=IMPLEMENTATION_PLAN.md\n")
+            (root / "ACCEPTANCE.ready").write_text("status=complete\nartifact=ACCEPTANCE.md\nmarker=ACCEPTANCE_COMPLETE\nvalidated=deterministic-test\n")
+            (root / "IMPLEMENTATION_PLAN.ready").write_text("status=complete\nartifact=IMPLEMENTATION_PLAN.md\nmarker=IMPLEMENTATION_PLAN_COMPLETE\nvalidated=deterministic-test\n")
             (root / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves": {"D001": {"launch_deps": []}, "D002": {"launch_deps": ["D001"]}}}))
             (root / "work/D001.ready").write_text("status=complete\ndeliverable=D001\nverified=true\n")
             (root / "work/attempts.json").write_text(json.dumps({"deliverables": {"D002": {"count": 2}}}))
