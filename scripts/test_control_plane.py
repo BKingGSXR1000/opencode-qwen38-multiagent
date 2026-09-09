@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -229,6 +230,95 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             self.assertIn(required, text, name)
             self.assertNotIn("When success is required", text, name)
             self.assertNotIn("**ACCEPTANCE_PASS**", text, name)
+
+    def test_control_protocol_is_project_local_for_planners_and_workers(self):
+        names = (
+            "implementation-planner.md", "probe-builder.md", "implementer.md",
+            "core-builder.md", "feature-builder.md", "reasoning-builder.md",
+            "integrator.md", "test-builder.md", "tester.md",
+        )
+        for name in names:
+            text = (self.AGENTS / name).read_text()
+            self.assertIn(".opencode-v2/CONTROL_CONTRACT.md", text, name)
+            self.assertRegex(
+                text, r"(?is)(?:never|do not).*?(?:read|inspect).*?harness", name
+            )
+            self.assertNotRegex(
+                text,
+                r"(?im)^(?!.*(?:never|do not)).*(?:read|inspect).*run-checks\.py",
+                name,
+            )
+        planner = (self.AGENTS / "implementation-planner.md").read_text()
+        self.assertIn("Do not add a\nDxxx probe merely to discover control protocol", planner)
+        self.assertIn("Never guess or use a fallback\nmanifest schema", planner)
+
+
+class TestChecksControlContractTests(unittest.TestCase):
+    RUNNER = Path(__file__).with_name("run-checks.py")
+
+    def run_runner(self, project, *args):
+        return subprocess.run(
+            [sys.executable, str(self.RUNNER), "--project", str(project), *args],
+            text=True,
+            capture_output=True,
+        )
+
+    def test_bootstrap_exposes_exact_current_schema_and_full_control_protocol(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            bootstrapped = self.run_runner(project, "--bootstrap-control-contract")
+            self.assertEqual(bootstrapped.returncode, 0, bootstrapped.stderr)
+            contract = (project / ".opencode-v2/CONTROL_CONTRACT.md").read_text()
+            match = re.search(r"```json\n(.*?)\n```", contract, re.DOTALL)
+            self.assertIsNotNone(match)
+            exposed_schema = json.loads(match.group(1))
+            printed = subprocess.run(
+                [sys.executable, str(self.RUNNER), "--print-test-checks-schema"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(exposed_schema, json.loads(printed.stdout))
+            for required in (
+                "ACCEPTANCE.ready", "IMPLEMENTATION_PLAN.ready", "Dxxx.ready",
+                "attempts.json", "Dxxx.progress.md", "TEST_REPORT.json",
+                "ACCEPTANCE_PASS",
+            ):
+                self.assertIn(required, contract)
+            launch = (Path(__file__).parents[1] / "run.sh").read_text()
+            self.assertIn("--bootstrap-control-contract", launch)
+
+    def test_manifest_conforming_to_exposed_schema_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (ctrl / "TEST_CHECKS.json").write_text(json.dumps({
+                "required_files": [".opencode-v2/CONTROL_CONTRACT.md"],
+                "checks": [{
+                    "name": "project-local-contract",
+                    "command": "test -f .opencode-v2/CONTROL_CONTRACT.md",
+                    "timeout_seconds": 5,
+                }],
+            }))
+            result = self.run_runner(project)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads((ctrl / "TEST_REPORT.json").read_text())
+            self.assertEqual(report["status"], "pass")
+            self.assertEqual(report["checks_run"], 1)
+
+    def test_malformed_manifest_is_rejected_before_commands_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            ctrl = project / ".opencode-v2"
+            ctrl.mkdir()
+            (ctrl / "TEST_CHECKS.json").write_text(json.dumps({
+                "checks": [{"name": "bad", "command": 7}],
+            }))
+            result = self.run_runner(project)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("invalid TEST_CHECKS.json", result.stderr)
+            self.assertFalse((ctrl / "TEST_REPORT.json").exists())
 
 
 class StatusTests(unittest.TestCase):

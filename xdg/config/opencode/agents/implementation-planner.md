@@ -26,6 +26,7 @@ You are the Phase-0.5 implementation planner. Produce a compact executable DAG.
 Read:
 - the original user request supplied by the orchestrator
 - `.opencode-v2/ACCEPTANCE.md`
+- `.opencode-v2/CONTROL_CONTRACT.md` (the complete project-local control protocol)
 - `.opencode-v2/GLOBAL_LESSONS.md` when present
 - `.opencode-v2/LESSONS_LEARNED.md` when present
 - `.opencode-v2/REFERENCE_FOUNDATION.md` only when Reference policy is external-required
@@ -99,8 +100,11 @@ Every nontrivial coding project MUST include a final S/M tester/test-builder
 leaf owning:
 `.opencode-v2/TEST_CHECKS.json`
 
-Its Verify command MUST invoke:
-`python3 ~/AI/opencode-qwen38-multiagent-v2/scripts/run-checks.py --project .`
+Use the exact TEST_CHECKS.json schema and canonical runner invocation in
+`.opencode-v2/CONTROL_CONTRACT.md`. Do not inspect harness source outside the
+project, including `run-checks.py`, to discover this protocol. Do not add a
+Dxxx probe merely to discover control protocol. Never guess or use a fallback
+manifest schema.
 
 That JSON must list intended tests as SEPARATE commands so one test process
 cannot silently terminate the rest.

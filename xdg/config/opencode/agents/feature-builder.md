@@ -133,6 +133,15 @@ Do not invent or weaken verification. FINAL meaningful tool call:
 After success return exactly `Dxxx_DONE`. No further reasoning/research.
 <!-- V2.6.7 WORKER END -->
 
+<!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT BEGIN -->
+## Project-local control protocol
+
+Read `.opencode-v2/CONTROL_CONTRACT.md` when control/test protocol matters.
+Never read or inspect harness-repository source (including `run-checks.py`) to
+learn the protocol. Do not create a probe solely to discover it or guess a
+fallback TEST_CHECKS manifest schema.
+<!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT END -->
+
 <!-- V2.6.7c DOTDIR IO BEGIN -->
 ## `.opencode-v2` filesystem rule
 

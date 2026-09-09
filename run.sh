@@ -6,6 +6,8 @@ PROJECT="$(realpath -m "$PROJECT")"
 [[ -d "$PROJECT" ]] || { echo "ERROR: Project does not exist: $PROJECT"; exit 1; }
 
 mkdir -p "$ROOT/logs"
+python3 "$ROOT/scripts/run-checks.py" --project "$PROJECT" \
+  --bootstrap-control-contract >/dev/null
 
 "$ROOT/scripts/kv-guard.sh" >/dev/null 2>&1 & KV_PID=$!
 SUP_PID="$(V2_PROJECT="$PROJECT" "$ROOT/scripts/start-supervisor-singleton.sh")"
