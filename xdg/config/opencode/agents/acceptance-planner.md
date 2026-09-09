@@ -15,6 +15,7 @@ permission:
   list: deny
   bash: deny
   task: deny
+  todowrite: deny
   webfetch: deny
   websearch: deny
   skill: deny

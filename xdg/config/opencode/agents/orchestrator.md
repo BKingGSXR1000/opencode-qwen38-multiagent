@@ -13,6 +13,7 @@ permission:
   list: deny
   bash: deny
   task: allow
+  todowrite: allow
   webfetch: deny
   websearch: deny
   skill: deny
@@ -110,9 +111,10 @@ Require `.opencode-v2/TEST_REPORT.json` with:
 - checks_run > 0
 
 Then run a fresh acceptance-validator.
-Only exact ACCEPTANCE_PASS means success.
-When success is required by the mechanical collector, your entire final response
-must be the exact bare text ACCEPTANCE_PASS, with no Markdown or other prose.
+Only exact ACCEPTANCE_PASS means success. On success, your entire final response
+MUST be the exact bare text ACCEPTANCE_PASS, with no Markdown, emoji, heading,
+prefix, suffix, or other prose. On failure, your first line MUST be the exact
+bare token ACCEPTANCE_FAIL, followed only by concise failure evidence.
 
 Do not launch lessons-learner yourself. The external supervisor owns the
 post-run lessons stage.

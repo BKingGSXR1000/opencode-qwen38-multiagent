@@ -15,6 +15,7 @@ permission:
     "*attempts.json*": deny
     "*": allow
   task: deny
+  todowrite: deny
   webfetch: allow
   websearch: allow
   skill: deny

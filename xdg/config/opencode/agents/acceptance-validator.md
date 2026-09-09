@@ -13,6 +13,7 @@ permission:
   list: allow
   bash: allow
   task: deny
+  todowrite: deny
   webfetch: deny
   websearch: deny
   skill: deny
@@ -48,15 +49,13 @@ reference evidence for the MUSTs that need it.
 If policy is `internal` or `none`, do NOT invent an external authority
 requirement at validation time.
 
-Return exact:
-`ACCEPTANCE_PASS`
-only when all MUST checks pass.
-When returning PASS, return that exact bare token alone: no Markdown decoration,
-heading, emoji, or explanatory text.
+Only exact ACCEPTANCE_PASS means success. On success, your entire final response
+MUST be the exact bare text ACCEPTANCE_PASS, with no Markdown, emoji, heading,
+prefix, suffix, or explanatory text.
 
 Otherwise return:
 `ACCEPTANCE_FAIL`
-with the failing Axxx IDs and concise evidence.
+as the exact first line, followed by the failing Axxx IDs and concise evidence.
 
 <!-- V2.6.7c DOTDIR IO BEGIN -->
 ## `.opencode-v2` filesystem rule
