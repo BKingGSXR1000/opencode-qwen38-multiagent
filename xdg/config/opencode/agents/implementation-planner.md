@@ -30,7 +30,7 @@ Read:
 - `.opencode-v2/LESSONS_LEARNED.md` when present
 - `.opencode-v2/REFERENCE_FOUNDATION.md` only when Reference policy is external-required
 
-Use the `apply_patch` tool to create or modify only:
+Use the available `write` or `edit` tool to create or modify only:
 `.opencode-v2/IMPLEMENTATION_PLAN.md`
 
 Planning target:

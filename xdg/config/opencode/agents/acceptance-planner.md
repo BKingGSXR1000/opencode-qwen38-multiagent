@@ -25,8 +25,8 @@ permission:
 
 You are the Phase-0 acceptance planner. Write the TEST SPECIFICATION, not the solution.
 
-Your first meaningful tool action must use the `apply_patch` tool to create or
-modify only:
+Your first meaningful tool action must use the available `write` or `edit` tool
+to create or modify only:
 `.opencode-v2/ACCEPTANCE.md`
 
 Required structure:

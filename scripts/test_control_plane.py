@@ -196,7 +196,7 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         next(item for item in payload["data"] if item["name"] == "acceptance-planner")["permissions"][0]["resource"] = "*"
         self.assertTrue(agent_config_audit.audit_agents(payload))
 
-    def test_planners_can_edit_only_contract_artifacts(self):
+    def test_planners_use_available_file_tools_for_contract_artifacts(self):
         expected = {
             "acceptance-planner.md": ".opencode-v2/ACCEPTANCE.md",
             "implementation-planner.md": ".opencode-v2/IMPLEMENTATION_PLAN.md",
@@ -204,7 +204,8 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         for name, target in expected.items():
             text = (self.AGENTS / name).read_text()
             self.assertIn(f'    "{target}": allow', text, name)
-            self.assertIn("`apply_patch`", text, name)
+            self.assertIn("`write` or `edit`", text, name)
+            self.assertNotIn("`apply_patch`", text, name)
 
     def test_phase_ready_sentinels_are_guard_only(self):
         sentinels = ("ACCEPTANCE.ready", "IMPLEMENTATION_PLAN.ready")
