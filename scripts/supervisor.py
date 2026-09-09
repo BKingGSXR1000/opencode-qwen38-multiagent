@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import base64,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.parse,urllib.request
+import base64,fcntl,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.parse,urllib.request
 from pathlib import Path
+from control_state import ready_info as state_ready_info
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -46,14 +47,7 @@ def load_manifest():
     except Exception: return {}
 
 def ready_info(did):
-    if not PROJECT or not did: return {}
-    try:
-        p=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready"; d={}
-        for line in p.read_text().splitlines():
-            if "=" in line:
-                k,v=line.split("=",1); d[k.strip()]=v.strip()
-        return d if d.get("status")=="complete" and d.get("deliverable")==did and d.get("verified")=="true" else {}
-    except Exception: return {}
+    return state_ready_info(PROJECT,did) if PROJECT and did else {}
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
@@ -62,12 +56,35 @@ def load_attempts():
 def save_attempts(data):
     p=attempts_path(); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix(".tmp"); t.write_text(json.dumps(data,indent=2)+"\n"); os.replace(t,p)
 
-def record_attempt(sid,did):
+def claim_attempt(sid,did):
+    """Atomically reserve one of the three allowed attempts for an exact leaf.
+
+    Both the live HTTP dispatcher and persisted reconciliation call this helper.
+    A denied fourth attempt is never persisted, so a ready-file verifier can
+    never be poisoned by an impossible ledger count.
+    """
     with dispatch_lock:
-        data=load_attempts(); ent=data.setdefault("deliverables",{}).setdefault(did,{"sessions":[],"count":0})
-        if sid in ent["sessions"]:
-            session_task[sid]=(did,int(ent.get("count") or 0)); return int(ent.get("count") or 0)
-        n=int(ent.get("count") or 0)+1; ent["count"]=n; ent["sessions"].append(sid); save_attempts(data); session_task[sid]=(did,n); return n
+        p=attempts_path(); p.parent.mkdir(parents=True,exist_ok=True)
+        lock_path=p.with_name(p.name+".lock")
+        with lock_path.open("a+") as ledger_lock:
+            fcntl.flock(ledger_lock.fileno(),fcntl.LOCK_EX)
+            try:
+                data=load_attempts()
+                ent=data.setdefault("deliverables",{}).setdefault(did,{"sessions":[],"count":0})
+                sessions=ent.setdefault("sessions",[])
+                count=int(ent.get("count") or 0)
+                if sid in sessions:
+                    session_task[sid]=(did,count)
+                    return "existing",count
+                if count>=3:
+                    return "limit",count
+                count+=1; ent["count"]=count; sessions.append(sid)
+                data["owner"]="supervisor"
+                save_attempts(data)
+                session_task[sid]=(did,count)
+                return "claimed",count
+            finally:
+                fcntl.flock(ledger_lock.fileno(),fcntl.LOCK_UN)
 
 class OpenCodeHTTP:
     def __init__(self):
@@ -278,26 +295,51 @@ class OpenCodeHTTP:
                 pass
         return False
 
-    def prompt_async(self,sid,agent,text):
+    def start_lessons_session(self,text):
+        """Launch lessons in its own session via the current OpenCode2 API."""
         if not self.ensure():
-            return False
-        payload={"agent":agent,"parts":[{"type":"text","text":text}]}
-        qsid=urllib.parse.quote(sid)
-        for path in (
-            f"/api/session/{qsid}/prompt_async",
-            f"/session/{qsid}/prompt_async",
-        ):
-            try:
-                self.request("POST",path,payload=payload,timeout=4)
-                return True
-            except Exception:
-                pass
-        return False
+            return False,"http-not-connected"
+        try:
+            created=self.request(
+                "POST","/api/session",
+                payload={
+                    "agent":"lessons-learner",
+                    "location":PROJECT,
+                    "title":"V2 lessons retrospective",
+                },
+                timeout=8,
+            )
+            sid=created.get("id") if isinstance(created,dict) else ""
+            if not sid:
+                return False,"session-create-missing-id"
+            # OpenCode2's current route accepts text/files/agents and delivery;
+            # there is no prompt_async endpoint. A dedicated idle session makes
+            # steer immediate without consuming the root orchestrator budget.
+            self.request(
+                "POST",f"/api/session/{urllib.parse.quote(sid)}/prompt",
+                payload={"text":text,"delivery":"steer"},
+                timeout=12,
+            )
+            return True,sid
+        except Exception as e:
+            return False,repr(e)
 
 http=OpenCodeHTTP()
 
 def abort_session(sid,reason,agent=""):
     ok=http.interrupt(sid); kind="INTERRUPT" if ok else "INTERRUPT_FAILED"; log(f"{kind} session={sid} agent={agent} reason={reason}"); csv(kind,sid,agent,reason); return ok
+
+def watchdog_age(sid,key,can_watch,now=None):
+    """Advance a watchdog only for observable, unfinished no-tool output."""
+    now=time.monotonic() if now is None else now
+    st=watch.setdefault(sid,{"key":key,"start":None,"aborted_key":None})
+    if st["key"]!=key:
+        st["key"]=key; st["start"]=None; st["aborted_key"]=None
+    if can_watch and st["start"] is None:
+        st["start"]=now
+    elif not can_watch:
+        st["start"]=None
+    return (now-st["start"]) if st["start"] is not None else 0,st
 
 def message_shape(messages,session_info):
     # Normalize message order: API endpoints may return ascending or descending.
@@ -306,14 +348,19 @@ def message_shape(messages,session_info):
         if not isinstance(item,dict):
             continue
         info=item.get("info") if isinstance(item.get("info"),dict) else item
-        parts=item.get("parts") if isinstance(item.get("parts"),list) else item.get("content")
+        if isinstance(item.get("parts"),list):
+            parts=item["parts"]; parts_observable=bool(parts)
+        elif isinstance(item.get("content"),list):
+            parts=item["content"]; parts_observable=bool(parts)
+        else:
+            # The live endpoint can publish a message shell before it publishes
+            # its parts. That is unknown, not an empty completed response.
+            parts=[]; parts_observable=False
         if not isinstance(info,dict):
             continue
-        if not isinstance(parts,list):
-            parts=[]
         tm=info.get("time") if isinstance(info.get("time"),dict) else {}
         created=tm.get("created") if isinstance(tm.get("created"),(int,float)) else 0
-        normalized.append((created,idx,info,parts))
+        normalized.append((created,idx,info,parts,parts_observable))
     normalized.sort(key=lambda x:(x[0],x[1]))
 
     users=[x for x in normalized if x[2].get("role")=="user"]
@@ -322,7 +369,7 @@ def message_shape(messages,session_info):
     first_user=""
     user_agent=""
     if users:
-        _,_,uinfo,uparts=users[0]
+        _,_,uinfo,uparts,_=users[0]
         if isinstance(uinfo.get("agent"),str) and uinfo.get("agent"):
             user_agent=uinfo["agent"]
         first_user="\n".join(
@@ -345,7 +392,7 @@ def message_shape(messages,session_info):
             "assistant_completed":False,
         }
 
-    _,_,info,parts=assistants[-1]
+    _,_,info,parts,parts_observable=assistants[-1]
     last_tool=-1
     last_tool_id=""
     tool_running=False
@@ -377,7 +424,7 @@ def message_shape(messages,session_info):
         "agent":agent,"parent":parent,"directory":directory,"first_user":first_user,
         "message_id":info.get("id") or "","reasoning":reasoning,"text":text_chars,
         "tool_running":tool_running,"last_tool_id":last_tool_id,
-        "context_input":ci,"observable":True,"assistant_completed":completed,
+        "context_input":ci,"observable":parts_observable,"assistant_completed":completed,
     }
 
 def enforce_assignment(sid,agent,first_user):
@@ -421,8 +468,8 @@ def enforce_assignment(sid,agent,first_user):
         csv("DISPATCH_DENY",sid,agent,f"{did} already_complete")
         return
 
-    n=record_attempt(sid,did)
-    if n>3:
+    claim,n=claim_attempt(sid,did)
+    if claim=="limit":
         abort_session(sid,f"dispatch_guard attempt_limit deliverable={did} count={n}",agent)
         csv("DISPATCH_DENY",sid,agent,f"{did} attempt_limit={n}")
         return
@@ -517,9 +564,16 @@ def maybe_launch_lessons(active_sids,child_active):
     if time.time()-root_idle_since<5 or lessons_launch_attempts>=3: return
     prompt="Run the end-of-run retrospective now. Read project control/work/test/validation artifacts and prior lessons. Update .opencode-v2/LESSONS_LEARNED.md, write .opencode-v2/LESSONS_GLOBAL_CANDIDATES.md, then .opencode-v2/LESSONS.ready. Retrospective only; do not modify application code. Return LESSONS_READY."
     lessons_launch_attempts+=1
-    if http.prompt_async(root,"lessons-learner",prompt):
-        lessons_started=True; (ctrl/"LESSONS.launching").write_text(f"started={time.strftime('%Y-%m-%dT%H:%M:%S%z')}\nroot_session={root}\n"); log(f"LESSONS_EXTERNAL_START root_session={root}")
-    else: log(f"LESSONS_EXTERNAL_START_FAILED root_session={root} attempt={lessons_launch_attempts}")
+    ok,detail=http.start_lessons_session(prompt)
+    if ok:
+        lessons_started=True
+        (ctrl/"LESSONS.launching").write_text(
+            f"started={time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
+            f"root_session={root}\nlessons_session={detail}\n"
+        )
+        log(f"LESSONS_EXTERNAL_START root_session={root} lessons_session={detail}")
+    else:
+        log(f"LESSONS_EXTERNAL_START_FAILED root_session={root} attempt={lessons_launch_attempts} detail={detail}")
 
 def api_poll_loop():
     while True:
@@ -548,19 +602,6 @@ def api_poll_loop():
 
                 did,attempt=session_task.get(sid,("",0))
                 key=(shape["message_id"],shape["last_tool_id"])
-                st=watch.setdefault(
-                    sid,
-                    {"key":key,"start":time.monotonic(),"aborted_key":None}
-                )
-                if st["key"]!=key:
-                    st["key"]=key
-                    st["start"]=time.monotonic()
-                    st["aborted_key"]=None
-
-                age=time.monotonic()-st["start"]
-                reasoning=shape["reasoning"]
-                text_chars=shape["text"]
-
                 # Critical fail-open rule:
                 # /session/active can expose a running child before its current
                 # assistant message/parts become observable. Unknown is NOT
@@ -572,6 +613,10 @@ def api_poll_loop():
                     and not shape.get("assistant_completed")
                     and not shape["tool_running"]
                 )
+
+                age,st=watchdog_age(sid,key,can_watch)
+                reasoning=shape["reasoning"]
+                text_chars=shape["text"]
 
                 if can_watch and st["aborted_key"]!=key:
                     if agent=="implementation-planner":
@@ -641,7 +686,12 @@ def persisted_reconcile_loop():
                 if agent in IMPLEMENTATION_AGENTS and sid not in dispatch_seen:
                     did=parse_deliverable(first_user_text_db(sid)); leaves=(load_manifest().get("leaves") or {})
                     if re.fullmatch(r"D\d{3}",did or "") and did in leaves:
-                        n=record_attempt(sid,did); dispatch_seen.add(sid); log(f"DISPATCH_RECONCILE session={sid} agent={agent} deliverable={did} attempt={n}")
+                        claim,n=claim_attempt(sid,did); dispatch_seen.add(sid)
+                        if claim=="limit":
+                            abort_session(sid,f"dispatch_guard attempt_limit deliverable={did} count={n}",agent)
+                            csv("DISPATCH_DENY",sid,agent,f"{did} attempt_limit={n}")
+                        else:
+                            log(f"DISPATCH_RECONCILE session={sid} agent={agent} deliverable={did} attempt={n} claim={claim}")
                 prev=compaction_seen.get(sid,0)
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
