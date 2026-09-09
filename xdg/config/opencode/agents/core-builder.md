@@ -11,7 +11,9 @@ permission:
   glob: allow
   grep: allow
   list: allow
-  bash: allow
+  bash:
+    "*attempts.json*": deny
+    "*": allow
   task: deny
   webfetch: allow
   websearch: allow

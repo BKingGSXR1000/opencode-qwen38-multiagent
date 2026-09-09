@@ -564,7 +564,10 @@ def maybe_launch_lessons(active_sids,child_active):
     root=root_orchestrator_id()
     if not root: return
     if root in active_sids: root_seen_active=True; root_idle_since=None; return
-    if not root_seen_active: return
+    # A short root turn can finish between HTTP polls. Its durable session row
+    # is sufficient evidence that this run has started; retain the idle grace
+    # period below so a just-created turn can still become active.
+    if not root_seen_active: root_seen_active=True
     if child_active: root_idle_since=None; return
     if root_idle_since is None: root_idle_since=time.time(); return
     if time.time()-root_idle_since<5 or lessons_launch_attempts>=3: return
