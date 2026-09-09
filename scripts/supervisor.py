@@ -10,6 +10,7 @@ PROJECT=os.environ.get("V2_PROJECT","")
 START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
+PLANNER_CONTEXT_INPUT_CEILING=45000
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -364,6 +365,23 @@ def watchdog_age(sid,key,can_watch,now=None):
         st["start"]=None
     return (now-st["start"]) if st["start"] is not None else 0,st
 
+def planner_context_reason(agent,context_input,tool_running=False):
+    if agent!="implementation-planner" or tool_running:
+        return ""
+    if not isinstance(context_input,(int,float)):
+        return ""
+    if context_input<PLANNER_CONTEXT_INPUT_CEILING:
+        return ""
+    return (
+        f"planner_context_input={int(context_input)} "
+        f"ceiling={PLANNER_CONTEXT_INPUT_CEILING}"
+    )
+
+def watchdog_limits(agent):
+    if agent=="implementation-planner":
+        return 300,20000,20000
+    return HARD_SECONDS,HARD_REASONING_CHARS,HARD_TEXT_CHARS
+
 def message_shape(messages,session_info):
     # Normalize message order: API endpoints may return ascending or descending.
     normalized=[]
@@ -651,18 +669,18 @@ def api_poll_loop():
                 text_chars=shape["text"]
 
                 if can_watch and st["aborted_key"]!=key:
-                    if agent=="implementation-planner":
-                        hs,hr,ht=300,20000,20000
-                    else:
-                        hs,hr,ht=HARD_SECONDS,HARD_REASONING_CHARS,HARD_TEXT_CHARS
+                    hs,hr,ht=watchdog_limits(agent)
 
-                    reason=""
-                    if reasoning>=hr:
-                        reason=f"reasoning_chars={reasoning}"
-                    elif text_chars>=ht:
-                        reason=f"text_chars={text_chars}"
-                    elif age>=hs:
-                        reason=f"no_tool_age={int(age)}s"
+                    reason=planner_context_reason(
+                        agent,shape["context_input"],shape["tool_running"]
+                    )
+                    if not reason:
+                        if reasoning>=hr:
+                            reason=f"reasoning_chars={reasoning}"
+                        elif text_chars>=ht:
+                            reason=f"text_chars={text_chars}"
+                        elif age>=hs:
+                            reason=f"no_tool_age={int(age)}s"
 
                     if reason:
                         st["aborted_key"]=key

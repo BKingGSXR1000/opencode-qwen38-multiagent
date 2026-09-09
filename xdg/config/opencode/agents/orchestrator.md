@@ -60,9 +60,22 @@ Launch implementation-planner with a SHORT prompt:
 
 After it returns or is interrupted:
 - require actual `.opencode-v2/IMPLEMENTATION_PLAN.ready`
-- if missing, read `.opencode-v2/IMPLEMENTATION_PLAN.guard-errors.txt`
-- retry only through implementation-planner with this short repair prompt:
-  `Repair only .opencode-v2/IMPLEMENTATION_PLAN.md for the listed guard errors. Never create or request IMPLEMENTATION_PLAN.ready.`
+- if the plan is absent/incomplete, launch a FRESH implementation-planner using
+  exactly this reference-based prompt (do not include the original request or
+  inline plan/acceptance content):
+  `Continue implementation planning for this project.`
+  `Read .opencode-v2/ACCEPTANCE.md.`
+  `Read .opencode-v2/CONTROL_CONTRACT.md.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.`
+  `Continue from durable file state using your progressive planner protocol.`
+- if the completed plan was rejected, launch a FRESH implementation-planner
+  using exactly this repair prompt:
+  `Repair implementation planning for this project.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.md.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.guard-errors.txt.`
+  `Fix only the listed guard errors and follow your progressive planner protocol.`
+  `Never create or request IMPLEMENTATION_PLAN.ready.`
+- never request a shorter self-contained retry or an atomic end-of-session write
 - wait for the deterministic control guard to create the real sentinel
 - NEVER proceed merely because IMPLEMENTATION_PLAN.md has its marker or the model says ready
 

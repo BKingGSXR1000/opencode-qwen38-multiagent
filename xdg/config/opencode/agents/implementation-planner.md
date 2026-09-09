@@ -36,12 +36,34 @@ Use the available `write` or `edit` tool to create or modify only:
 
 Planning target:
 - roughly 8-20 genuine leaves as needed
-- about 250-450 lines; <=500 unless genuinely unavoidable
+- 150-300 lines preferred; 350 lines is a soft maximum
+- 400 physical lines is the hard protocol maximum
 - every final leaf S or M; recursively split L/XL
 - expose useful C2 parallelism with non-overlapping ownership
 - unknown dependency/API/import/runtime behavior gets an early S `probe-builder`
 - use reasoning-builder only for genuinely difficult algorithmic/math work
 - do not write application code
+
+## Progressive externalization — mandatory
+
+Do not compose or retain the whole final plan in model context and do not wait
+to write the complete file atomically at the end.
+
+1. Read `ACCEPTANCE.md` and `CONTROL_CONTRACT.md` first.
+2. Establish concise Dxxx names, ownership, dependencies, and waves, then use
+   `write` to create `IMPLEMENTATION_PLAN.md` EARLY as a durable skeleton. Omit
+   the completion marker while the document is incomplete.
+3. Use bounded `edit` calls to fill a few Dxxx sections at a time. Each leaf
+   contains only the required protocol fields plus concise implementation/test
+   details; do not add narrative essays.
+4. After each bounded batch, continue from the file. Reread only the section or
+   nearby dependency information needed for the next edit.
+5. Add the exact completion marker only after all sections and waves are
+   complete. The deterministic guard then validates the file.
+
+On a fresh continuation session, treat the existing plan file as the durable
+handoff: preserve completed sections, fill or correct only what remains, and do
+not regenerate the document from memory.
 
 <!-- V2.6.7c ROLE ALLOWLIST BEGIN -->
 ## Exact worker-role allowlist

@@ -11,6 +11,7 @@ AGENTS = ROOT / "xdg" / "config" / "opencode" / "agents"
 
 PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
 ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
+PLAN_MAX_LINES = 400
 
 FORBIDDEN_WRITE_ROLES = {
     "investigator",
@@ -312,6 +313,11 @@ def validate_plan(project: Path, finalize=False):
         errors.append("IMPLEMENTATION_PLAN.md missing")
     else:
         text = path.read_text(errors="replace")
+        line_count = len(text.splitlines())
+        if line_count > PLAN_MAX_LINES:
+            errors.append(
+                f"IMPLEMENTATION_PLAN.md has {line_count} lines; hard maximum is {PLAN_MAX_LINES}"
+            )
         if final_nonempty_line(text) != PLAN_MARKER:
             errors.append("final line is not exact IMPLEMENTATION_PLAN_COMPLETE marker")
         leaves, waves, parse_errors = parse_plan(text)

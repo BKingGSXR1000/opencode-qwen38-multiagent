@@ -66,6 +66,35 @@ class WatchdogShapeTests(unittest.TestCase):
         )
         self.assertTrue(shape["assistant_completed"])
 
+    def test_planner_has_reasoning_watchdog_and_input_context_ceiling(self):
+        self.assertEqual(
+            supervisor.watchdog_limits("implementation-planner"),
+            (300, 20000, 20000),
+        )
+        ceiling = supervisor.PLANNER_CONTEXT_INPUT_CEILING
+        self.assertEqual(ceiling, 45000)
+        self.assertEqual(
+            supervisor.planner_context_reason(
+                "implementation-planner", ceiling - 1
+            ),
+            "",
+        )
+        self.assertIn(
+            "planner_context_input=45000",
+            supervisor.planner_context_reason(
+                "implementation-planner", ceiling
+            ),
+        )
+        self.assertEqual(
+            supervisor.planner_context_reason(
+                "implementation-planner", ceiling, tool_running=True
+            ),
+            "",
+        )
+        self.assertEqual(
+            supervisor.planner_context_reason("implementer", ceiling), ""
+        )
+
 
 class AttemptLedgerTests(unittest.TestCase):
     def setUp(self):
@@ -251,6 +280,81 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         planner = (self.AGENTS / "implementation-planner.md").read_text()
         self.assertIn("Do not add a\nDxxx probe merely to discover control protocol", planner)
         self.assertIn("Never guess or use a fallback\nmanifest schema", planner)
+
+    def test_planner_progressively_externalizes_and_retries_by_reference(self):
+        planner = (self.AGENTS / "implementation-planner.md").read_text()
+        self.assertIn("Progressive externalization — mandatory", planner)
+        self.assertIn("create `IMPLEMENTATION_PLAN.md` EARLY", planner)
+        self.assertIn("Use bounded `edit` calls", planner)
+        self.assertIn("150-300 lines preferred", planner)
+        self.assertIn("400 physical lines is the hard protocol maximum", planner)
+        self.assertIn("do not wait\nto write the complete file atomically", planner)
+
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        retry_lines = (
+            "`Continue implementation planning for this project.`",
+            "`Read .opencode-v2/ACCEPTANCE.md.`",
+            "`Read .opencode-v2/CONTROL_CONTRACT.md.`",
+            "`Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.`",
+            "`Continue from durable file state using your progressive planner protocol.`",
+        )
+        positions = [root.index(line) for line in retry_lines]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("do not include the original request", root)
+        self.assertIn("never request a shorter self-contained retry", root)
+
+
+class ImplementationPlanSizeTests(unittest.TestCase):
+    GUARD = Path(__file__).with_name("control-guard.py")
+
+    def plan(self, lines):
+        prefix = """# Plan
+## Deliverables
+### D001 — Tests
+- Outcome: tests
+- Owned artifacts: .opencode-v2/TEST_CHECKS.json
+- Launch deps: (none)
+- Contract deps: (none)
+- Verify deps: (none)
+- Acceptance IDs: A001
+- Complexity: S
+- Deep reasoning: no
+- Role: tester
+- Parallel-safe with: (none)
+- Verify command: `python3 ~/AI/opencode-qwen38-multiagent-v2/scripts/run-checks.py --project .`
+- Done when: report passes
+## Execution Waves
+- Wave 1: D001
+""".splitlines()
+        filler = ["<!-- compact plan padding -->"] * (lines - len(prefix) - 1)
+        return "\n".join(prefix + filler + ["<!-- IMPLEMENTATION_PLAN_COMPLETE -->"]) + "\n"
+
+    def validate(self, project):
+        return subprocess.run(
+            [sys.executable, str(self.GUARD), "--project", str(project), "--finalize-plan"],
+            text=True,
+            capture_output=True,
+        )
+
+    def test_400_lines_is_accepted_and_401_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = Path(td) / ".opencode-v2"
+            ctrl.mkdir()
+            plan = ctrl / "IMPLEMENTATION_PLAN.md"
+            plan.write_text(self.plan(400))
+            accepted = self.validate(td)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertTrue((ctrl / "IMPLEMENTATION_PLAN.ready").exists())
+
+            (ctrl / "IMPLEMENTATION_PLAN.ready").unlink()
+            plan.write_text(self.plan(401))
+            rejected = self.validate(td)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(
+                "hard maximum is 400",
+                (ctrl / "IMPLEMENTATION_PLAN.guard-errors.txt").read_text(),
+            )
+            self.assertFalse((ctrl / "IMPLEMENTATION_PLAN.ready").exists())
 
 
 class TestChecksControlContractTests(unittest.TestCase):
