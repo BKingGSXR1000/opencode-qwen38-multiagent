@@ -8,7 +8,10 @@ Execution:
 - `execute`/CodeMode is disabled; use direct tools only.
 
 Control-plane authority:
-- Filesystem artifacts, not model statements or todowrite, decide state.
+- Filesystem artifacts, not model statements or optional UI mirroring, decide state.
+- TodoWrite UI mirroring is intentionally disabled for this OpenCode2 beta: live
+  runtime testing showed the tool is not materialized even when permission resolves
+  to allow. Revisit on a future OpenCode2 version.
 - Acceptance is complete only with valid `ACCEPTANCE.ready`; planning only with
   valid `IMPLEMENTATION_PLAN.ready`; leaves only with valid
   `.opencode-v2/work/Dxxx.ready`.

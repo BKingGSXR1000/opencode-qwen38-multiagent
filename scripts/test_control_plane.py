@@ -174,13 +174,10 @@ class DispatchPromptProtocolTests(unittest.TestCase):
 class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
     AGENTS = Path(__file__).parents[1] / "xdg/config/opencode/agents"
 
-    def test_root_todowrite_is_allowed_and_subagents_are_explicitly_denied(self):
+    def test_todowrite_ui_mirroring_is_intentionally_disabled(self):
         root = (self.AGENTS / "orchestrator.md").read_text()
-        self.assertRegex(root, r"(?m)^  todowrite: allow$")
-        for path in self.AGENTS.glob("*.md"):
-            if path.name == "orchestrator.md":
-                continue
-            self.assertRegex(path.read_text(), r"(?m)^  todowrite: deny$", path.name)
+        self.assertNotRegex(root, r"(?m)^  todowrite: allow$")
+        self.assertIn("TodoWrite UI mirroring is intentionally disabled", root)
 
     def test_resolved_permission_audit_requires_root_allow_and_worker_denies(self):
         editor_agents = {
@@ -188,17 +185,15 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             *agent_config_audit.PLANNER_EDIT_TARGETS,
         }
         payload = {"data": [
-            {"name": "orchestrator", "permissions": [{"action": "todowrite", "effect": "allow"}]},
             *[
                 {"name": name, "permissions": [
-                    {"action": "todowrite", "effect": "deny"},
                     {"action": "edit", "resource": agent_config_audit.PLANNER_EDIT_TARGETS.get(name, "*"), "effect": "allow"},
                 ]}
-                for name in sorted(editor_agents | agent_config_audit.IMPLEMENTATION_AGENTS)
+                for name in sorted(editor_agents)
             ],
         ]}
         self.assertEqual(agent_config_audit.audit_agents(payload), [])
-        next(item for item in payload["data"] if item["name"] == "implementer")["permissions"][0]["effect"] = "allow"
+        next(item for item in payload["data"] if item["name"] == "acceptance-planner")["permissions"][0]["resource"] = "*"
         self.assertTrue(agent_config_audit.audit_agents(payload))
 
     def test_planners_can_edit_only_contract_artifacts(self):
@@ -210,13 +205,6 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             text = (self.AGENTS / name).read_text()
             self.assertIn(f'    "{target}": allow', text, name)
             self.assertIn("`apply_patch`", text, name)
-
-    def test_todowrite_prompt_uses_exact_runtime_name(self):
-        text = (self.AGENTS / "orchestrator.md").read_text()
-        self.assertIn("exact built-in tool name `todowrite`", text)
-        self.assertNotIn("TODO UI MIRROR", text)
-        self.assertNotIn("TodoWrite", text)
-        self.assertNotRegex(text, r"(?im)^(?!.*Never invoke).*\b(?:use|call|invoke)\s+`?todo`?")
 
     def test_phase_ready_sentinels_are_guard_only(self):
         sentinels = ("ACCEPTANCE.ready", "IMPLEMENTATION_PLAN.ready")

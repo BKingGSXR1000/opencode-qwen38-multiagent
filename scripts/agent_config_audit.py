@@ -8,10 +8,6 @@ import sys
 import urllib.request
 
 
-IMPLEMENTATION_AGENTS = {
-    "probe-builder", "implementer", "core-builder", "feature-builder",
-    "reasoning-builder", "integrator", "tester", "test-builder",
-}
 PLANNER_EDIT_TARGETS = {
     "acceptance-planner": ".opencode-v2/ACCEPTANCE.md",
     "implementation-planner": ".opencode-v2/IMPLEMENTATION_PLAN.md",
@@ -21,14 +17,6 @@ WRITER_AGENTS = {
     "reasoning-builder", "integrator", "test-builder", "state-writer",
     "reference-researcher", "acceptance-validator", "lessons-learner",
 }
-
-
-def permission_effects(agent, action):
-    return {
-        item.get("effect")
-        for item in agent.get("permissions", [])
-        if item.get("action") == action
-    }
 
 
 def permission_resources(agent, action, effect):
@@ -43,11 +31,6 @@ def audit_agents(payload):
     agents = payload.get("data", payload) if isinstance(payload, dict) else payload
     by_name = {agent.get("name"): agent for agent in agents if isinstance(agent, dict)}
     errors = []
-    if permission_effects(by_name.get("orchestrator", {}), "todowrite") != {"allow"}:
-        errors.append("orchestrator todowrite must resolve to allow")
-    for name in sorted(IMPLEMENTATION_AGENTS):
-        if permission_effects(by_name.get(name, {}), "todowrite") != {"deny"}:
-            errors.append(f"{name} todowrite must resolve to deny")
     for name, target in PLANNER_EDIT_TARGETS.items():
         allowed = permission_resources(by_name.get(name, {}), "edit", "allow")
         if allowed != {target}:
@@ -78,7 +61,7 @@ def main():
     if errors:
         print("AGENT_CONFIG_AUDIT_FAIL: " + "; ".join(errors), file=sys.stderr)
         return 2
-    print("AGENT_CONFIG_AUDIT_PASS: root=todowrite:allow workers=todowrite:deny planners=edit-targeted writers=edit-enabled")
+    print("AGENT_CONFIG_AUDIT_PASS: planners=edit-targeted writers=edit-enabled")
     return 0
 
 
