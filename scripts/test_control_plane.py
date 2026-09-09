@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -128,6 +130,34 @@ class LessonsApiTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][2]["agent"], "lessons-learner")
         self.assertEqual(fake.calls[1][0:2], ("POST", "/api/session/lessons-1/prompt"))
         self.assertEqual(fake.calls[1][2], {"text": "retrospective", "delivery": "steer"})
+
+
+class AcceptanceEvidenceTests(unittest.TestCase):
+    def test_nonzero_required_executable_can_never_finalize_as_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = Path(td) / ".opencode-v2"
+            ctrl.mkdir()
+            (ctrl / "ACCEPTANCE.md").write_text(
+                "# Acceptance Contract\n- [ ] A001: command-backed requirement\n"
+            )
+            report = {
+                "result": "PASS",
+                "checks": [{
+                    "id": "A001", "status": "PASS", "evidence": "validator prose",
+                    "required_executable": True, "command": "false", "exit_code": 1,
+                }],
+            }
+            (ctrl / "acceptance-report.json").write_text(json.dumps(report))
+            finalizer = Path(__file__).with_name("finalize-acceptance.py")
+            failed = subprocess.run([sys.executable, str(finalizer), td], text=True, capture_output=True)
+            self.assertEqual(failed.returncode, 2)
+            self.assertIn("A001=executable-exit-1", failed.stderr)
+            self.assertFalse((ctrl / "acceptance-pass.json").exists())
+            report["checks"][0]["exit_code"] = 0
+            (ctrl / "acceptance-report.json").write_text(json.dumps(report))
+            passed = subprocess.run([sys.executable, str(finalizer), td], text=True, capture_output=True)
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertTrue((ctrl / "acceptance-pass.json").exists())
 
 
 if __name__ == "__main__":
