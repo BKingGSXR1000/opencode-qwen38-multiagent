@@ -9,6 +9,7 @@ LOG=ROOT/"logs"/"supervisor-events.log"; CSV=ROOT/"logs"/"supervisor-events.csv"
 PROJECT=os.environ.get("V2_PROJECT","")
 START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
+MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -37,9 +38,15 @@ def first_user_text_db(sid):
 def parse_deliverable(text):
     if not text: return ""
     m=re.search(r"(?mi)^\s*DELIVERABLE\s*:\s*(D\d{3})\s*$",text)
-    if m: return m.group(1)
-    m=re.search(r"(?<![A-Za-z0-9_-])(D\d{3})(?![A-Za-z0-9_-])",text)
     return m.group(1) if m else ""
+
+def implementation_prompt_violation(text):
+    """Return a dispatch-protocol violation for an implementation prompt."""
+    if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
+        return f"oversized_first_user_prompt chars={len(text)} max={MAX_IMPLEMENTATION_PROMPT_CHARS}"
+    if not parse_deliverable(text):
+        return "missing_exact_DELIVERABLE_Dxxx"
+    return ""
 
 def load_manifest():
     if not PROJECT: return {}
@@ -78,7 +85,17 @@ def claim_attempt(sid,did):
                 data=load_attempts()
                 ent=data.setdefault("deliverables",{}).setdefault(did,{"sessions":[],"count":0})
                 sessions=ent.setdefault("sessions",[])
-                count=int(ent.get("count") or 0)
+                try:
+                    count=int(ent.get("count") or 0)
+                except (TypeError,ValueError):
+                    session_task.pop(sid,None)
+                    return "invalid",-1
+                # Do this before existing-session reconciliation. A corrupt
+                # persisted count is invalid state, never an already-claimed
+                # fourth attempt, and supervisors must not repair it.
+                if count<0 or count>3:
+                    session_task.pop(sid,None)
+                    return "invalid",count
                 if sid in sessions:
                     session_task[sid]=(did,count)
                     return "existing",count
@@ -443,12 +460,17 @@ def enforce_assignment(sid,agent,first_user):
     if not text:
         return
 
-    did=parse_deliverable(text)
-    if not re.fullmatch(r"D\d{3}",did or ""):
-        log(f"DISPATCH_PENDING_ID session={sid} agent={agent} prompt_seen=1 no_exact_Dxxx")
+    violation=implementation_prompt_violation(text)
+    if violation:
+        dispatch_seen.add(sid)
+        abort_session(sid,f"dispatch_protocol_violation {violation}",agent)
+        log(f"DISPATCH_DENY session={sid} agent={agent} {violation}")
+        csv("DISPATCH_DENY",sid,agent,violation)
         return
 
-    # Only consume dispatch_seen once the exact planned ID is observable.
+    did=parse_deliverable(text)
+
+    # Consume dispatch_seen only after the prompt protocol is validated.
     dispatch_seen.add(sid)
 
     ctrl=Path(PROJECT)/".opencode-v2" if PROJECT else None
@@ -475,9 +497,10 @@ def enforce_assignment(sid,agent,first_user):
         return
 
     claim,n=claim_attempt(sid,did)
-    if claim=="limit":
-        abort_session(sid,f"dispatch_guard attempt_limit deliverable={did} count={n}",agent)
-        csv("DISPATCH_DENY",sid,agent,f"{did} attempt_limit={n}")
+    if claim in {"limit","invalid"}:
+        reason="attempt_limit" if claim=="limit" else "attempt_ledger_invalid"
+        abort_session(sid,f"dispatch_guard {reason} deliverable={did} count={n}",agent)
+        csv("DISPATCH_DENY",sid,agent,f"{did} {reason}={n}")
         return
 
     log(f"DISPATCH_ALLOW session={sid} agent={agent} deliverable={did} attempt={n}")
@@ -693,14 +716,7 @@ def persisted_reconcile_loop():
             con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction') FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
             for sid,agent,comps in rows:
                 if agent in IMPLEMENTATION_AGENTS and sid not in dispatch_seen:
-                    did=parse_deliverable(first_user_text_db(sid)); leaves=(load_manifest().get("leaves") or {})
-                    if re.fullmatch(r"D\d{3}",did or "") and did in leaves:
-                        claim,n=claim_attempt(sid,did); dispatch_seen.add(sid)
-                        if claim=="limit":
-                            abort_session(sid,f"dispatch_guard attempt_limit deliverable={did} count={n}",agent)
-                            csv("DISPATCH_DENY",sid,agent,f"{did} attempt_limit={n}")
-                        else:
-                            log(f"DISPATCH_RECONCILE session={sid} agent={agent} deliverable={did} attempt={n} claim={claim}")
+                    enforce_assignment(sid,agent,first_user_text_db(sid))
                 prev=compaction_seen.get(sid,0)
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))

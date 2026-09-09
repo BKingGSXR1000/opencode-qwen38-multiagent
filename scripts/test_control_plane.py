@@ -8,6 +8,7 @@ from pathlib import Path
 
 import control_state
 import supervisor
+import agent_config_audit
 
 
 def message(parts=None, completed=None):
@@ -68,11 +69,14 @@ class WatchdogShapeTests(unittest.TestCase):
 class AttemptLedgerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.old_root = supervisor.ROOT
         self.old_project = supervisor.PROJECT
+        supervisor.ROOT = Path(self.tmp.name)
         supervisor.PROJECT = self.tmp.name
         supervisor.session_task.clear()
 
     def tearDown(self):
+        supervisor.ROOT = self.old_root
         supervisor.PROJECT = self.old_project
         self.tmp.cleanup()
 
@@ -88,6 +92,118 @@ class AttemptLedgerTests(unittest.TestCase):
         self.assertEqual(ledger["owner"], "supervisor")
         self.assertEqual(ledger["deliverables"]["D005"]["count"], 3)
         self.assertEqual(len(ledger["deliverables"]["D005"]["sessions"]), 3)
+
+    def test_existing_session_with_count_four_is_invalid_and_not_repaired(self):
+        ledger_path = Path(self.tmp.name) / ".opencode-v2/work/attempts.json"
+        ledger_path.parent.mkdir(parents=True)
+        original = {
+            "owner": "supervisor",
+            "deliverables": {"D005": {"count": 4, "sessions": ["old-session"]}},
+        }
+        ledger_path.write_text(json.dumps(original))
+        self.assertEqual(supervisor.claim_attempt("old-session", "D005"), ("invalid", 4))
+        self.assertNotIn("old-session", supervisor.session_task)
+        self.assertEqual(json.loads(ledger_path.read_text()), original)
+
+    def test_existing_count_four_is_blocked_by_dispatch(self):
+        ledger_path = Path(self.tmp.name) / ".opencode-v2/work/attempts.json"
+        ledger_path.parent.mkdir(parents=True)
+        ledger_path.write_text(json.dumps({
+            "owner": "supervisor",
+            "deliverables": {"D005": {"count": 4, "sessions": ["old-session"]}},
+        }))
+        old_plan_ready = supervisor.plan_ready
+        old_load_manifest = supervisor.load_manifest
+        old_ready_info = supervisor.ready_info
+        old_abort = supervisor.abort_session
+        aborts = []
+        try:
+            supervisor.plan_ready = lambda: True
+            supervisor.load_manifest = lambda: {"leaves": {"D005": {"launch_deps": []}}}
+            supervisor.ready_info = lambda did: {}
+            supervisor.abort_session = lambda sid, reason, agent="": aborts.append((sid, reason, agent))
+            supervisor.dispatch_seen.clear()
+            supervisor.enforce_assignment("old-session", "implementer", "DELIVERABLE: D005")
+        finally:
+            supervisor.plan_ready = old_plan_ready
+            supervisor.load_manifest = old_load_manifest
+            supervisor.ready_info = old_ready_info
+            supervisor.abort_session = old_abort
+            supervisor.dispatch_seen.clear()
+        self.assertEqual(len(aborts), 1)
+        self.assertIn("attempt_ledger_invalid", aborts[0][1])
+
+
+class DispatchPromptProtocolTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_root = supervisor.ROOT
+        self.old_project = supervisor.PROJECT
+        self.old_abort = supervisor.abort_session
+        supervisor.ROOT = Path(self.tmp.name)
+        supervisor.PROJECT = self.tmp.name
+        supervisor.dispatch_seen.clear()
+        self.aborts = []
+        supervisor.abort_session = lambda sid, reason, agent="": self.aborts.append((sid, reason, agent))
+
+    def tearDown(self):
+        supervisor.ROOT = self.old_root
+        supervisor.PROJECT = self.old_project
+        supervisor.abort_session = self.old_abort
+        supervisor.dispatch_seen.clear()
+        self.tmp.cleanup()
+
+    def test_short_exact_prompt_is_valid(self):
+        prompt = (
+            "DELIVERABLE: D005\n"
+            "Read your D005 section in .opencode-v2/IMPLEMENTATION_PLAN.md.\n"
+            "Read .opencode-v2/work/D005.progress.md if present.\n"
+            "Continue from current project state and execute the deliverable."
+        )
+        self.assertEqual(supervisor.implementation_prompt_violation(prompt), "")
+        self.assertEqual(supervisor.parse_deliverable(prompt), "D005")
+
+    def test_oversized_prompt_is_rejected_before_dispatch(self):
+        prompt = "DELIVERABLE: D005\n" + ("x" * supervisor.MAX_IMPLEMENTATION_PROMPT_CHARS)
+        supervisor.enforce_assignment("oversized", "implementer", prompt)
+        self.assertEqual(len(self.aborts), 1)
+        self.assertIn("oversized_first_user_prompt", self.aborts[0][1])
+        self.assertIn("oversized", supervisor.dispatch_seen)
+
+
+class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
+    AGENTS = Path(__file__).parents[1] / "xdg/config/opencode/agents"
+
+    def test_root_todowrite_is_allowed_and_subagents_are_explicitly_denied(self):
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        self.assertRegex(root, r"(?m)^  todowrite: allow$")
+        for path in self.AGENTS.glob("*.md"):
+            if path.name == "orchestrator.md":
+                continue
+            self.assertRegex(path.read_text(), r"(?m)^  todowrite: deny$", path.name)
+
+    def test_resolved_permission_audit_requires_root_allow_and_worker_denies(self):
+        payload = {"data": [
+            {"name": "orchestrator", "permissions": [{"action": "todowrite", "effect": "allow"}]},
+            *[
+                {"name": name, "permissions": [{"action": "todowrite", "effect": "deny"}]}
+                for name in agent_config_audit.IMPLEMENTATION_AGENTS
+            ],
+        ]}
+        self.assertEqual(agent_config_audit.audit_agents(payload), [])
+        payload["data"][1]["permissions"][0]["effect"] = "allow"
+        self.assertTrue(agent_config_audit.audit_agents(payload))
+
+    def test_success_output_protocol_is_unconditional_and_bare(self):
+        required = (
+            "On success, your entire final response\n"
+            "MUST be the exact bare text ACCEPTANCE_PASS, with no Markdown, emoji, heading,"
+        )
+        for name in ("orchestrator.md", "acceptance-validator.md"):
+            text = (self.AGENTS / name).read_text()
+            self.assertIn(required, text, name)
+            self.assertNotIn("When success is required", text, name)
+            self.assertNotIn("**ACCEPTANCE_PASS**", text, name)
 
 
 class StatusTests(unittest.TestCase):
