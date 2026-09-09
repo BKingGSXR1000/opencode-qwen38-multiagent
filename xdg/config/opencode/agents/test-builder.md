@@ -46,8 +46,8 @@ If resumed after an interrupt:
 V2.4 DIRECT TOOL RULE:
 - NEVER use `execute` / CodeMode.
 - NEVER call `search` or `shell.exec`; those are not valid direct tools here.
-- Use the normal OpenCode tools directly: `read`, `glob`, `grep`, `bash`,
-  `write`/`edit`/`apply_patch` as available.
+- Use the normal OpenCode tools directly: `read`, `glob`, `grep`, `bash`, and
+  `apply_patch` for file modifications.
 - If a tool name is rejected once, do not retry or follow an error suggestion
   that says to use `search`.
 

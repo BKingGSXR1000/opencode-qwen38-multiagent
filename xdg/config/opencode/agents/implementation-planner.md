@@ -7,7 +7,7 @@ permission:
   read: allow
   edit:
     "*": deny
-    ".opencode-v2/**": allow
+    ".opencode-v2/IMPLEMENTATION_PLAN.md": allow
   glob: allow
   grep: allow
   list: allow
@@ -30,7 +30,7 @@ Read:
 - `.opencode-v2/LESSONS_LEARNED.md` when present
 - `.opencode-v2/REFERENCE_FOUNDATION.md` only when Reference policy is external-required
 
-Write:
+Use the `apply_patch` tool to create or modify only:
 `.opencode-v2/IMPLEMENTATION_PLAN.md`
 
 Planning target:
@@ -113,7 +113,8 @@ Make the FINAL non-empty line exactly:
 `<!-- IMPLEMENTATION_PLAN_COMPLETE -->`
 
 STOP after writing the plan.
-Do NOT write IMPLEMENTATION_PLAN.ready. The deterministic guard owns it.
+Never create, modify, or request `IMPLEMENTATION_PLAN.ready`. The deterministic
+control guard is its sole owner.
 
 <!-- V2.6.7c DOTDIR IO BEGIN -->
 ## `.opencode-v2` filesystem rule

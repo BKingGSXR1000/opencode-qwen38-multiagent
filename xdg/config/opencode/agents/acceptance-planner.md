@@ -9,7 +9,7 @@ permission:
     ".opencode-v2/**": allow
   edit:
     "*": deny
-    ".opencode-v2/**": allow
+    ".opencode-v2/ACCEPTANCE.md": allow
   glob: deny
   grep: deny
   list: deny
@@ -25,7 +25,8 @@ permission:
 
 You are the Phase-0 acceptance planner. Write the TEST SPECIFICATION, not the solution.
 
-Your first meaningful tool action should write:
+Your first meaningful tool action must use the `apply_patch` tool to create or
+modify only:
 `.opencode-v2/ACCEPTANCE.md`
 
 Required structure:
@@ -56,7 +57,8 @@ Make the FINAL non-empty line exactly:
 `<!-- ACCEPTANCE_COMPLETE -->`
 
 STOP after writing that file.
-Do NOT write ACCEPTANCE.ready. The deterministic guard owns it.
+Never create, modify, or request `ACCEPTANCE.ready`. The deterministic
+control guard is its sole owner.
 
 <!-- V2.6.7c DOTDIR IO BEGIN -->
 ## `.opencode-v2` filesystem rule
