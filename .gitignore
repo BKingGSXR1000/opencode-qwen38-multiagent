@@ -1,0 +1,33 @@
+# OpenCode runtime/state
+runtime/
+logs/
+backups/
+
+xdg/cache/
+xdg/data/
+xdg/state/
+
+# Databases / runtime files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+.env
+.env.*
+api_key.txt
+*api_key*
+*password*
+*secret*
+
+# Temporary/editor files
+*.tmp
+*.swp
+*~
+.DS_Store

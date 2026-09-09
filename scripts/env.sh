@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+export MA_ROOT="/home/bking/AI/opencode-qwen38-multiagent-v2"
+export MA_PROJECT="/home/bking/AI/opencode-qwen38-multiagent-v2/project/VideoIntelligence"
+export MA_SYV_REPO="/home/bking/AI/qwen38-27b-rtx3090-syv"
+export MA_PORT="18030"
+export MA_GPU_INDEX="0"
+export XDG_CONFIG_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/config"
+export XDG_DATA_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/data"
+export XDG_CACHE_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/cache"
+export XDG_STATE_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/state"
+export OPENCODE2_BIN="/home/bking/AI/opencode-qwen38-multiagent-v2/runtime/opencode2/bin/opencode2"
+if [[ -s "/home/bking/AI/qwen38-27b-rtx3090-syv/api_key.txt" ]]; then
+  export VLLM_API_KEY="$(tr -d '\r\n' < "/home/bking/AI/qwen38-27b-rtx3090-syv/api_key.txt")"
+else
+  export VLLM_API_KEY="local-multiagent-test"
+fi
+
+# Project-independent multi-agent definitions.
+# OpenCode loads this custom config directory after project .opencode config.
+
+# --- V2 A/B isolation overrides ---
+export XDG_CONFIG_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/config"
+export XDG_DATA_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/data"
+export XDG_CACHE_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/cache"
+export XDG_STATE_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/state"
+
+# --- BEGIN V2.1 AUTO MODE ---
+export OPENCODE2_BIN="/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/opencode2-auto.sh"
+# --- END V2.1 AUTO MODE ---

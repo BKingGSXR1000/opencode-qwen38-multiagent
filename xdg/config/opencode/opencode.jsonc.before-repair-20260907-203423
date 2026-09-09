@@ -1,0 +1,50 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "model": "syv/qwen38",
+  "default_agent": "orchestrator",
+
+  "providers": {
+    "syv": {
+      "name": "Local Qwen3.8-27B SYV",
+      "env": ["VLLM_API_KEY"],
+
+      "package": "aisdk:@ai-sdk/openai-compatible",
+
+      "settings": {
+        "baseURL": "http://127.0.0.1:18030/v1",
+        "apiKey": "{env:VLLM_API_KEY}"
+      },
+
+      "models": {
+        "qwen38": {
+          "modelID": "qwen3.8-27b",
+          "name": "Qwen3.8-27B SYV MTP",
+
+          "capabilities": {
+            "tools": true,
+            "input": ["text"],
+            "output": ["text"]
+          },
+
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+
+  "agents": {
+    "title": {
+      "model": "syv/qwen38"
+    },
+    "summary": {
+      "model": "syv/qwen38"
+    },
+    "compaction": {
+      "model": "syv/qwen38"
+    }
+  }
+}

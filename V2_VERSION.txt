@@ -1,0 +1,30 @@
+Qwen3.8 OpenCode Multi-Agent V2.6.0
+patched=2026-09-08T21:53:16+02:00
+
+Architecture:
+- acceptance-planner = WHAT must be true
+- implementation-planner = HOW to decompose/sequence/resource-classify work
+- orchestrator = execute plan/state machine, not project architect
+- workers = implementation
+- supervisor = enforcement
+- reference-researcher = independent external truth when required
+- acceptance-validator = verification
+
+Included changes that were NOT separately applied from V2.5.5/5.6/5.7:
+- reasoning-builder: dedicated 49,152 context / 4,096 output profile
+- reasoning-builder writes primary artifact early
+- retry budget per Dxxx deliverable, not per role
+- 2 full attempts + at most 1 genuinely narrower salvage attempt
+- generic core-capability/external-runtime boundary
+- pre-validation IMPLEMENTATION_READY gate
+- no validation/reference work when no runnable candidate exists
+
+Implementation planner:
+- dedicated 32,768 context / 4,096 output reasoning-capable profile
+- writes .opencode-v2/IMPLEMENTATION_PLAN.md
+- decomposes deliverables/dependencies/waves/file ownership
+- estimates context class S/M/L/XL for future GPU-aware scheduling
+- no web, no shell, no application edits
+
+Existing V2.5.4 supervisor singleton, validation contexts, compaction rule and
+60s/120s/8K watchdog remain unchanged.
