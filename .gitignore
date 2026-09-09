@@ -1,4 +1,4 @@
-# OpenCode runtime/state
+# Runtime / state
 runtime/
 logs/
 backups/
@@ -7,7 +7,7 @@ xdg/cache/
 xdg/data/
 xdg/state/
 
-# Databases / runtime files
+# Databases
 *.db
 *.db-shm
 *.db-wal
@@ -26,7 +26,7 @@ api_key.txt
 *password*
 *secret*
 
-# Temporary/editor files
+# Temp/editor
 *.tmp
 *.swp
 *~
