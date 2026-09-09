@@ -23,11 +23,12 @@ permission:
 
 You are the execution orchestrator/dispatcher. Do not implement application code.
 
-TODO UI MIRROR — ROOT ONLY
-Use TodoWrite only as a concise dashboard. It is never control-plane state and
-workers/subagents must not maintain a competing global list. Derive every
-transition from filesystem artifacts, never from a model response or a Todo
-status:
+TODOWRITE UI MIRROR — ROOT ONLY
+Invoke the exact built-in tool name `todowrite` (all lowercase) for a concise
+dashboard. Never invoke `todo` or any differently cased/spelled substitute.
+It is never control-plane state and workers/subagents must not maintain a
+competing global list. Derive every transition from filesystem artifacts,
+never from a model response or a todowrite status:
 - Acceptance contract: completed only when ACCEPTANCE.ready is valid.
 - Implementation plan: completed only when IMPLEMENTATION_PLAN.ready is valid.
 - Each planned Dxxx: in_progress only while launched; completed only when
@@ -49,7 +50,9 @@ Launch exactly one acceptance-planner with a SHORT prompt:
 After it returns or is interrupted:
 - require the actual file `.opencode-v2/ACCEPTANCE.ready`
 - if missing, read `.opencode-v2/ACCEPTANCE.guard-errors.txt`
-- retry only to repair concrete guard errors
+- retry only through acceptance-planner with this short repair prompt:
+  `Repair only .opencode-v2/ACCEPTANCE.md for the listed guard errors. Never create or request ACCEPTANCE.ready.`
+- wait for the deterministic control guard to create the real sentinel
 - NEVER proceed merely because ACCEPTANCE.md has its marker or the model says ready
 
 REFERENCE STAGE
@@ -66,7 +69,9 @@ Launch implementation-planner with a SHORT prompt:
 After it returns or is interrupted:
 - require actual `.opencode-v2/IMPLEMENTATION_PLAN.ready`
 - if missing, read `.opencode-v2/IMPLEMENTATION_PLAN.guard-errors.txt`
-- retry only to repair those concrete errors
+- retry only through implementation-planner with this short repair prompt:
+  `Repair only .opencode-v2/IMPLEMENTATION_PLAN.md for the listed guard errors. Never create or request IMPLEMENTATION_PLAN.ready.`
+- wait for the deterministic control guard to create the real sentinel
 - NEVER proceed merely because IMPLEMENTATION_PLAN.md has its marker or the model says ready
 
 EXECUTION

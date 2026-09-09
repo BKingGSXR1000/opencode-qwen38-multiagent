@@ -183,16 +183,52 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             self.assertRegex(path.read_text(), r"(?m)^  todowrite: deny$", path.name)
 
     def test_resolved_permission_audit_requires_root_allow_and_worker_denies(self):
+        editor_agents = {
+            *agent_config_audit.WRITER_AGENTS,
+            *agent_config_audit.PLANNER_EDIT_TARGETS,
+        }
         payload = {"data": [
             {"name": "orchestrator", "permissions": [{"action": "todowrite", "effect": "allow"}]},
             *[
-                {"name": name, "permissions": [{"action": "todowrite", "effect": "deny"}]}
-                for name in agent_config_audit.IMPLEMENTATION_AGENTS
+                {"name": name, "permissions": [
+                    {"action": "todowrite", "effect": "deny"},
+                    {"action": "edit", "resource": agent_config_audit.PLANNER_EDIT_TARGETS.get(name, "*"), "effect": "allow"},
+                ]}
+                for name in sorted(editor_agents | agent_config_audit.IMPLEMENTATION_AGENTS)
             ],
         ]}
         self.assertEqual(agent_config_audit.audit_agents(payload), [])
-        payload["data"][1]["permissions"][0]["effect"] = "allow"
+        next(item for item in payload["data"] if item["name"] == "implementer")["permissions"][0]["effect"] = "allow"
         self.assertTrue(agent_config_audit.audit_agents(payload))
+
+    def test_planners_can_edit_only_contract_artifacts(self):
+        expected = {
+            "acceptance-planner.md": ".opencode-v2/ACCEPTANCE.md",
+            "implementation-planner.md": ".opencode-v2/IMPLEMENTATION_PLAN.md",
+        }
+        for name, target in expected.items():
+            text = (self.AGENTS / name).read_text()
+            self.assertIn(f'    "{target}": allow', text, name)
+            self.assertIn("`apply_patch`", text, name)
+
+    def test_todowrite_prompt_uses_exact_runtime_name(self):
+        text = (self.AGENTS / "orchestrator.md").read_text()
+        self.assertIn("exact built-in tool name `todowrite`", text)
+        self.assertNotIn("TODO UI MIRROR", text)
+        self.assertNotIn("TodoWrite", text)
+        self.assertNotRegex(text, r"(?im)^(?!.*Never invoke).*\b(?:use|call|invoke)\s+`?todo`?")
+
+    def test_phase_ready_sentinels_are_guard_only(self):
+        sentinels = ("ACCEPTANCE.ready", "IMPLEMENTATION_PLAN.ready")
+        for path in self.AGENTS.glob("*.md"):
+            for line in path.read_text().splitlines():
+                if not any(sentinel in line for sentinel in sentinels):
+                    continue
+                if any(word in line.lower() for word in ("write", "create", "modify", "request")):
+                    self.assertRegex(line, r"(?i)\b(?:never|do not)\b", f"{path.name}: {line}")
+        guard = (Path(__file__).with_name("control-guard.py")).read_text()
+        self.assertIn('ready = ctrl / "ACCEPTANCE.ready"', guard)
+        self.assertIn('ready = ctrl / "IMPLEMENTATION_PLAN.ready"', guard)
 
     def test_success_output_protocol_is_unconditional_and_bare(self):
         required = (
