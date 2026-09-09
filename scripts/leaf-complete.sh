@@ -11,7 +11,7 @@ GUARD=".opencode-v2/IMPLEMENTATION_PLAN.guard.json"
 ATTEMPTS=".opencode-v2/work/attempts.json"
 [[ -f "$GUARD" ]] || { echo "ERROR: validated plan manifest missing" >&2; exit 2; }
 [[ -f "$ATTEMPTS" ]] || { echo "ERROR: attempt ledger missing" >&2; exit 2; }
-readarray -t META < <(python3 - "$GUARD" "$ATTEMPTS" "$DID" <<'PY'
+META_TEXT="$(python3 - "$GUARD" "$ATTEMPTS" "$DID" <<'PY'
 import json,sys
 g=json.load(open(sys.argv[1])); a=json.load(open(sys.argv[2])); did=sys.argv[3]
 leaf=(g.get("leaves") or {}).get(did)
@@ -23,7 +23,8 @@ attempt=int(ent.get("count") or 0)
 if attempt < 1 or attempt > 3: raise SystemExit(f"ERROR: invalid attempt count {attempt}")
 print(attempt); print(cmd)
 PY
-)
+)" || exit $?
+readarray -t META <<<"$META_TEXT"
 ATTEMPT="${META[0]}"
 VERIFY_CMD="${META[1]}"
 echo "=== ${DID} deterministic verification (attempt ${ATTEMPT}) ==="
