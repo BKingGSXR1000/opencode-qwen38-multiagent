@@ -5,7 +5,9 @@ model: syv/qwen38-worker-nothink
 steps: 18
 permission:
   read: allow
-  edit: allow
+  edit:
+    ".opencode-v2/work/attempts.json": deny
+    "*": allow
   glob: allow
   grep: allow
   list: allow
@@ -33,7 +35,7 @@ implementation begins.
 Maintain `.opencode-v2/work/Dxxx.progress.md` when useful.
 
 Your FINAL meaningful tool call must be:
-`~/AI/opencode-qwen38-multiagent-v2/scripts/leaf-complete.sh Dxxx N -- bash -lc '<real probe/Done-when verification>'`
+`~/AI/opencode-qwen38-multiagent-v2/scripts/leaf-complete.sh Dxxx`
 
 After success return exactly `Dxxx_DONE`.
 

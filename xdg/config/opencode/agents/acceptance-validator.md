@@ -31,6 +31,11 @@ Read:
 
 Validate every MUST Axxx exactly as written.
 Never weaken a MUST to match an implementation fallback.
+For every required executable validation, record the exact command and exit code
+in `.opencode-v2/acceptance-report.json`. A non-zero required check is a FAIL.
+You may correct an objectively contract-contradictory check and rerun it, but
+must obtain exit code 0 before reporting PASS; never rationalize a failed result
+away after the fact.
 
 TEST REPORT HARD GATE:
 `.opencode-v2/TEST_REPORT.json` must exist and contain:
@@ -46,6 +51,8 @@ requirement at validation time.
 Return exact:
 `ACCEPTANCE_PASS`
 only when all MUST checks pass.
+When returning PASS, return that exact bare token alone: no Markdown decoration,
+heading, emoji, or explanatory text.
 
 Otherwise return:
 `ACCEPTANCE_FAIL`

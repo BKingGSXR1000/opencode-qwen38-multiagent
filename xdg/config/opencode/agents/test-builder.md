@@ -5,7 +5,9 @@ model: syv/qwen38-light-nothink
 steps: 8
 permission:
   read: allow
-  edit: allow
+  edit:
+    ".opencode-v2/work/attempts.json": deny
+    "*": allow
   glob: allow
   grep: allow
   list: allow

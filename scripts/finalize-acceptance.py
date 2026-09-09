@@ -64,6 +64,19 @@ for cid in must:
         bad.append(f"{cid}={status}")
     if len(evidence) < 8:
         bad.append(f"{cid}=insufficient-evidence")
+    # A validator may use non-executable evidence for a requirement, but once a
+    # required executable check is declared it is mechanically binding. This
+    # prevents a non-zero result from being explained away in prose.
+    executable = c.get("required_executable") is True or "command" in c or "exit_code" in c
+    if executable:
+        command = c.get("command")
+        exit_code = c.get("exit_code")
+        if not isinstance(command, str) or not command.strip():
+            bad.append(f"{cid}=missing-executable-command")
+        if not isinstance(exit_code, int):
+            bad.append(f"{cid}=missing-executable-exit-code")
+        elif exit_code != 0:
+            bad.append(f"{cid}=executable-exit-{exit_code}")
 
 if report.get("result") != "PASS":
     bad.append(f"report.result={report.get('result')!r}")

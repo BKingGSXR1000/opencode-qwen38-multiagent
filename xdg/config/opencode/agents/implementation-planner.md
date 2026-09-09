@@ -87,6 +87,13 @@ Dependency semantics:
 
 Execution waves MUST obey Launch deps.
 
+Use this canonical line syntax for every wave assignment (ordinary Markdown
+bullets are fine; do not add prose to these lines):
+`- Wave 1: D001`
+`- Wave 2: D002, D003`
+`- Wave 3: D004`
+The section heading may be numbered, such as `## 5. Execution Waves`.
+
 Every nontrivial coding project MUST include a final S/M tester/test-builder
 leaf owning:
 `.opencode-v2/TEST_CHECKS.json`

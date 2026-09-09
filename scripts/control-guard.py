@@ -102,12 +102,21 @@ def parse_waves(text: str):
     waves = {}
     errors = []
     for line in m.group(1).splitlines():
-        wm = re.match(r"\s*-\s*Wave\s+(\d+)\s*:\s*(.*)", line, re.I)
+        # Canonical machine payload is a comma-separated Dxxx list. Permit
+        # harmless Markdown bullet/bold styling, but reject prose appended to
+        # an assignment because it can smuggle misleading extra IDs/deps.
+        wm = re.match(
+            r"\s*[-*+]\s*(?:\*\*)?Wave\s+(\d+)(?:\*\*)?\s*:\s*"
+            r"(D\d{3}(?:\s*,\s*D\d{3})*)\s*$",
+            line,
+            re.I,
+        )
         if not wm:
+            if re.search(r"\bWave\s+\d+\s*:", line, re.I):
+                errors.append(f"non-canonical wave assignment: {line.strip()}")
             continue
         wave = int(wm.group(1))
-        # Ignore explanatory parentheticals, which may mention other Dxxx IDs.
-        assignment = wm.group(2).split("(", 1)[0].strip()
+        assignment = wm.group(2)
         for did in re.findall(r"\bD\d{3}\b", assignment):
             if did in waves:
                 errors.append(f"{did}: appears in more than one wave")
@@ -388,13 +397,21 @@ def selftest():
 - Verify command / verify: `python3 ~/AI/opencode-qwen38-multiagent-v2/scripts/run-checks.py --project .`
 - Done when: report passes
 ## 5. Execution Waves
-- Wave 1: D001 (root)
-- Wave 2: D002 (D001 must already be done)
+- Wave 1: D001
+- Wave 2: D002
 <!-- IMPLEMENTATION_PLAN_COMPLETE -->
 """
             _, _, errors = parse_plan(valid)
             assert not errors, errors
             assert reference_policy("## Reference policy: internal") == "internal"
+
+            styled = valid.replace("- Wave 1: D001", "* **Wave 1**: D001")
+            _, _, styled_errors = parse_plan(styled)
+            assert not styled_errors, styled_errors
+
+            prose = valid.replace("- Wave 1: D001", "- Wave 1: D001 (root)")
+            _, _, prose_errors = parse_plan(prose)
+            assert any("non-canonical wave assignment" in e for e in prose_errors), prose_errors
 
             invalid_role = valid.replace(
                 "- Role / role: implementer",
