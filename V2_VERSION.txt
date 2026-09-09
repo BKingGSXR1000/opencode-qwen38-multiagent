@@ -1,5 +1,5 @@
-Qwen3.8 OpenCode Multi-Agent V2.6.0
-patched=2026-09-08T21:53:16+02:00
+Qwen3.8 OpenCode Multi-Agent V2.6.8-development
+patched=2026-09-09T21:50:00+02:00
 
 Architecture:
 - acceptance-planner = WHAT must be true
@@ -13,8 +13,8 @@ Architecture:
 Included changes that were NOT separately applied from V2.5.5/5.6/5.7:
 - reasoning-builder: dedicated 49,152 context / 4,096 output profile
 - reasoning-builder writes primary artifact early
-- retry budget per Dxxx deliverable, not per role
-- 2 full attempts + at most 1 genuinely narrower salvage attempt
+- retry budget per exact Dxxx deliverable, not per role
+- maximum three attempts; no salvage IDs or fourth ledger entry
 - generic core-capability/external-runtime boundary
 - pre-validation IMPLEMENTATION_READY gate
 - no validation/reference work when no runnable candidate exists
@@ -26,5 +26,15 @@ Implementation planner:
 - estimates context class S/M/L/XL for future GPU-aware scheduling
 - no web, no shell, no application edits
 
-Existing V2.5.4 supervisor singleton, validation contexts, compaction rule and
-60s/120s/8K watchdog remain unchanged.
+V2.6.8 control-plane updates:
+- read-only `scripts/control-status.py` derives phase, leaf, dependency,
+  attempt, and test state from filesystem artifacts
+- TodoWrite is root-only UI mirroring; filesystem remains authoritative
+- the supervisor atomically claims attempts before writing and enforces the cap
+  in both live dispatch and persisted reconciliation
+- live watchdog treats missing message parts as unknown, resets after tools,
+  and uses the retained HTTP live-session discovery path
+- planner wave assignments use canonical machine-readable lines
+- required executable acceptance checks must exit zero before final PASS
+- lessons use the current OpenCode2 session-create + prompt API in a separate
+  learner session
