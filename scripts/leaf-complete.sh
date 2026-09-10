@@ -20,6 +20,8 @@ cmd=(leaf.get("verify_command") or "").strip()
 if not cmd: raise SystemExit(f"ERROR: {did} has no Verify command")
 ent=(a.get("deliverables") or {}).get(did) or {}
 attempt=int(ent.get("count") or 0)
+if a.get("owner") != "supervisor": raise SystemExit("ERROR: attempt ledger owner is not supervisor")
+if not isinstance(ent.get("sessions"),list) or not ent["sessions"]: raise SystemExit(f"ERROR: no supervisor claim for {did}")
 if attempt < 1 or attempt > 3: raise SystemExit(f"ERROR: invalid attempt count {attempt}")
 print(attempt); print(cmd)
 PY

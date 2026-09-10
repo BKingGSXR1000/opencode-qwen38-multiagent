@@ -104,7 +104,12 @@ After it returns or is interrupted:
 EXECUTION
 Read `.opencode-v2/IMPLEMENTATION_PLAN.guard.json`.
 
-Dispatch only exact planned Dxxx leaves whose Launch deps are complete.
+Dispatch only exact planned Dxxx leaves whose Launch deps are complete, using
+the exact `Role:` recorded for that Dxxx in `IMPLEMENTATION_PLAN.guard.json`.
+Never substitute `general` (or any other role) for a planned worker role. The
+supervisor preclaims the attempt before a canonical child starts; if it denies
+or the required specialized role cannot launch, do no salvage work and output
+exactly `IMPLEMENTATION_BLOCKED Dxxx` after the allowed attempts.
 
 Every implementation child prompt should be SHORT:
 `DELIVERABLE: Dxxx`
@@ -131,6 +136,9 @@ After attempt 3 without Dxxx.ready:
 Never invent D002a, D002-salvage, micro-salvage, etc.
 The supervisor alone owns .opencode-v2/work/attempts.json. Never edit or repair
 that ledger; inspect the status helper or report IMPLEMENTATION_BLOCKED Dxxx.
+Never create application/source/test/configuration artifacts yourself, including
+shared artifacts such as `package.json`. Missing ownership is a plan defect:
+block and request a planner repair; do not solve it with root or general work.
 
 COMPACTION
 One incomplete automatic compaction is allowed.

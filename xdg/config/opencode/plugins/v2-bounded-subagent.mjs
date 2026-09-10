@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 export const HARD_MAX_CHILD_RESULT_CHARS = 2500;
@@ -80,6 +81,20 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
 }
 
 export const V2BoundedSubagentPlugin = async ({ directory }) => ({
+  "tool.execute.before": async (input, output) => {
+    if (input.tool !== "subagent" && input.tool !== "task") return;
+    const agent = output.args?.agent;
+    const prompt = output.args?.prompt;
+    if (agent === "general") {
+      throw new Error("DISPATCH_DENY general is not a canonical implementation role");
+    }
+    const hasDeliverable = typeof prompt === "string" && /^DELIVERABLE:\s*D\d{3}\s*$/m.test(prompt);
+    const implementationAgents = new Set(["probe-builder", "implementer", "core-builder", "feature-builder", "reasoning-builder", "integrator", "tester", "test-builder"]);
+    if (!implementationAgents.has(agent) && !hasDeliverable) return;
+    // This deterministic supervisor claim occurs before OpenCode materializes
+    // the child session or sends a provider request.
+    execFileSync("python3", ["/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/supervisor.py", "--project", directory, "--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", input.callID], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  },
   "tool.execute.after": async (input, output) => {
     if (input.tool !== "subagent" && input.tool !== "task") return;
     output.output = boundedChildResult({

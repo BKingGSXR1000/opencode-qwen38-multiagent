@@ -43,6 +43,9 @@ Planning target:
 - unknown dependency/API/import/runtime behavior gets an early S `probe-builder`
 - use reasoning-builder only for genuinely difficult algorithmic/math work
 - do not write application code
+- Every required application, test, or shared configuration artifact (including
+  a required `package.json`) must be owned by one exact Dxxx. Do not leave
+  required artifacts for the root to improvise during execution.
 
 ## Progressive externalization — mandatory
 

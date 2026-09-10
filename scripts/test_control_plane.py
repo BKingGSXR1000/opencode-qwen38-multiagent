@@ -149,7 +149,7 @@ class AttemptLedgerTests(unittest.TestCase):
         aborts = []
         try:
             supervisor.plan_ready = lambda: True
-            supervisor.load_manifest = lambda: {"leaves": {"D005": {"launch_deps": []}}}
+            supervisor.load_manifest = lambda: {"leaves": {"D005": {"role": "implementer", "launch_deps": []}}}
             supervisor.ready_info = lambda did: {}
             supervisor.abort_session = lambda sid, reason, agent="": aborts.append((sid, reason, agent))
             supervisor.dispatch_seen.clear()
@@ -188,6 +188,10 @@ class DispatchPromptProtocolTests(unittest.TestCase):
         self.assertEqual(supervisor.implementation_prompt_violation(prompt), "")
         self.assertEqual(supervisor.parse_deliverable(prompt), "D005")
 
+    def test_actual_beta_single_newline_subagent_wrapper_is_valid(self):
+        wrapped = "You are a subagent spawned by another session.\n" + supervisor.implementation_prompt("D005")
+        self.assertEqual(supervisor.implementation_prompt_violation(wrapped), "")
+
     def test_model_handoff_claim_is_rejected_even_when_short(self):
         prompt = supervisor.implementation_prompt("D006") + "\nAttempt 1 created public/app.js."
         self.assertEqual(
@@ -202,6 +206,38 @@ class DispatchPromptProtocolTests(unittest.TestCase):
         self.assertIn("oversized_first_user_prompt", self.aborts[0][1])
         self.assertIn("oversized", supervisor.dispatch_seen)
 
+
+class PreDispatchClaimTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_root, self.old_project = supervisor.ROOT, supervisor.PROJECT
+        self.old_ready, self.old_manifest, self.old_info = supervisor.plan_ready, supervisor.load_manifest, supervisor.ready_info
+        supervisor.ROOT = Path(self.tmp.name); supervisor.PROJECT = self.tmp.name
+        supervisor.plan_ready = lambda: True
+        supervisor.load_manifest = lambda: {"leaves": {"D001": {"role": "probe-builder", "launch_deps": []}, "D002": {"role": "implementer", "launch_deps": ["D001"]}}}
+        supervisor.ready_info = lambda did: {}
+        supervisor.session_task.clear()
+
+    def tearDown(self):
+        supervisor.ROOT, supervisor.PROJECT = self.old_root, self.old_project
+        supervisor.plan_ready, supervisor.load_manifest, supervisor.ready_info = self.old_ready, self.old_manifest, self.old_info
+        supervisor.session_task.clear(); self.tmp.cleanup()
+
+    def test_first_canonical_dispatch_creates_ledger_before_session_and_binds_without_increment(self):
+        status, did, reason, count = supervisor.preclaim_attempt("probe-builder", supervisor.implementation_prompt("D001"), "call-1")
+        self.assertEqual((status, did, reason, count), ("claimed", "D001", "", 1))
+        ledger = json.loads((Path(self.tmp.name) / ".opencode-v2/work/attempts.json").read_text())
+        self.assertEqual(ledger["owner"], "supervisor")
+        self.assertEqual(ledger["deliverables"]["D001"], {"sessions": ["dispatch:call-1"], "count": 1})
+        self.assertEqual(supervisor.claim_attempt("child-1", "D001"), ("existing", 1))
+        ledger = json.loads((Path(self.tmp.name) / ".opencode-v2/work/attempts.json").read_text())
+        self.assertEqual(ledger["deliverables"]["D001"]["sessions"], ["child-1"])
+
+    def test_failed_claim_never_reserves_or_allows_general_substitution(self):
+        status, did, reason, count = supervisor.preclaim_attempt("general", supervisor.implementation_prompt("D001"), "call-2")
+        self.assertEqual((status, did, count), ("denied", "D001", 0))
+        self.assertIn("role_mismatch expected=probe-builder actual=general", reason)
+        self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/attempts.json").exists())
 
 class BoundedChildResultTests(unittest.TestCase):
     PLUGIN = Path(__file__).parents[1] / "xdg/config/opencode/plugins/v2-bounded-subagent.mjs"
@@ -554,6 +590,16 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         config = (self.AGENTS.parent / "opencode.jsonc").read_text()
         self.assertIn("v2-bounded-subagent.mjs", config)
 
+    def test_dispatch_plugin_preclaims_before_child_and_root_forbids_salvage(self):
+        plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.mjs").read_text()
+        self.assertIn('"tool.execute.before"', plugin)
+        self.assertIn("--claim-dispatch", plugin)
+        self.assertIn("before OpenCode materializes", plugin)
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        self.assertIn("Never substitute `general`", root)
+        self.assertIn("Never create application/source/test/configuration artifacts yourself", root)
+        self.assertIn("Missing ownership is a plan defect", root)
+
     def test_planner_uses_the_bounded_nonthinking_qwen_profile(self):
         config = json.loads((self.AGENTS.parent / "opencode.jsonc").read_text())
         model = config["providers"]["syv"]["models"][
@@ -759,10 +805,22 @@ class TestChecksControlContractTests(unittest.TestCase):
                 "leaves": {"D001": {"verify_command": "test -s artifact.txt", "owned_artifacts": "artifact.txt"}}
             }))
             (ctrl / "work").mkdir(exist_ok=True)
-            (ctrl / "work/attempts.json").write_text(json.dumps({"deliverables": {"D001": {"count": 1, "sessions": ["s"]}}}))
+            (ctrl / "work/attempts.json").write_text(json.dumps({"owner": "supervisor", "deliverables": {"D001": {"count": 1, "sessions": ["s"]}}}))
             leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D001"], cwd=project, text=True, capture_output=True)
             self.assertEqual(leaf.returncode, 0, leaf.stderr)
             self.assertTrue((ctrl / "work/D001.ready").exists())
+
+    def test_leaf_complete_rejects_count_zero_or_non_supervisor_ledger(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td); self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (project / "artifact.txt").write_text("ok")
+            (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves": {"D003": {"verify_command": "test -s artifact.txt", "owned_artifacts": "artifact.txt"}}}))
+            (ctrl / "work").mkdir()
+            (ctrl / "work/attempts.json").write_text(json.dumps({"owner": "model", "deliverables": {"D003": {"count": 0, "sessions": []}}}))
+            leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D003"], cwd=project, text=True, capture_output=True)
+            self.assertNotEqual(leaf.returncode, 0)
+            self.assertIn("attempt ledger owner is not supervisor", leaf.stderr)
 
 
 class StatusTests(unittest.TestCase):
@@ -806,7 +864,7 @@ class PostSessionFinalizationTests(unittest.TestCase):
         subprocess.run([sys.executable, str(self.RUNNER), "--project", self.tmp.name, "--bootstrap-control-contract"], check=True, capture_output=True)
         ctrl = project / ".opencode-v2"
         (ctrl / "work").mkdir(exist_ok=True)
-        (ctrl / "work/attempts.json").write_text(json.dumps({"deliverables": {"D003": {"count": 2, "sessions": ["s"]}}}))
+        (ctrl / "work/attempts.json").write_text(json.dumps({"owner": "supervisor", "deliverables": {"D003": {"count": 2, "sessions": ["s"]}}}))
 
     def tearDown(self):
         supervisor.PROJECT = self.old_project

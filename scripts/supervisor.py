@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64,fcntl,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
+import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot)
@@ -78,10 +78,7 @@ def implementation_prompt(did):
 
 def strip_subagent_prefix(text):
     """Remove only the beta's deterministic wrapper before the user prompt."""
-    marker="\n\n"
-    if text.startswith("You are a subagent") and marker in text:
-        return text.split(marker,1)[1]
-    return text
+    return re.sub(r"\AYou are a subagent spawned by another session\.\s*", "", text or "", count=1)
 
 def implementation_prompt_violation(text):
     """Return a dispatch-protocol violation for an implementation prompt."""
@@ -274,6 +271,49 @@ def load_attempts():
 def save_attempts(data):
     p=attempts_path(); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix(".tmp"); t.write_text(json.dumps(data,indent=2)+"\n"); os.replace(t,p)
 
+@contextlib.contextmanager
+def attempt_lock():
+    """One cross-process lock shared with the pre-dispatch OpenCode plugin."""
+    path=attempts_path().with_name("attempts.json.lock")
+    path.parent.mkdir(parents=True,exist_ok=True)
+    for _ in range(250):
+        try:
+            fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.close(fd); break
+        except FileExistsError: time.sleep(.02)
+    else: raise RuntimeError("attempt_ledger_lock_timeout")
+    try: yield
+    finally:
+        try: path.unlink()
+        except FileNotFoundError: pass
+
+def validate_dispatch(agent,text):
+    """Validate a planned Dxxx dispatch before the child model can start."""
+    normalized=strip_subagent_prefix(text).strip()
+    violation=implementation_prompt_violation(normalized)
+    if violation: return "",violation
+    did=parse_deliverable(normalized)
+    if not PROJECT or not plan_ready(): return did,"plan_not_ready"
+    leaves=(load_manifest().get("leaves") or {}); leaf=leaves.get(did)
+    if not leaf: return did,"unknown_deliverable"
+    expected=leaf.get("role") if isinstance(leaf,dict) else ""
+    if expected not in IMPLEMENTATION_AGENTS: return did,"manifest_role_invalid"
+    if agent!=expected: return did,f"role_mismatch expected={expected} actual={agent}"
+    missing=[d for d in leaf.get("launch_deps",[]) if not ready_info(d)]
+    if missing: return did,f"unmet_launch_deps={','.join(missing)}"
+    if ready_info(did): return did,"already_complete"
+    return did,""
+
+def preclaim_attempt(agent,text,dispatch_token):
+    """Reserve a canonical attempt before OpenCode creates its child session."""
+    did,violation=validate_dispatch(agent,text)
+    if violation: return "denied",did,violation,0
+    claim,n=claim_attempt(f"dispatch:{dispatch_token}",did)
+    if claim in {"claimed","existing"}:
+        log(f"DISPATCH_CLAIM token={dispatch_token} agent={agent} deliverable={did} attempt={n}")
+        csv("DISPATCH_CLAIM",f"dispatch:{dispatch_token}",agent,f"{did} attempt={n}")
+        return "claimed",did,"",n
+    return "denied",did,("attempt_limit" if claim=="limit" else "attempt_ledger_invalid"),n
+
 def claim_attempt(sid,did):
     """Atomically reserve one of the three allowed attempts for an exact leaf.
 
@@ -282,12 +322,11 @@ def claim_attempt(sid,did):
     never be poisoned by an impossible ledger count.
     """
     with dispatch_lock:
-        p=attempts_path(); p.parent.mkdir(parents=True,exist_ok=True)
-        lock_path=p.with_name(p.name+".lock")
-        with lock_path.open("a+") as ledger_lock:
-            fcntl.flock(ledger_lock.fileno(),fcntl.LOCK_EX)
+        with attempt_lock():
             try:
                 data=load_attempts()
+                if data.get("owner") not in (None,"supervisor"):
+                    return "invalid",-1
                 ent=data.setdefault("deliverables",{}).setdefault(did,{"sessions":[],"count":0})
                 sessions=ent.setdefault("sessions",[])
                 try:
@@ -304,6 +343,15 @@ def claim_attempt(sid,did):
                 if sid in sessions:
                     session_task[sid]=(did,count)
                     return "existing",count
+                # The plugin reserves dispatch:<tool-call-id> before the beta
+                # creates a model session. Bind it, never increment again.
+                reservations=[x for x in sessions if isinstance(x,str) and x.startswith("dispatch:")]
+                if reservations and not sid.startswith("dispatch:"):
+                    if len(reservations)!=1:
+                        return "invalid",count
+                    sessions[sessions.index(reservations[0])]=sid
+                    save_attempts(data); session_task[sid]=(did,count)
+                    return "existing",count
                 if count>=3:
                     return "limit",count
                 count+=1; ent["count"]=count; sessions.append(sid)
@@ -311,8 +359,7 @@ def claim_attempt(sid,did):
                 save_attempts(data)
                 session_task[sid]=(did,count)
                 return "claimed",count
-            finally:
-                fcntl.flock(ledger_lock.fileno(),fcntl.LOCK_UN)
+            finally: pass
 
 class OpenCodeHTTP:
     def __init__(self):
@@ -764,7 +811,9 @@ def message_shape(messages,session_info):
     }
 
 def enforce_assignment(sid,agent,first_user):
-    if agent not in IMPLEMENTATION_AGENTS or sid in dispatch_seen:
+    normalized=strip_subagent_prefix(first_user or first_user_text_db(sid)).strip()
+    planned=agent in IMPLEMENTATION_AGENTS or bool(parse_deliverable(normalized))
+    if not planned or sid in dispatch_seen:
         return
 
     # Live message persistence can lag /session/active. Missing prompt identity
@@ -773,7 +822,7 @@ def enforce_assignment(sid,agent,first_user):
     if not text:
         return
 
-    violation=implementation_prompt_violation(text)
+    did,violation=validate_dispatch(agent,text)
     if violation:
         dispatch_seen.add(sid)
         abort_session(sid,f"dispatch_protocol_violation {violation}",agent)
@@ -781,33 +830,8 @@ def enforce_assignment(sid,agent,first_user):
         csv("DISPATCH_DENY",sid,agent,violation)
         return
 
-    did=parse_deliverable(text)
-
     # Consume dispatch_seen only after the prompt protocol is validated.
     dispatch_seen.add(sid)
-
-    ctrl=Path(PROJECT)/".opencode-v2" if PROJECT else None
-    if not ctrl or not plan_ready():
-        abort_session(sid,"dispatch_guard plan_not_ready",agent)
-        csv("DISPATCH_DENY",sid,agent,"plan_not_ready")
-        return
-
-    leaves=(load_manifest().get("leaves") or {})
-    if did not in leaves:
-        abort_session(sid,f"dispatch_guard unknown_deliverable={did}",agent)
-        csv("DISPATCH_DENY",sid,agent,f"unknown_deliverable={did}")
-        return
-
-    missing=[d for d in leaves[did].get("launch_deps",[]) if not ready_info(d)]
-    if missing:
-        abort_session(sid,f"dispatch_guard unmet_launch_deps={','.join(missing)} deliverable={did}",agent)
-        csv("DISPATCH_DENY",sid,agent,f"{did} unmet_launch_deps={','.join(missing)}")
-        return
-
-    if ready_info(did):
-        abort_session(sid,f"dispatch_guard already_complete deliverable={did}",agent)
-        csv("DISPATCH_DENY",sid,agent,f"{did} already_complete")
-        return
 
     claim,n=claim_attempt(sid,did)
     if claim in {"limit","invalid"}:
@@ -988,7 +1012,7 @@ def api_poll_loop():
                 if parent:
                     live=ensure_event_watch(sid)
 
-                if agent in IMPLEMENTATION_AGENTS and parent:
+                if parent and (agent in IMPLEMENTATION_AGENTS or parse_deliverable(strip_subagent_prefix(shape["first_user"]))):
                     enforce_assignment(sid,agent,shape["first_user"])
 
                 did,attempt=session_task.get(sid,("",0))
@@ -1107,8 +1131,9 @@ def persisted_reconcile_loop():
         try:
             con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction'),s.time_idle FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
             for sid,agent,comps,time_idle in rows:
-                if agent in IMPLEMENTATION_AGENTS and sid not in dispatch_seen:
-                    enforce_assignment(sid,agent,first_user_text_db(sid))
+                prompt=first_user_text_db(sid)
+                if (agent in IMPLEMENTATION_AGENTS or parse_deliverable(strip_subagent_prefix(prompt))) and sid not in dispatch_seen:
+                    enforce_assignment(sid,agent,prompt)
                 if agent in IMPLEMENTATION_AGENTS and time_idle and sid not in post_finalize_seen:
                     post_finalize_seen.add(sid)
                     did=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))[0]
@@ -1127,6 +1152,19 @@ def persisted_reconcile_loop():
         time.sleep(0.5)
 
 def main():
+    ap=argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--agent")
+    ap.add_argument("--prompt"); ap.add_argument("--project")
+    args,unknown=ap.parse_known_args()
+    if args.claim_dispatch:
+        if unknown or not args.project or not args.agent or args.prompt is None:
+            raise SystemExit("dispatch claim requires --project --agent --prompt --claim-dispatch")
+        global PROJECT
+        PROJECT=args.project
+        status,did,reason,count=preclaim_attempt(args.agent,args.prompt,args.claim_dispatch)
+        if status!="claimed": raise SystemExit(f"DISPATCH_DENY deliverable={did or 'unknown'} reason={reason} count={count}")
+        print(f"DISPATCH_ALLOW deliverable={did} attempt={count}")
+        return
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} first_compaction=allow second_compaction=retire")
     threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()
 if __name__=="__main__": main()
