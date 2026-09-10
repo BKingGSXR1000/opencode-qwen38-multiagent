@@ -62,6 +62,14 @@ Read Reference policy from ACCEPTANCE.md.
 - `internal` or `none`: skip external reference research
 
 PHASE 0.5 — IMPLEMENTATION PLAN
+Before launching ANY implementation-planner (initial, continuation, or repair),
+read `.opencode-v2/work/planner-restarts.json` when present and derive current
+state with `.opencode-v2/bin/control-status`. This supervisor-owned ledger is
+durable project state: it does NOT reset when a root or supervisor session is
+replaced. If its count is already 3, or `control-status` reports
+`"resume_phase": "implementation-blocked"`, launch no planner and output
+exactly `IMPLEMENTATION_BLOCKED`.
+
 Launch implementation-planner with a SHORT prompt:
 - include the ORIGINAL USER REQUEST
 - tell it to read ACCEPTANCE.md and the bootstrap-created incomplete

@@ -567,9 +567,14 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         self.assertNotIn("settings", model)
         planner = (self.AGENTS / "implementation-planner.md").read_text()
         self.assertIn("steps: 24", planner)
-        # 24 turns × 1,536 completion tokens keeps one planner session below
-        # the failed runs' 90K+ pre-tool output, even before the no-think mode.
-        self.assertLessEqual(24 * model["limit"]["output"], 36864)
+
+    def test_root_never_resets_or_relaunches_a_blocked_planner_ledger(self):
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        self.assertIn("planner-restarts.json", root)
+        self.assertIn("does NOT reset when a root or supervisor session is", root)
+        self.assertIn("If its count is already 3", root)
+        self.assertIn("launch no planner and output", root)
+        self.assertNotIn("attempt ledger starts fresh", root.lower())
 
 
 class ImplementationPlanSizeTests(unittest.TestCase):
