@@ -13,10 +13,12 @@ HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
-# file-existence deadline (150.4-150.5s) without a first write.  The bootstrap
-# scaffold makes the phase restartable immediately; this now bounds *absence of
-# model-created durable changes*, not file existence.
-PLANNER_INITIAL_PROGRESS_GRACE_SECONDS=240
+# file-existence deadline (150.4-150.5s) without a first write.  The successful
+# gametest2q planner did not begin its first write until 352.504s and did not
+# complete it until 391.903s. The bootstrap scaffold makes the phase restartable
+# immediately; this bounds *absence of model-created durable changes*, not file
+# existence, while leaving room for that observed Qwen latency.
+PLANNER_INITIAL_PROGRESS_GRACE_SECONDS=420
 PLANNER_PROGRESS_STALL_SECONDS=300
 ROOT_CONTEXT_INPUT_CEILING=43000
 MAX_ROOT_RESTARTS=4

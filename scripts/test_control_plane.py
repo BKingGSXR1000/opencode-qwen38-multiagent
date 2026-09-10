@@ -265,15 +265,16 @@ class LiveEventWatchdogTests(unittest.TestCase):
 class PlannerDurableProgressTests(unittest.TestCase):
     def setUp(self): supervisor.planner_checkpoints.clear()
 
-    def test_untouched_bootstrap_scaffold_is_not_retired_at_old_150_seconds(self):
+    def test_untouched_bootstrap_scaffold_is_not_retired_before_observed_initial_write_latency(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "IMPLEMENTATION_PLAN.md"
             path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
             self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
             self.assertEqual(supervisor.planner_progress_reason("p", 150, path), "")
+            self.assertEqual(supervisor.planner_progress_reason("p", 240, path), "")
             self.assertEqual(
                 supervisor.planner_progress_reason(
-                    "p", supervisor.PLANNER_INITIAL_PROGRESS_GRACE_SECONDS - 1, path
+                    "p", 359, path
                 ), "",
             )
 
@@ -283,12 +284,12 @@ class PlannerDurableProgressTests(unittest.TestCase):
             path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
             self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
             path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD + "### D001 — First leaf\n")
-            self.assertEqual(supervisor.planner_progress_reason("p", 200, path), "")
+            self.assertEqual(supervisor.planner_progress_reason("p", 356, path), "")
             state = supervisor.planner_checkpoints["p"]
             self.assertTrue(state["model_progress"])
             self.assertEqual(
                 supervisor.planner_progress_reason(
-                    "p", 200 + supervisor.PLANNER_PROGRESS_STALL_SECONDS - 1, path
+                    "p", 356 + supervisor.PLANNER_PROGRESS_STALL_SECONDS - 1, path
                 ), "",
             )
 
@@ -298,9 +299,10 @@ class PlannerDurableProgressTests(unittest.TestCase):
             path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
             self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
             reason = supervisor.planner_progress_reason(
-                "p", supervisor.PLANNER_INITIAL_PROGRESS_GRACE_SECONDS, path
+                "p", supervisor.PLANNER_INITIAL_PROGRESS_GRACE_SECONDS + 1, path
             )
             self.assertIn("planner_no_model_plan_progress", reason)
+            self.assertIn("limit=420s", reason)
 
     def test_partial_plan_survives_fresh_planner_baseline_and_retry_is_reference_only(self):
         with tempfile.TemporaryDirectory() as td:
