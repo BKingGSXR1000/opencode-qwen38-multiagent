@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-import argparse,json,os,re,subprocess,time
+import argparse,json,os,re,shlex,stat,subprocess,sys,time
 from pathlib import Path
+
+HARNESS_ROOT=Path(__file__).resolve().parents[1]
+RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
+LEAF_COMPLETE_COMMAND=".opencode-v2/bin/leaf-complete Dxxx"
 
 TEST_CHECKS_SCHEMA={
     "$schema":"https://json-schema.org/draft/2020-12/schema",
@@ -88,9 +92,10 @@ running any command:
 {schema}
 ```
 
-Use one `checks[]` entry per intended test command. The validated implementation
-plan supplies the canonical runner invocation. Invoke that command to run the
-manifest, but never read or inspect the runner source. Do not create a probe
+Use one `checks[]` entry per intended test command. Run it with the exact
+project-local command `{RUN_CHECKS_COMMAND}`. Complete a verified leaf with
+`{LEAF_COMPLETE_COMMAND}` (substitute the exact deliverable ID). Never read or
+inspect either wrapper or the harness source. Do not create a probe
 deliverable to discover this schema and do not guess or substitute a fallback
 manifest format.
 
@@ -107,8 +112,32 @@ manifest format.
   when present before re-deriving work.
 - `.opencode-v2/TEST_REPORT.json` with `status=pass` and `checks_run > 0` is the
   required final-test evidence. The only success verdict is exact bare
-  `ACCEPTANCE_PASS`.
+`ACCEPTANCE_PASS`.
 """
+
+def wrapper_text(target,args):
+    quoted=" ".join(shlex.quote(str(x)) for x in (target,*args))
+    return "#!/usr/bin/env bash\nset -Eeuo pipefail\n" + f"exec {quoted} \"$@\"\n"
+
+def bootstrap_control_surface(project):
+    """Generate project-local delegates to the canonical harness implementation."""
+    ctrl=project/".opencode-v2"
+    atomic_write(ctrl/"CONTROL_CONTRACT.md",control_contract_text())
+    wrappers={
+        ctrl/"bin"/"run-checks":wrapper_text(
+            sys.executable,(HARNESS_ROOT/"scripts"/"run-checks.py","--project",project)
+        ),
+        ctrl/"bin"/"leaf-complete":wrapper_text(
+            HARNESS_ROOT/"scripts"/"leaf-complete.sh",()
+        ),
+        ctrl/"bin"/"control-status":wrapper_text(
+            sys.executable,(HARNESS_ROOT/"scripts"/"control-status.py","--project",project)
+        ),
+    }
+    for path,text in wrappers.items():
+        atomic_write(path,text)
+        path.chmod(path.stat().st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)
+    return wrappers
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--project",default=".")
@@ -119,8 +148,9 @@ def main():
         print(json.dumps(TEST_CHECKS_SCHEMA,indent=2,sort_keys=True)); return
     project=Path(args.project).resolve(); ctrl=project/".opencode-v2"
     if args.bootstrap_control_contract:
-        atomic_write(ctrl/"CONTROL_CONTRACT.md",control_contract_text())
+        wrappers=bootstrap_control_surface(project)
         print(f"CONTROL_CONTRACT_READY {ctrl/'CONTROL_CONTRACT.md'}")
+        for path in wrappers: print(f"CONTROL_COMMAND_READY {path}")
         return
     spec_path=ctrl/"TEST_CHECKS.json"; report_path=ctrl/"TEST_REPORT.json"; logs=ctrl/"test-logs"
     if not spec_path.exists(): raise SystemExit("ERROR: TEST_CHECKS.json missing")

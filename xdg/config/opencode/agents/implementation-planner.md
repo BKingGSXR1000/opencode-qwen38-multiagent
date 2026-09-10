@@ -50,9 +50,10 @@ Do not compose or retain the whole final plan in model context and do not wait
 to write the complete file atomically at the end.
 
 1. Read `ACCEPTANCE.md` and `CONTROL_CONTRACT.md` first.
-2. Establish concise Dxxx names, ownership, dependencies, and waves, then use
-   `write` to create `IMPLEMENTATION_PLAN.md` EARLY as a durable skeleton. Omit
-   the completion marker while the document is incomplete.
+2. Within 150 seconds of session start, establish concise Dxxx names,
+   ownership, dependencies, and waves. Use `write` to create `IMPLEMENTATION_PLAN.md` EARLY
+   as a durable skeleton of at most 120 lines. This
+   first checkpoint MUST be incomplete and MUST omit the completion marker.
 3. Use bounded `edit` calls to fill a few Dxxx sections at a time. Each leaf
    contains only the required protocol fields plus concise implementation/test
    details; do not add narrative essays.
@@ -64,6 +65,11 @@ to write the complete file atomically at the end.
 On a fresh continuation session, treat the existing plan file as the durable
 handoff: preserve completed sections, fill or correct only what remains, and do
 not regenerate the document from memory.
+
+The supervisor mechanically observes the first checkpoint. Missing the
+150-second deadline, first appearing above 120 lines, or first appearing with
+the completion marker retires this planner session. A fresh planner continues
+from the partial file with the short reference-only continuation prompt.
 
 <!-- V2.6.7c ROLE ALLOWLIST BEGIN -->
 ## Exact worker-role allowlist

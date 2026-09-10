@@ -12,6 +12,7 @@ AGENTS = ROOT / "xdg" / "config" / "opencode" / "agents"
 PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
 ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
 PLAN_MAX_LINES = 400
+RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
 
 FORBIDDEN_WRITE_ROLES = {
     "investigator",
@@ -250,9 +251,10 @@ def parse_plan(text: str):
                 errors.append(
                     f"{leaf['id']}: TEST_CHECKS leaf must use tester/test-builder"
                 )
-            if "run-checks.py" not in leaf["verify_command"]:
+            if leaf["verify_command"] != RUN_CHECKS_COMMAND:
                 errors.append(
-                    f"{leaf['id']}: TEST_CHECKS Verify command must invoke run-checks.py"
+                    f"{leaf['id']}: TEST_CHECKS Verify command must be exact "
+                    f"{RUN_CHECKS_COMMAND}"
                 )
 
     return leaves, waves, errors
@@ -400,7 +402,7 @@ def selftest():
 - Deep reasoning: no
 - Role / role: tester
 - Parallel-safe with: (none)
-- Verify command / verify: `python3 ~/AI/opencode-qwen38-multiagent-v2/scripts/run-checks.py --project .`
+- Verify command / verify: `.opencode-v2/bin/run-checks`
 - Done when: report passes
 ## 5. Execution Waves
 - Wave 1: D001

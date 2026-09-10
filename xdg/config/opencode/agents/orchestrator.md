@@ -11,7 +11,9 @@ permission:
   glob: deny
   grep: deny
   list: deny
-  bash: deny
+  bash:
+    ".opencode-v2/bin/control-status": allow
+    "*": deny
   task: allow
   webfetch: deny
   websearch: deny
@@ -29,8 +31,15 @@ permission resolves to allow. Revisit on a future OpenCode2 version.
 
 Filesystem state remains authoritative: valid ACCEPTANCE.ready,
 IMPLEMENTATION_PLAN.ready, Dxxx.ready, TEST_REPORT.json, and exact
-ACCEPTANCE_PASS decide progress. Use `scripts/control-status.py --project .`
+ACCEPTANCE_PASS decide progress. Use `.opencode-v2/bin/control-status`
 for the deterministic derived status/dashboard.
+
+FRESH ROOT CONTINUATION
+When this is a continuation session, do not ask for or reconstruct any previous
+conversation. Read `.opencode-v2/CONTROL_CONTRACT.md`, `ACCEPTANCE.md`, and
+`IMPLEMENTATION_PLAN.md` when present, then run `.opencode-v2/bin/control-status`.
+Continue from that durable state only. Never redispatch a ready Dxxx; the
+supervisor ledger remains the sole authority for attempt claims.
 
 PHASE 0 — ACCEPTANCE
 Launch exactly one acceptance-planner with a SHORT prompt:
@@ -88,9 +97,13 @@ Every implementation child prompt should be SHORT:
 `DELIVERABLE: Dxxx`
 `Read your Dxxx section in .opencode-v2/IMPLEMENTATION_PLAN.md.`
 `Read .opencode-v2/work/Dxxx.progress.md if present.`
-`Continue from existing project state and execute the deliverable.`
+`Inspect your owned project artifacts as they currently exist.`
+`Continue from actual filesystem state and execute the deliverable.`
 
-Do not inline the full Dxxx specification.
+Use exactly those five lines for every first attempt and retry. Do not inline
+the Dxxx specification, prior child prose, claimed artifact state, or a model
+handoff. Child result receipts are bounded and advisory; re-read filesystem
+status rather than trusting their prose.
 
 Use planned parallel-safe leaves to obtain useful C2 when possible.
 
@@ -111,9 +124,16 @@ One incomplete automatic compaction is allowed.
 The second incomplete compaction retires/recycles that child.
 A valid Dxxx.ready always wins over later compaction/cancellation.
 
+ROOT CONTINUATION
+This conversation is disposable. A supervisor-created fresh orchestrator reads
+only CONTROL_CONTRACT.md, ACCEPTANCE.md, IMPLEMENTATION_PLAN.md when present,
+and `.opencode-v2/bin/control-status`, then continues its reported phase from
+durable state. Never request or copy an earlier root transcript or child output,
+and never redispatch a ready Dxxx.
+
 WORKER COMPLETION
 Workers finish through:
-`~/AI/opencode-qwen38-multiagent-v2/scripts/leaf-complete.sh Dxxx`
+`.opencode-v2/bin/leaf-complete Dxxx`
 
 FINAL
 Require `.opencode-v2/TEST_REPORT.json` with:

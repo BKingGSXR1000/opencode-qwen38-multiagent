@@ -8,10 +8,13 @@ permission:
   edit:
     "*": deny
     ".opencode-v2/**": allow
+    ".opencode-v2/bin/*": deny
   glob: allow
   grep: allow
   list: allow
-  bash: allow
+  bash:
+    "*.opencode-v2/bin/*": deny
+    "*": allow
   task: deny
   todowrite: deny
   webfetch: deny

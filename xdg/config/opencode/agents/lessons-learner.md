@@ -8,6 +8,7 @@ permission:
   edit:
     "*": deny
     ".opencode-v2/**": allow
+    ".opencode-v2/bin/*": deny
   glob: allow
   grep: allow
   list: allow

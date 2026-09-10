@@ -7,12 +7,18 @@ permission:
   read: allow
   edit:
     ".opencode-v2/work/attempts.json": deny
+    ".opencode-v2/work/planner-restarts.json": deny
+    ".opencode-v2/root-rollovers.json": deny
+    ".opencode-v2/bin/*": deny
     "*": allow
   glob: allow
   grep: allow
   list: allow
   bash:
     "*attempts.json*": deny
+    "*planner-restarts.json*": deny
+    "*root-rollovers.json*": deny
+    "*.opencode-v2/bin/*": deny
     "*": allow
   task: deny
   todowrite: deny
@@ -38,7 +44,7 @@ implementation begins.
 Maintain `.opencode-v2/work/Dxxx.progress.md` when useful.
 
 Your FINAL meaningful tool call must be:
-`~/AI/opencode-qwen38-multiagent-v2/scripts/leaf-complete.sh Dxxx`
+`.opencode-v2/bin/leaf-complete Dxxx`
 
 After success return exactly `Dxxx_DONE`.
 
@@ -46,6 +52,8 @@ After success return exactly `Dxxx_DONE`.
 ## Project-local control protocol
 
 Read `.opencode-v2/CONTROL_CONTRACT.md` when control/test protocol matters.
+After one bounded inspection, create or update a meaningful owned artifact early.
+Do not spend repeated read-only rounds without an owned-artifact or progress-file change.
 Never read or inspect harness-repository source (including `run-checks.py`) to
 learn the protocol. Do not create a probe solely to discover it or guess a
 fallback TEST_CHECKS manifest schema.
