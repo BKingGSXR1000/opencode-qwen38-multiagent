@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import base64,fcntl,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
-from control_state import (IMPLEMENTATION_PLAN_SCAFFOLD, phase_ready,
-                           ready_info as state_ready_info, snapshot as state_snapshot)
+from control_state import (phase_ready, ready_info as state_ready_info,
+                           snapshot as state_snapshot)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -109,40 +109,74 @@ def plan_ready():
         "IMPLEMENTATION_PLAN_COMPLETE",
     )
 
-def plan_content_signature(plan_path):
-    """Return a durable content fingerprint, or None if bootstrap is missing."""
-    try: return hashlib.sha256(Path(plan_path).read_bytes()).hexdigest()
-    except OSError: return None
+PLANNER_CHECKPOINT_RE=re.compile(
+    r"(?ms)(^##\s+Planner checkpoint\s*\nStatus:\s*)([^\n]*)(\n)"
+)
+PLAN_DELIVERABLE_RE=re.compile(r"(?m)^###\s+D\d{3}\s+[—-]\s+\S")
+
+def planner_plan_state(plan_path):
+    """Classify bootstrap, engagement, and actual durable plan structure."""
+    try: text=Path(plan_path).read_text(errors="replace")
+    except OSError: return {"full_signature":None,"meaningful_signature":None,"engaged":False}
+    full_signature=hashlib.sha256(text.encode()).hexdigest()
+    match=PLANNER_CHECKPOINT_RE.search(text)
+    engaged=bool(match and match.group(2).strip().upper()!="BOOTSTRAP")
+    # A checkpoint-status mutation proves the model reached its file tool, but
+    # cannot by itself reset the plan-progress timer.  Normalize that status so
+    # only real plan content can create a meaningful fingerprint.
+    normalized=PLANNER_CHECKPOINT_RE.sub(r"\1<checkpoint>\3",text)
+    meaningful=bool(PLAN_DELIVERABLE_RE.search(normalized))
+    return {
+        "full_signature":full_signature,
+        "meaningful_signature":(
+            hashlib.sha256(normalized.encode()).hexdigest() if meaningful else None
+        ),
+        "engaged":engaged,
+    }
 
 def planner_progress_reason(sid,elapsed,plan_path=None):
-    """Retire only a planner with no durable model progress for its grace window.
+    """Apply the one planner-owned durable-progress policy.
 
-    A session's first view (bootstrap scaffold or a partial prior plan) is its
-    baseline.  Any subsequent content-hash change is durable progress and
-    resets the timer.  This deliberately never treats scaffold existence as a
-    planner checkpoint, because bootstrap—not the model—owns that file.
+    Bootstrap is immediately restartable. A checkpoint mutation proves tool
+    engagement but does not buy more time: the first actual Dxxx structure is
+    due within the initial grace. Thereafter only meaningful-plan fingerprints
+    reset the 300-second stall timer.
     """
     plan_path=Path(plan_path or (Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"))
-    signature=plan_content_signature(plan_path)
+    plan=planner_plan_state(plan_path)
     state=planner_checkpoints.setdefault(sid,{})
-    if "baseline_signature" not in state:
+    if "baseline_full_signature" not in state:
+        has_meaningful=bool(plan["meaningful_signature"])
         state.update(
-            baseline_signature=signature, last_signature=signature,
-            last_progress=elapsed, model_progress=False,
-            bootstrap=(signature==hashlib.sha256(IMPLEMENTATION_PLAN_SCAFFOLD.encode()).hexdigest()),
+            baseline_full_signature=plan["full_signature"],
+            last_meaningful_signature=plan["meaningful_signature"],
+            last_progress=elapsed, model_progress=has_meaningful,
+            engagement=plan["engaged"],
         )
         return ""
-    if signature!=state.get("last_signature"):
-        state.update(last_signature=signature,last_progress=elapsed,model_progress=True)
+    state["engagement"]=plan["engaged"]
+    if not state.get("model_progress"):
+        if plan["meaningful_signature"]:
+            state.update(
+                model_progress=True,
+                last_meaningful_signature=plan["meaningful_signature"],
+                last_progress=elapsed,
+            )
+            return ""
+        if elapsed<PLANNER_INITIAL_PROGRESS_GRACE_SECONDS: return ""
+        if plan["full_signature"] is None:
+            return f"planner_bootstrap_missing no_durable_progress={int(elapsed)}s"
+        return (
+            f"planner_no_meaningful_plan_progress elapsed={int(elapsed)}s "
+            f"limit={PLANNER_INITIAL_PROGRESS_GRACE_SECONDS}s "
+            f"engagement={str(state['engagement']).lower()}"
+        )
+    if plan["meaningful_signature"]!=state.get("last_meaningful_signature"):
+        state.update(last_meaningful_signature=plan["meaningful_signature"],last_progress=elapsed)
         return ""
     waited=elapsed-state.get("last_progress",elapsed)
-    limit=(PLANNER_PROGRESS_STALL_SECONDS if state.get("model_progress")
-           else PLANNER_INITIAL_PROGRESS_GRACE_SECONDS)
-    if waited<limit: return ""
-    if signature is None:
-        return f"planner_bootstrap_missing no_durable_progress={int(waited)}s"
-    kind="planner_plan_progress_stalled" if state.get("model_progress") else "planner_no_model_plan_progress"
-    return f"{kind} elapsed={int(waited)}s limit={limit}s"
+    if waited<PLANNER_PROGRESS_STALL_SECONDS: return ""
+    return f"planner_plan_progress_stalled elapsed={int(waited)}s limit={PLANNER_PROGRESS_STALL_SECONDS}s"
 
 def planner_restart_path(): return Path(PROJECT)/".opencode-v2/work/planner-restarts.json"
 
@@ -220,6 +254,18 @@ def fallback_no_progress_reason(sid,agent,did,observable,now=None):
     if now-state["fallback_since"]>=300:
         return f"no_durable_progress_with_invisible_stream={int(now-state['fallback_since'])}s"
     return ""
+
+def effective_fallback_reason(sid,agent,did,observable,now=None):
+    """Keep invisible-stream fallback from contradicting planner supervision.
+
+    Implementation planners have a more specific, filesystem-content policy:
+    420 seconds to their first Dxxx structure, then 300 seconds per meaningful
+    plan change. The generic artifact fallback is the same failure condition,
+    so it is intentionally inapplicable to that role. SSE/context/output
+    watchdogs remain independent and active.
+    """
+    if agent=="implementation-planner": return ""
+    return fallback_no_progress_reason(sid,agent,did,observable,now)
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
@@ -961,7 +1007,7 @@ def api_poll_loop():
                 age,st=watchdog_age(sid,key,can_watch)
                 reasoning=max(shape["reasoning"],int((live or {}).get("reasoning",0)))
                 text_chars=max(shape["text"],int((live or {}).get("text",0)))
-                fallback_reason=fallback_no_progress_reason(
+                fallback_reason=effective_fallback_reason(
                     sid,agent,did,shape.get("observable") or live_observable
                 ) if parent else ""
                 planner_retired=False

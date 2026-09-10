@@ -247,6 +247,37 @@ class LiveEventWatchdogTests(unittest.TestCase):
                 supervisor.PROJECT = old_project
                 supervisor.event_watch.clear()
 
+    def test_generic_invisible_stream_fallback_never_preempts_planner_policy(self):
+        old_project = supervisor.PROJECT
+        supervisor.event_watch.clear()
+        with tempfile.TemporaryDirectory() as td:
+            supervisor.PROJECT = td
+            try:
+                self.assertEqual(
+                    supervisor.effective_fallback_reason(
+                        "planner", "implementation-planner", "", False, now=0
+                    ), "",
+                )
+                self.assertEqual(
+                    supervisor.effective_fallback_reason(
+                        "planner", "implementation-planner", "", False, now=300
+                    ), "",
+                )
+                self.assertEqual(
+                    supervisor.effective_fallback_reason(
+                        "worker", "implementer", "", False, now=0
+                    ), "",
+                )
+                self.assertIn(
+                    "300s",
+                    supervisor.effective_fallback_reason(
+                        "worker", "implementer", "", False, now=300
+                    ),
+                )
+            finally:
+                supervisor.PROJECT = old_project
+                supervisor.event_watch.clear()
+
     def test_inactive_sse_watches_are_stopped_without_breaking_the_poll_loop(self):
         supervisor.event_watch.clear()
         stale_stop = supervisor.threading.Event()
@@ -301,8 +332,35 @@ class PlannerDurableProgressTests(unittest.TestCase):
             reason = supervisor.planner_progress_reason(
                 "p", supervisor.PLANNER_INITIAL_PROGRESS_GRACE_SECONDS + 1, path
             )
-            self.assertIn("planner_no_model_plan_progress", reason)
+            self.assertIn("planner_no_meaningful_plan_progress", reason)
             self.assertIn("limit=420s", reason)
+
+    def test_checkpoint_engagement_never_resets_deadline_without_dxxx_structure(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "IMPLEMENTATION_PLAN.md"
+            path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+            self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
+            path.write_text(path.read_text().replace("Status: BOOTSTRAP", "Status: PLANNING"))
+            self.assertEqual(supervisor.planner_progress_reason("p", 300, path), "")
+            state = supervisor.planner_checkpoints["p"]
+            self.assertTrue(state["engagement"])
+            self.assertFalse(state["model_progress"])
+            reason = supervisor.planner_progress_reason("p", 421, path)
+            self.assertIn("planner_no_meaningful_plan_progress", reason)
+            self.assertIn("engagement=true", reason)
+
+    def test_checkpoint_status_change_cannot_extend_post_edit_stall_window(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "IMPLEMENTATION_PLAN.md"
+            path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+            self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
+            path.write_text(path.read_text() + "### D001 — First leaf\n")
+            self.assertEqual(supervisor.planner_progress_reason("p", 356, path), "")
+            path.write_text(path.read_text().replace("Status: BOOTSTRAP", "Status: PLANNING"))
+            reason = supervisor.planner_progress_reason(
+                "p", 356 + supervisor.PLANNER_PROGRESS_STALL_SECONDS, path
+            )
+            self.assertIn("planner_plan_progress_stalled", reason)
 
     def test_partial_plan_survives_fresh_planner_baseline_and_retry_is_reference_only(self):
         with tempfile.TemporaryDirectory() as td:
@@ -453,6 +511,9 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         self.assertIn("bootstrapper has already created", planner)
         self.assertIn("explicitly incomplete scaffold", planner)
         self.assertIn("never delete or recreate it", planner)
+        self.assertIn("Before optional lessons, project\n   inspection, broad design, or long reasoning", planner)
+        self.assertIn("status from `BOOTSTRAP` to `PLANNING`", planner)
+        self.assertIn("it is not plan\n   progress", planner)
         self.assertIn("Use bounded `edit` calls", planner)
         self.assertIn("150-300 lines preferred", planner)
         self.assertIn("400 physical lines is the hard protocol maximum", planner)
@@ -579,6 +640,7 @@ class TestChecksControlContractTests(unittest.TestCase):
             scaffold = project / ".opencode-v2/IMPLEMENTATION_PLAN.md"
             self.assertEqual(scaffold.read_text(), control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
             self.assertNotIn("IMPLEMENTATION_PLAN_COMPLETE", scaffold.read_text())
+            self.assertIn("## Planner checkpoint\nStatus: BOOTSTRAP", scaffold.read_text())
             match = re.search(r"```json\n(.*?)\n```", contract, re.DOTALL)
             self.assertIsNotNone(match)
             exposed_schema = json.loads(match.group(1))

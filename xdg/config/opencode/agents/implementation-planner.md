@@ -52,25 +52,30 @@ to write the complete file atomically at the end.
 1. Read `ACCEPTANCE.md` and `CONTROL_CONTRACT.md` first.
 2. The deterministic bootstrapper has already created
    `IMPLEMENTATION_PLAN.md` as an explicitly incomplete scaffold. Read that
-   existing file; never delete or recreate it. Establish concise Dxxx names,
-   ownership, dependencies, and waves, then use a bounded `write` or `edit`
-   call to replace/fill a small scaffold section early.
-3. Use bounded `edit` calls to fill a few Dxxx sections at a time. Each leaf
+   existing file; never delete or recreate it. Before optional lessons, project
+   inspection, broad design, or long reasoning, make your first tiny `edit`:
+   change the `## Planner checkpoint` status from `BOOTSTRAP` to `PLANNING`.
+3. That checkpoint edit only proves file-tool engagement; it is not plan
+   progress. Immediately use a bounded `write` or `edit` to add the first
+   concise `### Dxxx — ...` skeleton, then establish ownership, dependencies,
+   and waves.
+4. Use bounded `edit` calls to fill a few Dxxx sections at a time. Each leaf
    contains only the required protocol fields plus concise implementation/test
    details; do not add narrative essays.
-4. After each bounded batch, continue from the file. Reread only the section or
+5. After each bounded batch, continue from the file. Reread only the section or
    nearby dependency information needed for the next edit.
-5. Add the exact completion marker only after all sections and waves are
+6. Add the exact completion marker only after all sections and waves are
    complete. The deterministic guard then validates the file.
 
 On a fresh continuation session, treat the existing plan file as the durable
 handoff: preserve completed sections, fill or correct only what remains, and do
 not regenerate the document from memory.
 
-The supervisor compares the file content with the bootstrap/previous-session
-baseline. Durable content changes reset its progress timer; mere scaffold
-existence does not. A fresh planner keeps the same scaffold or partial plan and
-continues from it with the short reference-only continuation prompt.
+The supervisor allows the first actual Dxxx structure the initial grace period,
+then compares meaningful file content with the prior baseline. A checkpoint
+status change alone never resets the progress timer; later plan-content changes
+do. A fresh planner keeps the same scaffold or partial plan and continues from
+it with the short reference-only continuation prompt.
 
 <!-- V2.6.7c ROLE ALLOWLIST BEGIN -->
 ## Exact worker-role allowlist

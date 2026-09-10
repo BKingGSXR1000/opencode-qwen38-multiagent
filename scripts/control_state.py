@@ -15,6 +15,9 @@ from pathlib import Path
 IMPLEMENTATION_PLAN_SCAFFOLD = """# Implementation Plan
 Status: INCOMPLETE
 
+## Planner checkpoint
+Status: BOOTSTRAP
+
 ## Deliverables
 
 ## Execution Waves
