@@ -83,8 +83,11 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
 export const V2BoundedSubagentPlugin = async ({ directory }) => ({
   "tool.execute.before": async (input, output) => {
     if (input.tool !== "subagent" && input.tool !== "task") return;
-    const agent = output.args?.agent;
-    const prompt = output.args?.prompt;
+    // This beta supplies decoded task arguments on input.args before execution
+    // (despite its type declaration placing mutable args on output.args).
+    const args = Object.keys(output.args || {}).length ? output.args : (input.args || {});
+    const agent = args.agent;
+    const prompt = args.prompt;
     if (agent === "general") {
       throw new Error("DISPATCH_DENY general is not a canonical implementation role");
     }
