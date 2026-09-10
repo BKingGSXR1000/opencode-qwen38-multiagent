@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse,json,os,re,shlex,stat,subprocess,sys,time
 from pathlib import Path
+from control_state import IMPLEMENTATION_PLAN_SCAFFOLD
 
 HARNESS_ROOT=Path(__file__).resolve().parents[1]
 RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
@@ -101,6 +102,10 @@ manifest format.
 
 ## Filesystem control protocol
 
+- Bootstrap creates `.opencode-v2/IMPLEMENTATION_PLAN.md` as an explicitly
+  incomplete scaffold before implementation planning. Planners progressively
+  fill that same file; an untouched scaffold has no completion marker and can
+  never qualify for `IMPLEMENTATION_PLAN.ready`.
 - The deterministic control guard alone creates `.opencode-v2/ACCEPTANCE.ready`
   and `.opencode-v2/IMPLEMENTATION_PLAN.ready`; agents never create, modify, or
   request either sentinel.
@@ -123,6 +128,10 @@ def bootstrap_control_surface(project):
     """Generate project-local delegates to the canonical harness implementation."""
     ctrl=project/".opencode-v2"
     atomic_write(ctrl/"CONTROL_CONTRACT.md",control_contract_text())
+    # The planner always starts from durable, explicitly incomplete state.  Do
+    # not overwrite a partial plan on a later bootstrap/restart.
+    plan=ctrl/"IMPLEMENTATION_PLAN.md"
+    if not plan.exists(): atomic_write(plan,IMPLEMENTATION_PLAN_SCAFFOLD)
     wrappers={
         ctrl/"bin"/"run-checks":wrapper_text(
             sys.executable,(HARNESS_ROOT/"scripts"/"run-checks.py","--project",project)
@@ -150,6 +159,7 @@ def main():
     if args.bootstrap_control_contract:
         wrappers=bootstrap_control_surface(project)
         print(f"CONTROL_CONTRACT_READY {ctrl/'CONTROL_CONTRACT.md'}")
+        print(f"IMPLEMENTATION_PLAN_SCAFFOLD_READY {ctrl/'IMPLEMENTATION_PLAN.md'}")
         for path in wrappers: print(f"CONTROL_COMMAND_READY {path}")
         return
     spec_path=ctrl/"TEST_CHECKS.json"; report_path=ctrl/"TEST_REPORT.json"; logs=ctrl/"test-logs"

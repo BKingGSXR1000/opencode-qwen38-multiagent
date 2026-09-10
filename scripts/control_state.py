@@ -8,6 +8,19 @@ import json
 from pathlib import Path
 
 
+# Bootstrap owns this incomplete plan artifact.  Keeping the text here lets the
+# project bootstrapper and supervisor identify it without independent templates
+# drifting apart.  It deliberately has neither deliverables nor the completion
+# marker, so it can never satisfy the deterministic plan guard.
+IMPLEMENTATION_PLAN_SCAFFOLD = """# Implementation Plan
+Status: INCOMPLETE
+
+## Deliverables
+
+## Execution Waves
+"""
+
+
 def _kv(path):
     try:
         return {
@@ -61,6 +74,17 @@ def load_attempts(project):
         return {"deliverables": {}}
 
 
+def planner_restarts(project):
+    try:
+        data = json.loads(
+            (Path(project) / ".opencode-v2" / "work" / "planner-restarts.json").read_text()
+        )
+        count = int(data.get("count") or 0)
+        return count if count >= 0 else 0
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return 0
+
+
 def test_state(project):
     try:
         data = json.loads((Path(project) / ".opencode-v2" / "TEST_REPORT.json").read_text())
@@ -100,12 +124,18 @@ def snapshot(project):
         "IMPLEMENTATION_PLAN.md",
         "IMPLEMENTATION_PLAN_COMPLETE",
     )
+    planner_failures = planner_restarts(project)
     tests = test_state(project)
     state = {
         "protocol": "V2.6.9",
         "project": str(project),
         "acceptance": {"complete": acceptance_complete},
-        "plan": {"complete": plan_complete, "manifest_present": bool(leaves)},
+        "plan": {
+            "complete": plan_complete,
+            "manifest_present": bool(leaves),
+            "planner_failures": planner_failures,
+            "blocked": not plan_complete and planner_failures >= 3,
+        },
         "leaves": leaf_states,
         "tests": tests,
         "acceptance_validation": {
@@ -120,6 +150,8 @@ def resume_phase(state):
     """Derive the next root action from durable state only."""
     if not state.get("acceptance", {}).get("complete"):
         return "acceptance"
+    if state.get("plan", {}).get("blocked"):
+        return "implementation-blocked"
     if not state.get("plan", {}).get("complete"):
         return "implementation-plan"
     leaves = state.get("leaves") or {}

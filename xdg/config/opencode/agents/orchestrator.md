@@ -64,7 +64,8 @@ Read Reference policy from ACCEPTANCE.md.
 PHASE 0.5 — IMPLEMENTATION PLAN
 Launch implementation-planner with a SHORT prompt:
 - include the ORIGINAL USER REQUEST
-- tell it to read ACCEPTANCE.md and follow its planner protocol
+- tell it to read ACCEPTANCE.md and the bootstrap-created incomplete
+  IMPLEMENTATION_PLAN.md scaffold, then follow its planner protocol
 - do not inline the whole acceptance contract
 
 After it returns or is interrupted:
@@ -75,7 +76,7 @@ After it returns or is interrupted:
   `Continue implementation planning for this project.`
   `Read .opencode-v2/ACCEPTANCE.md.`
   `Read .opencode-v2/CONTROL_CONTRACT.md.`
-  `Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.md.`
   `Continue from durable file state using your progressive planner protocol.`
 - if the completed plan was rejected, launch a FRESH implementation-planner
   using exactly this repair prompt:
@@ -85,6 +86,10 @@ After it returns or is interrupted:
   `Fix only the listed guard errors and follow your progressive planner protocol.`
   `Never create or request IMPLEMENTATION_PLAN.ready.`
 - never request a shorter self-contained retry or an atomic end-of-session write
+- after three supervisor-recorded unsuccessful planner sessions, do not invent
+  or write a plan; when `.opencode-v2/bin/control-status` reports
+  JSON `"resume_phase": "implementation-blocked"`, stop this phase with exact
+  `IMPLEMENTATION_BLOCKED`
 - wait for the deterministic control guard to create the real sentinel
 - NEVER proceed merely because IMPLEMENTATION_PLAN.md has its marker or the model says ready
 

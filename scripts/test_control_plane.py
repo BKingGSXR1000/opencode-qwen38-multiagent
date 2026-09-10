@@ -247,24 +247,97 @@ class LiveEventWatchdogTests(unittest.TestCase):
                 supervisor.PROJECT = old_project
                 supervisor.event_watch.clear()
 
+    def test_inactive_sse_watches_are_stopped_without_breaking_the_poll_loop(self):
+        supervisor.event_watch.clear()
+        stale_stop = supervisor.threading.Event()
+        live_stop = supervisor.threading.Event()
+        supervisor.event_watch.update({
+            "stale": {"stop": stale_stop},
+            "live": {"stop": live_stop},
+        })
+        supervisor.stop_inactive_event_watches({"live"})
+        self.assertTrue(stale_stop.is_set())
+        self.assertFalse(live_stop.is_set())
+        self.assertNotIn("stale", supervisor.event_watch)
+        supervisor.event_watch.clear()
 
-class PlannerCheckpointTests(unittest.TestCase):
+
+class PlannerDurableProgressTests(unittest.TestCase):
     def setUp(self): supervisor.planner_checkpoints.clear()
 
-    def test_missing_checkpoint_at_150_seconds_is_retired(self):
+    def test_untouched_bootstrap_scaffold_is_not_retired_at_old_150_seconds(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "IMPLEMENTATION_PLAN.md"
-            self.assertIn("checkpoint_missing", supervisor.planner_checkpoint_reason("p", 150, path))
+            path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+            self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
+            self.assertEqual(supervisor.planner_progress_reason("p", 150, path), "")
+            self.assertEqual(
+                supervisor.planner_progress_reason(
+                    "p", supervisor.PLANNER_INITIAL_PROGRESS_GRACE_SECONDS - 1, path
+                ), "",
+            )
 
-    def test_first_checkpoint_is_incomplete_and_at_most_120_lines(self):
+    def test_durable_model_edit_is_detected_and_resets_stall_timer(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "IMPLEMENTATION_PLAN.md"
-            path.write_text("# partial\n" * 50)
-            self.assertEqual(supervisor.planner_checkpoint_reason("p", 30, path), "")
-            self.assertTrue(supervisor.planner_checkpoints["p"]["observed"])
-            supervisor.planner_checkpoints.clear()
-            path.write_text("# large\n" * 121)
-            self.assertIn("not_incremental", supervisor.planner_checkpoint_reason("p2", 30, path))
+            path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+            self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
+            path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD + "### D001 — First leaf\n")
+            self.assertEqual(supervisor.planner_progress_reason("p", 200, path), "")
+            state = supervisor.planner_checkpoints["p"]
+            self.assertTrue(state["model_progress"])
+            self.assertEqual(
+                supervisor.planner_progress_reason(
+                    "p", 200 + supervisor.PLANNER_PROGRESS_STALL_SECONDS - 1, path
+                ), "",
+            )
+
+    def test_truly_stalled_planner_is_eventually_retired(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "IMPLEMENTATION_PLAN.md"
+            path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+            self.assertEqual(supervisor.planner_progress_reason("p", 0, path), "")
+            reason = supervisor.planner_progress_reason(
+                "p", supervisor.PLANNER_INITIAL_PROGRESS_GRACE_SECONDS, path
+            )
+            self.assertIn("planner_no_model_plan_progress", reason)
+
+    def test_partial_plan_survives_fresh_planner_baseline_and_retry_is_reference_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "IMPLEMENTATION_PLAN.md"
+            partial = control_state.IMPLEMENTATION_PLAN_SCAFFOLD + "### D001 — Durable partial\n"
+            path.write_text(partial)
+            self.assertEqual(supervisor.planner_progress_reason("old", 0, path), "")
+            self.assertEqual(supervisor.planner_progress_reason("fresh", 0, path), "")
+            self.assertEqual(supervisor.planner_progress_reason("fresh", 150, path), "")
+            self.assertEqual(path.read_text(), partial)
+            self.assertEqual(
+                supervisor.PLANNER_CONTINUATION_PROMPT,
+                "Continue implementation planning for this project.\n"
+                "Read .opencode-v2/ACCEPTANCE.md.\n"
+                "Read .opencode-v2/CONTROL_CONTRACT.md.\n"
+                "Read .opencode-v2/IMPLEMENTATION_PLAN.md.\n"
+                "Continue from durable file state using your progressive planner protocol.",
+            )
+
+    def test_three_supervisor_recorded_failures_block_a_fourth_planner(self):
+        old_project = supervisor.PROJECT
+        with tempfile.TemporaryDirectory() as td:
+            supervisor.PROJECT = td
+            try:
+                path = Path(td) / ".opencode-v2/IMPLEMENTATION_PLAN.md"
+                path.parent.mkdir(parents=True)
+                path.write_text(control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+                for number in range(3):
+                    supervisor.record_planner_restart(f"p{number}", "genuine-failure")
+                self.assertEqual(supervisor.planner_restart_count(), 3)
+                self.assertEqual(
+                    supervisor.planner_retirement_reason("fourth", 0, path),
+                    "planner_restart_limit=3",
+                )
+            finally:
+                supervisor.PROJECT = old_project
+                supervisor.planner_checkpoints.clear()
 
 
 class RootResumeStateTests(unittest.TestCase):
@@ -275,6 +348,10 @@ class RootResumeStateTests(unittest.TestCase):
 
     def test_representative_resume_phases(self):
         self.assertEqual(control_state.resume_phase(self.state(plan=False)), "implementation-plan")
+        self.assertEqual(
+            control_state.resume_phase(self.state(plan=False) | {"plan": {"complete": False, "blocked": True}}),
+            "implementation-blocked",
+        )
         self.assertEqual(control_state.resume_phase(self.state(plan=True, leaves={"D001":{"complete":False}})), "execution")
         self.assertEqual(control_state.resume_phase(self.state(plan=True, leaves={"D001":{"complete":True}}, tests=False)), "final-tests")
         self.assertEqual(control_state.resume_phase(self.state(plan=True, leaves={"D001":{"complete":True}}, tests=True)), "acceptance-validation")
@@ -371,24 +448,30 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
     def test_planner_progressively_externalizes_and_retries_by_reference(self):
         planner = (self.AGENTS / "implementation-planner.md").read_text()
         self.assertIn("Progressive externalization — mandatory", planner)
-        self.assertIn("create `IMPLEMENTATION_PLAN.md` EARLY", planner)
+        self.assertIn("bootstrapper has already created", planner)
+        self.assertIn("explicitly incomplete scaffold", planner)
+        self.assertIn("never delete or recreate it", planner)
         self.assertIn("Use bounded `edit` calls", planner)
         self.assertIn("150-300 lines preferred", planner)
         self.assertIn("400 physical lines is the hard protocol maximum", planner)
         self.assertIn("do not wait\nto write the complete file atomically", planner)
+        self.assertNotIn("Within 150 seconds", planner)
+        self.assertNotIn("planner_checkpoint_missing", Path(supervisor.__file__).read_text())
 
         root = (self.AGENTS / "orchestrator.md").read_text()
         retry_lines = (
             "`Continue implementation planning for this project.`",
             "`Read .opencode-v2/ACCEPTANCE.md.`",
             "`Read .opencode-v2/CONTROL_CONTRACT.md.`",
-            "`Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.`",
+            "`Read .opencode-v2/IMPLEMENTATION_PLAN.md.`",
             "`Continue from durable file state using your progressive planner protocol.`",
         )
         positions = [root.index(line) for line in retry_lines]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("do not include the original request", root)
         self.assertIn("never request a shorter self-contained retry", root)
+        self.assertIn("IMPLEMENTATION_BLOCKED", root)
+        self.assertRegex(root, r"(?s)orchestrator.*?edit:\s*deny")
 
     def test_retry_prompt_is_exact_filesystem_only_protocol(self):
         root = (self.AGENTS / "orchestrator.md").read_text()
@@ -491,6 +574,9 @@ class TestChecksControlContractTests(unittest.TestCase):
             bootstrapped = self.run_runner(project, "--bootstrap-control-contract")
             self.assertEqual(bootstrapped.returncode, 0, bootstrapped.stderr)
             contract = (project / ".opencode-v2/CONTROL_CONTRACT.md").read_text()
+            scaffold = project / ".opencode-v2/IMPLEMENTATION_PLAN.md"
+            self.assertEqual(scaffold.read_text(), control_state.IMPLEMENTATION_PLAN_SCAFFOLD)
+            self.assertNotIn("IMPLEMENTATION_PLAN_COMPLETE", scaffold.read_text())
             match = re.search(r"```json\n(.*?)\n```", contract, re.DOTALL)
             self.assertIsNotNone(match)
             exposed_schema = json.loads(match.group(1))
@@ -509,12 +595,36 @@ class TestChecksControlContractTests(unittest.TestCase):
                 self.assertIn(required, contract)
             self.assertIn(".opencode-v2/bin/run-checks", contract)
             self.assertIn(".opencode-v2/bin/leaf-complete Dxxx", contract)
+            self.assertIn("explicitly\n  incomplete scaffold", contract)
             for command in ("run-checks", "leaf-complete", "control-status"):
                 path = project / ".opencode-v2/bin" / command
                 self.assertTrue(path.exists())
                 self.assertTrue(path.stat().st_mode & 0o111)
             launch = (Path(__file__).parents[1] / "run.sh").read_text()
             self.assertIn("--bootstrap-control-contract", launch)
+
+    def test_bootstrap_preserves_a_partial_plan_on_retry(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            self.run_runner(project, "--bootstrap-control-contract")
+            plan = project / ".opencode-v2/IMPLEMENTATION_PLAN.md"
+            partial = plan.read_text() + "### D001 — Preserve me\n"
+            plan.write_text(partial)
+            again = self.run_runner(project, "--bootstrap-control-contract")
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(plan.read_text(), partial)
+
+    def test_untouched_scaffold_never_creates_plan_ready(self):
+        guard = Path(__file__).with_name("control-guard.py")
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            self.run_runner(project, "--bootstrap-control-contract")
+            result = subprocess.run(
+                [sys.executable, str(guard), "--project", str(project), "--finalize-plan"],
+                text=True, capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((project / ".opencode-v2/IMPLEMENTATION_PLAN.ready").exists())
 
     def test_manifest_conforming_to_exposed_schema_is_accepted(self):
         with tempfile.TemporaryDirectory() as td:
@@ -585,6 +695,18 @@ class StatusTests(unittest.TestCase):
             self.assertTrue(state["leaves"]["D001"]["complete"])
             self.assertTrue(state["leaves"]["D002"]["eligible"])
             self.assertTrue(state["tests"]["complete"])
+
+    def test_three_planner_failures_are_exposed_as_implementation_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / ".opencode-v2"
+            (root / "work").mkdir(parents=True)
+            (root / "ACCEPTANCE.ready").write_text(
+                "status=complete\nartifact=ACCEPTANCE.md\nmarker=ACCEPTANCE_COMPLETE\nvalidated=deterministic-test\n"
+            )
+            (root / "work/planner-restarts.json").write_text(json.dumps({"count": 3}))
+            state = control_state.snapshot(td)
+            self.assertTrue(state["plan"]["blocked"])
+            self.assertEqual(state["resume_phase"], "implementation-blocked")
 
 
 class PostSessionFinalizationTests(unittest.TestCase):

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import base64,fcntl,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
+import base64,fcntl,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
-from control_state import phase_ready, ready_info as state_ready_info, snapshot as state_snapshot
+from control_state import (IMPLEMENTATION_PLAN_SCAFFOLD, phase_ready,
+                           ready_info as state_ready_info, snapshot as state_snapshot)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -11,8 +12,12 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PLANNER_CONTEXT_INPUT_CEILING=45000
-PLANNER_CHECKPOINT_SECONDS=150
-PLANNER_CHECKPOINT_MAX_LINES=120
+# gametest2s showed three healthy setup/read sequences reaching the old 150s
+# file-existence deadline (150.4-150.5s) without a first write.  The bootstrap
+# scaffold makes the phase restartable immediately; this now bounds *absence of
+# model-created durable changes*, not file existence.
+PLANNER_INITIAL_PROGRESS_GRACE_SECONDS=240
+PLANNER_PROGRESS_STALL_SECONDS=300
 ROOT_CONTEXT_INPUT_CEILING=43000
 MAX_ROOT_RESTARTS=4
 MAX_PLANNER_RESTARTS=3
@@ -31,7 +36,7 @@ Continue from durable state only."""
 PLANNER_CONTINUATION_PROMPT="""Continue implementation planning for this project.
 Read .opencode-v2/ACCEPTANCE.md.
 Read .opencode-v2/CONTROL_CONTRACT.md.
-Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.
+Read .opencode-v2/IMPLEMENTATION_PLAN.md.
 Continue from durable file state using your progressive planner protocol."""
 
 def log(msg):
@@ -102,22 +107,40 @@ def plan_ready():
         "IMPLEMENTATION_PLAN_COMPLETE",
     )
 
-def planner_checkpoint_reason(sid,elapsed,plan_path=None):
+def plan_content_signature(plan_path):
+    """Return a durable content fingerprint, or None if bootstrap is missing."""
+    try: return hashlib.sha256(Path(plan_path).read_bytes()).hexdigest()
+    except OSError: return None
+
+def planner_progress_reason(sid,elapsed,plan_path=None):
+    """Retire only a planner with no durable model progress for its grace window.
+
+    A session's first view (bootstrap scaffold or a partial prior plan) is its
+    baseline.  Any subsequent content-hash change is durable progress and
+    resets the timer.  This deliberately never treats scaffold existence as a
+    planner checkpoint, because bootstrap—not the model—owns that file.
+    """
     plan_path=Path(plan_path or (Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"))
-    state=planner_checkpoints.setdefault(sid,{"observed":False})
-    if state["observed"]: return ""
-    if not plan_path.exists():
-        return f"planner_checkpoint_missing elapsed={int(elapsed)}s" if elapsed>=PLANNER_CHECKPOINT_SECONDS else ""
-    try:
-        text=plan_path.read_text(errors="replace")
-    except OSError:
+    signature=plan_content_signature(plan_path)
+    state=planner_checkpoints.setdefault(sid,{})
+    if "baseline_signature" not in state:
+        state.update(
+            baseline_signature=signature, last_signature=signature,
+            last_progress=elapsed, model_progress=False,
+            bootstrap=(signature==hashlib.sha256(IMPLEMENTATION_PLAN_SCAFFOLD.encode()).hexdigest()),
+        )
         return ""
-    lines=len(text.splitlines())
-    complete=any(line.strip()=="<!-- IMPLEMENTATION_PLAN_COMPLETE -->" for line in text.splitlines())
-    if lines>PLANNER_CHECKPOINT_MAX_LINES or complete:
-        return f"planner_first_checkpoint_not_incremental lines={lines} complete_marker={str(complete).lower()}"
-    state.update(observed=True,lines=lines)
-    return ""
+    if signature!=state.get("last_signature"):
+        state.update(last_signature=signature,last_progress=elapsed,model_progress=True)
+        return ""
+    waited=elapsed-state.get("last_progress",elapsed)
+    limit=(PLANNER_PROGRESS_STALL_SECONDS if state.get("model_progress")
+           else PLANNER_INITIAL_PROGRESS_GRACE_SECONDS)
+    if waited<limit: return ""
+    if signature is None:
+        return f"planner_bootstrap_missing no_durable_progress={int(waited)}s"
+    kind="planner_plan_progress_stalled" if state.get("model_progress") else "planner_no_model_plan_progress"
+    return f"{kind} elapsed={int(waited)}s limit={limit}s"
 
 def planner_restart_path(): return Path(PROJECT)/".opencode-v2/work/planner-restarts.json"
 
@@ -129,6 +152,12 @@ def record_planner_restart(sid,reason):
     path=planner_restart_path(); path.parent.mkdir(parents=True,exist_ok=True)
     data={"owner":"supervisor","count":planner_restart_count()+1,"retired_session":sid,"reason":reason}
     temp=path.with_suffix(".tmp"); temp.write_text(json.dumps(data,indent=2)+"\n"); os.replace(temp,path)
+
+def planner_retirement_reason(sid,elapsed,plan_path=None):
+    """One shared planner invariant for fresh and replacement sessions."""
+    if planner_restart_count()>=MAX_PLANNER_RESTARTS and not plan_ready():
+        return f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
+    return planner_progress_reason(sid,elapsed,plan_path)
 
 def owned_artifact_paths(leaf):
     raw=leaf.get("owned_artifacts","") if isinstance(leaf,dict) else ""
@@ -587,6 +616,19 @@ def ensure_event_watch(sid):
     thread=threading.Thread(target=stream,daemon=True,name=f"v2-event-{sid[-8:]}")
     state["thread"]=thread; thread.start(); return state
 
+def stop_inactive_event_watches(active):
+    """Release SSE readers for sessions no longer reported active.
+
+    This is deliberately best-effort: it must never take down the HTTP polling
+    loop merely because an old event stream is slow to close.
+    """
+    with lock:
+        stale=[sid for sid in event_watch if sid not in active]
+        states=[event_watch.pop(sid) for sid in stale]
+    for state in states:
+        stop=state.get("stop")
+        if stop: stop.set()
+
 def message_shape(messages,session_info):
     # Normalize message order: API endpoints may return ascending or descending.
     normalized=[]
@@ -925,19 +967,17 @@ def api_poll_loop():
                 if agent=="implementation-planner" and parent:
                     existing_plan=Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
                     checkpoint=planner_checkpoints.setdefault(
-                        sid,{"observed":existing_plan.exists(),"preexisting":existing_plan.exists(),"started":time.monotonic()}
+                        sid,{"started":time.monotonic()}
                     )
                     checkpoint.setdefault("started",time.monotonic())
-                    checkpoint_reason=(
-                        f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
-                        if planner_restart_count()>=MAX_PLANNER_RESTARTS and not plan_ready()
-                        else planner_checkpoint_reason(sid,time.monotonic()-checkpoint["started"])
+                    progress_reason=planner_retirement_reason(
+                        sid,time.monotonic()-checkpoint["started"],existing_plan
                     )
-                    if checkpoint_reason and not checkpoint.get("aborted"):
+                    if progress_reason and not checkpoint.get("aborted"):
                         checkpoint["aborted"]=True
                         if planner_restart_count()<MAX_PLANNER_RESTARTS:
-                            record_planner_restart(sid,checkpoint_reason)
-                        abort_session(sid,checkpoint_reason,agent)
+                            record_planner_restart(sid,progress_reason)
+                        abort_session(sid,progress_reason,agent)
                         planner_retired=True
 
                 if can_watch and st["aborted_key"]!=key and not planner_retired:
