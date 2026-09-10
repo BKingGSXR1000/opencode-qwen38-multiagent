@@ -80,12 +80,12 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
   return result;
 }
 
-export const V2BoundedSubagentPlugin = async ({ directory }) => ({
-  "tool.execute.before": async (input, output) => {
-    if (input.tool !== "subagent" && input.tool !== "task") return;
-    // This beta supplies decoded task arguments on input.args before execution
-    // (despite its type declaration placing mutable args on output.args).
-    const args = Object.keys(output.args || {}).length ? output.args : (input.args || {});
+export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
+  const before = await api.tool.hook("execute.before", async (event) => {
+    if (event.tool !== "subagent" && event.tool !== "task") return;
+    // This beta supplies decoded task arguments through the V2 hook event's
+    // mutable input object before execution.
+    const args = event.input || {};
     const agent = args.agent;
     const prompt = args.prompt;
     if (agent === "general") {
@@ -96,23 +96,30 @@ export const V2BoundedSubagentPlugin = async ({ directory }) => ({
     if (!implementationAgents.has(agent) && !hasDeliverable) return;
     // This deterministic supervisor claim occurs before OpenCode materializes
     // the child session or sends a provider request.
-    execFileSync("python3", ["/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/supervisor.py", "--project", directory, "--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", input.callID], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-  },
-  "tool.execute.after": async (input, output) => {
-    if (input.tool !== "subagent" && input.tool !== "task") return;
-    output.output = boundedChildResult({
+    execFileSync("python3", ["/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/supervisor.py", "--project", directory, "--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", event.id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  });
+  const after = await api.tool.hook("execute.after", async (event) => {
+    if ((event.tool !== "subagent" && event.tool !== "task") || !event.result) return;
+    event.result.output = boundedChildResult({
       directory,
-      args: input.args,
-      metadata: output.metadata,
-      original: output.output,
+      args: event.input || {},
+      metadata: event.result.metadata,
+      original: event.result.output || "",
     });
-    output.metadata = {
-      ...output.metadata,
+    event.result.metadata = {
+      ...event.result.metadata,
       parentResultBounded: true,
-      parentResultChars: output.output.length,
+      parentResultChars: event.result.output.length,
       fullOutputStorage: "session_history",
     };
-  },
-});
+  });
+  return () => {
+    before.dispose();
+    after.dispose();
+  };
+};
 
-export default V2BoundedSubagentPlugin;
+export default {
+  id: "v2-bounded-subagent",
+  setup: async (api) => V2BoundedSubagentPlugin({ directory: api.location.directory, api }),
+};

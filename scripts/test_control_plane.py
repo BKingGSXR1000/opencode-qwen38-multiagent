@@ -240,7 +240,7 @@ class PreDispatchClaimTests(unittest.TestCase):
         self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/attempts.json").exists())
 
 class BoundedChildResultTests(unittest.TestCase):
-    PLUGIN = Path(__file__).parents[1] / "xdg/config/opencode/plugins/v2-bounded-subagent.mjs"
+    PLUGIN = Path(__file__).parents[1] / "xdg/config/opencode/plugins/v2-bounded-subagent.js"
 
     def invoke(self, original, agent="implementer"):
         script = """
@@ -588,11 +588,12 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
 
     def test_bounded_child_plugin_uses_supported_global_plugin_directory(self):
         config = (self.AGENTS.parent / "opencode.jsonc").read_text()
-        plugin = self.AGENTS.parent / "plugins/v2-bounded-subagent.mjs"
+        plugin = self.AGENTS.parent / "plugins/v2-bounded-subagent.js"
         self.assertTrue(plugin.is_file())
-        # This beta auto-loads global local plugins from plugins/. Its config
-        # "plugin" array accepts packages, not a file:// module URL.
-        self.assertNotIn("v2-bounded-subagent.mjs", config)
+        # This beta auto-loads local .js/.ts modules from plugins/. A file URL
+        # to the module is rejected, and it does not scan .mjs modules.
+        self.assertNotIn('"plugin"', config)
+        self.assertFalse((self.AGENTS.parent / "plugins/v2-bounded-subagent.mjs").exists())
 
     def test_orchestrator_does_not_instruct_unavailable_list_or_execute_tools(self):
         root = (self.AGENTS / "orchestrator.md").read_text()
@@ -600,11 +601,12 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         self.assertNotIn("use `list`", root)
 
     def test_dispatch_plugin_preclaims_before_child_and_root_forbids_salvage(self):
-        plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.mjs").read_text()
-        self.assertIn('"tool.execute.before"', plugin)
+        plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.js").read_text()
+        self.assertIn('api.tool.hook("execute.before"', plugin)
         self.assertIn("--claim-dispatch", plugin)
-        self.assertIn("input.args", plugin)
+        self.assertIn("event.input", plugin)
         self.assertIn("before OpenCode materializes", plugin)
+        self.assertIn('id: "v2-bounded-subagent"', plugin)
         root = (self.AGENTS / "orchestrator.md").read_text()
         self.assertIn("Never substitute `general`", root)
         self.assertIn("Never create application/source/test/configuration artifacts yourself", root)
