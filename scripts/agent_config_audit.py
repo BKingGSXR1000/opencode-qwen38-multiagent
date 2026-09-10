@@ -14,8 +14,13 @@ PLANNER_EDIT_TARGETS = {
 }
 WRITER_AGENTS = {
     "probe-builder", "implementer", "core-builder", "feature-builder",
-    "reasoning-builder", "integrator", "test-builder", "state-writer",
+    "reasoning-builder", "integrator", "test-builder", "tester", "state-writer",
     "reference-researcher", "acceptance-validator", "lessons-learner",
+}
+CONTROL_WRAPPER_DENY_AGENTS = {
+    "probe-builder", "implementer", "core-builder", "feature-builder",
+    "reasoning-builder", "integrator", "test-builder", "tester",
+    "acceptance-validator", "lessons-learner", "state-writer",
 }
 
 
@@ -38,6 +43,10 @@ def audit_agents(payload):
     for name in sorted(WRITER_AGENTS):
         if not permission_resources(by_name.get(name, {}), "edit", "allow"):
             errors.append(f"{name} must resolve with edit/write capability")
+    for name in sorted(CONTROL_WRAPPER_DENY_AGENTS):
+        denied = permission_resources(by_name.get(name, {}), "edit", "deny")
+        if ".opencode-v2/bin/*" not in denied:
+            errors.append(f"{name} must deny edits to .opencode-v2/bin/*")
     return errors
 
 

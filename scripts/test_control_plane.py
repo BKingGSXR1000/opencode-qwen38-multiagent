@@ -153,7 +153,7 @@ class AttemptLedgerTests(unittest.TestCase):
             supervisor.ready_info = lambda did: {}
             supervisor.abort_session = lambda sid, reason, agent="": aborts.append((sid, reason, agent))
             supervisor.dispatch_seen.clear()
-            supervisor.enforce_assignment("old-session", "implementer", "DELIVERABLE: D005")
+            supervisor.enforce_assignment("old-session", "implementer", supervisor.implementation_prompt("D005"))
         finally:
             supervisor.plan_ready = old_plan_ready
             supervisor.load_manifest = old_load_manifest
@@ -184,14 +184,16 @@ class DispatchPromptProtocolTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_short_exact_prompt_is_valid(self):
-        prompt = (
-            "DELIVERABLE: D005\n"
-            "Read your D005 section in .opencode-v2/IMPLEMENTATION_PLAN.md.\n"
-            "Read .opencode-v2/work/D005.progress.md if present.\n"
-            "Continue from current project state and execute the deliverable."
-        )
+        prompt = supervisor.implementation_prompt("D005")
         self.assertEqual(supervisor.implementation_prompt_violation(prompt), "")
         self.assertEqual(supervisor.parse_deliverable(prompt), "D005")
+
+    def test_model_handoff_claim_is_rejected_even_when_short(self):
+        prompt = supervisor.implementation_prompt("D006") + "\nAttempt 1 created public/app.js."
+        self.assertEqual(
+            supervisor.implementation_prompt_violation(prompt),
+            "noncanonical_or_model_derived_handoff",
+        )
 
     def test_oversized_prompt_is_rejected_before_dispatch(self):
         prompt = "DELIVERABLE: D005\n" + ("x" * supervisor.MAX_IMPLEMENTATION_PROMPT_CHARS)
@@ -199,6 +201,89 @@ class DispatchPromptProtocolTests(unittest.TestCase):
         self.assertEqual(len(self.aborts), 1)
         self.assertIn("oversized_first_user_prompt", self.aborts[0][1])
         self.assertIn("oversized", supervisor.dispatch_seen)
+
+
+class BoundedChildResultTests(unittest.TestCase):
+    PLUGIN = Path(__file__).parents[1] / "xdg/config/opencode/plugins/v2-bounded-subagent.mjs"
+
+    def invoke(self, original, agent="implementer"):
+        script = """
+import { boundedChildResult } from %s;
+const value = boundedChildResult({directory: process.argv[1], args: {agent: %s, prompt: %s}, metadata: {sessionID: 'child-1', status: 'completed'}, original: %s});
+process.stdout.write(value);
+""" % (json.dumps(self.PLUGIN.as_uri()), json.dumps(agent), json.dumps(supervisor.implementation_prompt("D005")), json.dumps(original))
+        with tempfile.TemporaryDirectory() as td:
+            return subprocess.run(["node", "--input-type=module", "-e", script, td], text=True, capture_output=True, check=True).stdout
+
+    def test_synthetic_50k_child_output_becomes_small_receipt(self):
+        receipt = self.invoke("x" * 50000)
+        self.assertLessEqual(len(receipt), 1500)
+        self.assertIn("DELIVERABLE: D005", receipt)
+        self.assertNotIn("x" * 100, receipt)
+
+    def test_acceptance_success_stays_exact_bare_token(self):
+        receipt = self.invoke('<subagent sessionID="x">\nACCEPTANCE_PASS\n</subagent>', "acceptance-validator")
+        self.assertEqual(receipt, "ACCEPTANCE_PASS")
+
+
+class LiveEventWatchdogTests(unittest.TestCase):
+    def test_sse_deltas_cross_worker_bound_and_tool_success_resets(self):
+        state = {"reasoning": 0, "text": 0, "tool_running": False}
+        supervisor.reduce_live_event(state, {"type": "session.next.reasoning.delta", "data": {"delta": "x" * 8001}})
+        self.assertIn("sse_reasoning_chars", supervisor.event_watchdog_reason("implementer", state))
+        supervisor.reduce_live_event(state, {"type": "session.next.tool.success", "data": {}})
+        self.assertEqual(state["reasoning"], 0)
+        self.assertEqual(supervisor.event_watchdog_reason("implementer", state), "")
+
+    def test_invisible_stream_has_conservative_hard_fallback(self):
+        old_project = supervisor.PROJECT
+        supervisor.event_watch.clear()
+        with tempfile.TemporaryDirectory() as td:
+            supervisor.PROJECT = td
+            try:
+                self.assertEqual(supervisor.fallback_no_progress_reason("s", "implementer", "", False, now=0), "")
+                self.assertIn("300s", supervisor.fallback_no_progress_reason("s", "implementer", "", False, now=300))
+            finally:
+                supervisor.PROJECT = old_project
+                supervisor.event_watch.clear()
+
+
+class PlannerCheckpointTests(unittest.TestCase):
+    def setUp(self): supervisor.planner_checkpoints.clear()
+
+    def test_missing_checkpoint_at_150_seconds_is_retired(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "IMPLEMENTATION_PLAN.md"
+            self.assertIn("checkpoint_missing", supervisor.planner_checkpoint_reason("p", 150, path))
+
+    def test_first_checkpoint_is_incomplete_and_at_most_120_lines(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "IMPLEMENTATION_PLAN.md"
+            path.write_text("# partial\n" * 50)
+            self.assertEqual(supervisor.planner_checkpoint_reason("p", 30, path), "")
+            self.assertTrue(supervisor.planner_checkpoints["p"]["observed"])
+            supervisor.planner_checkpoints.clear()
+            path.write_text("# large\n" * 121)
+            self.assertIn("not_incremental", supervisor.planner_checkpoint_reason("p2", 30, path))
+
+
+class RootResumeStateTests(unittest.TestCase):
+    def state(self, acceptance=True, plan=False, leaves=None, tests=False, validation=False):
+        return {"acceptance":{"complete":acceptance}, "plan":{"complete":plan},
+                "leaves":leaves or {}, "tests":{"complete":tests},
+                "acceptance_validation":{"complete":validation}}
+
+    def test_representative_resume_phases(self):
+        self.assertEqual(control_state.resume_phase(self.state(plan=False)), "implementation-plan")
+        self.assertEqual(control_state.resume_phase(self.state(plan=True, leaves={"D001":{"complete":False}})), "execution")
+        self.assertEqual(control_state.resume_phase(self.state(plan=True, leaves={"D001":{"complete":True}}, tests=False)), "final-tests")
+        self.assertEqual(control_state.resume_phase(self.state(plan=True, leaves={"D001":{"complete":True}}, tests=True)), "acceptance-validation")
+
+    def test_continuation_prompt_is_short_and_reference_only(self):
+        prompt = supervisor.ROOT_CONTINUATION_PROMPT
+        self.assertLess(len(prompt), 1000)
+        self.assertIn("control-status", prompt)
+        self.assertNotIn("transcript", prompt.lower())
 
 
 class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
@@ -218,6 +303,8 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             *[
                 {"name": name, "permissions": [
                     {"action": "edit", "resource": agent_config_audit.PLANNER_EDIT_TARGETS.get(name, "*"), "effect": "allow"},
+                    *([{"action": "edit", "resource": ".opencode-v2/bin/*", "effect": "deny"}]
+                      if name in agent_config_audit.CONTROL_WRAPPER_DENY_AGENTS else []),
                 ]}
                 for name in sorted(editor_agents)
             ],
@@ -303,6 +390,24 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         self.assertIn("do not include the original request", root)
         self.assertIn("never request a shorter self-contained retry", root)
 
+    def test_retry_prompt_is_exact_filesystem_only_protocol(self):
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        for line in supervisor.implementation_prompt("Dxxx").splitlines():
+            self.assertIn(f"`{line}`", root)
+        self.assertIn("Use exactly those five lines", root)
+        self.assertIn("model\nhandoff", root)
+
+    def test_workers_use_local_completion_and_protect_control_wrappers(self):
+        for name in sorted(supervisor.IMPLEMENTATION_AGENTS):
+            text = (self.AGENTS / f"{name}.md").read_text()
+            self.assertIn(".opencode-v2/bin/leaf-complete Dxxx", text)
+            self.assertIn('".opencode-v2/bin/*": deny', text)
+            self.assertIn("meaningful owned artifact early", text)
+
+    def test_bounded_child_plugin_is_resolved_in_config(self):
+        config = (self.AGENTS.parent / "opencode.jsonc").read_text()
+        self.assertIn("v2-bounded-subagent.mjs", config)
+
 
 class ImplementationPlanSizeTests(unittest.TestCase):
     GUARD = Path(__file__).with_name("control-guard.py")
@@ -321,7 +426,7 @@ class ImplementationPlanSizeTests(unittest.TestCase):
 - Deep reasoning: no
 - Role: tester
 - Parallel-safe with: (none)
-- Verify command: `python3 ~/AI/opencode-qwen38-multiagent-v2/scripts/run-checks.py --project .`
+- Verify command: `.opencode-v2/bin/run-checks`
 - Done when: report passes
 ## Execution Waves
 - Wave 1: D001
@@ -356,6 +461,19 @@ class ImplementationPlanSizeTests(unittest.TestCase):
             )
             self.assertFalse((ctrl / "IMPLEMENTATION_PLAN.ready").exists())
 
+    def test_test_manifest_leaf_requires_exact_project_local_runner(self):
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = Path(td) / ".opencode-v2"
+            ctrl.mkdir()
+            text = self.plan(40).replace(
+                ".opencode-v2/bin/run-checks",
+                "python3 run-checks.py --project .",
+            )
+            (ctrl / "IMPLEMENTATION_PLAN.md").write_text(text)
+            rejected = self.validate(td)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("must be exact .opencode-v2/bin/run-checks", (ctrl / "IMPLEMENTATION_PLAN.guard-errors.txt").read_text())
+
 
 class TestChecksControlContractTests(unittest.TestCase):
     RUNNER = Path(__file__).with_name("run-checks.py")
@@ -389,6 +507,12 @@ class TestChecksControlContractTests(unittest.TestCase):
                 "ACCEPTANCE_PASS",
             ):
                 self.assertIn(required, contract)
+            self.assertIn(".opencode-v2/bin/run-checks", contract)
+            self.assertIn(".opencode-v2/bin/leaf-complete Dxxx", contract)
+            for command in ("run-checks", "leaf-complete", "control-status"):
+                path = project / ".opencode-v2/bin" / command
+                self.assertTrue(path.exists())
+                self.assertTrue(path.stat().st_mode & 0o111)
             launch = (Path(__file__).parents[1] / "run.sh").read_text()
             self.assertIn("--bootstrap-control-contract", launch)
 
@@ -424,6 +548,26 @@ class TestChecksControlContractTests(unittest.TestCase):
             self.assertIn("invalid TEST_CHECKS.json", result.stderr)
             self.assertFalse((ctrl / "TEST_REPORT.json").exists())
 
+    def test_project_local_runner_and_leaf_complete_execute(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (project / "artifact.txt").write_text("done\n")
+            (ctrl / "TEST_CHECKS.json").write_text(json.dumps({
+                "checks": [{"name": "artifact", "command": "test -s artifact.txt"}]
+            }))
+            run = subprocess.run([str(ctrl / "bin/run-checks")], cwd=project, text=True, capture_output=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "leaves": {"D001": {"verify_command": "test -s artifact.txt", "owned_artifacts": "artifact.txt"}}
+            }))
+            (ctrl / "work").mkdir(exist_ok=True)
+            (ctrl / "work/attempts.json").write_text(json.dumps({"deliverables": {"D001": {"count": 1, "sessions": ["s"]}}}))
+            leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D001"], cwd=project, text=True, capture_output=True)
+            self.assertEqual(leaf.returncode, 0, leaf.stderr)
+            self.assertTrue((ctrl / "work/D001.ready").exists())
+
 
 class StatusTests(unittest.TestCase):
     def test_snapshot_is_derived_from_authoritative_files(self):
@@ -443,6 +587,42 @@ class StatusTests(unittest.TestCase):
             self.assertTrue(state["tests"]["complete"])
 
 
+class PostSessionFinalizationTests(unittest.TestCase):
+    RUNNER = Path(__file__).with_name("run-checks.py")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_project = supervisor.PROJECT
+        supervisor.PROJECT = self.tmp.name
+        project = Path(self.tmp.name)
+        subprocess.run([sys.executable, str(self.RUNNER), "--project", self.tmp.name, "--bootstrap-control-contract"], check=True, capture_output=True)
+        ctrl = project / ".opencode-v2"
+        (ctrl / "work").mkdir(exist_ok=True)
+        (ctrl / "work/attempts.json").write_text(json.dumps({"deliverables": {"D003": {"count": 2, "sessions": ["s"]}}}))
+
+    def tearDown(self):
+        supervisor.PROJECT = self.old_project
+        self.tmp.cleanup()
+
+    def manifest(self, verify="test -s artifact.txt"):
+        ctrl = Path(self.tmp.name) / ".opencode-v2"
+        (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves": {"D003": {"owned_artifacts": "artifact.txt", "verify_command": verify}}}))
+
+    def test_step_limit_with_valid_artifacts_is_mechanically_finalized(self):
+        self.manifest()
+        (Path(self.tmp.name) / "artifact.txt").write_text("done\n")
+        ok, detail = supervisor.post_session_finalize("D003")
+        self.assertTrue(ok, detail)
+        self.assertTrue((Path(self.tmp.name) / ".opencode-v2/work/D003.ready").exists())
+
+    def test_step_limit_with_missing_or_invalid_artifacts_stays_incomplete(self):
+        self.manifest()
+        ok, detail = supervisor.post_session_finalize("D003")
+        self.assertFalse(ok)
+        self.assertEqual(detail, "owned-artifacts-missing")
+        self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/D003.ready").exists())
+
+
 class LessonsApiTests(unittest.TestCase):
     def test_lessons_uses_current_session_create_then_prompt_routes(self):
         class Fake(supervisor.OpenCodeHTTP):
@@ -452,7 +632,7 @@ class LessonsApiTests(unittest.TestCase):
                 return True
             def request(self, method, path, payload=None, timeout=3):
                 self.calls.append((method, path, payload, timeout))
-                return {"id": "lessons-1"} if path == "/api/session" else {}
+                return {"data": {"id": "lessons-1"}} if path == "/api/session" else {}
 
         fake = Fake()
         old_project = supervisor.PROJECT
@@ -463,8 +643,10 @@ class LessonsApiTests(unittest.TestCase):
             supervisor.PROJECT = old_project
         self.assertEqual(fake.calls[0][0:2], ("POST", "/api/session"))
         self.assertEqual(fake.calls[0][2]["agent"], "lessons-learner")
+        self.assertEqual(fake.calls[0][2]["location"], {"directory": "/tmp/project"})
+        self.assertNotIn("title", fake.calls[0][2])
         self.assertEqual(fake.calls[1][0:2], ("POST", "/api/session/lessons-1/prompt"))
-        self.assertEqual(fake.calls[1][2], {"text": "retrospective", "delivery": "steer"})
+        self.assertEqual(fake.calls[1][2], {"prompt": {"text": "retrospective"}, "delivery": "steer"})
 
 
 class AcceptanceEvidenceTests(unittest.TestCase):
