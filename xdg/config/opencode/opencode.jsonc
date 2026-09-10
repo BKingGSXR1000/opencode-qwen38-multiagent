@@ -278,7 +278,7 @@
         },
         "qwen38-implementation-planner-48k": {
           "modelID": "qwen3.8-27b",
-          "name": "Qwen3.8 V2.3 Reasoning MEDIUM PRESERVE 28K",
+          "name": "Qwen3.8 V2.6.9 Planner NONTHINK bounded",
           "capabilities": {
             "tools": true,
             "input": [
@@ -290,16 +290,13 @@
           },
           "limit": {
             "context": 49152,
-            "output": 12288
+            "output": 1536
           },
           "body": {
             "chat_template_kwargs": {
-              "enable_thinking": true,
-              "preserve_thinking": true
+              "enable_thinking": false,
+              "preserve_thinking": false
             }
-          },
-          "settings": {
-            "reasoningEffort": "medium"
           }
         }
       }

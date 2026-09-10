@@ -2,7 +2,7 @@
 description: Decomposes an accepted user request into bounded implementation deliverables, dependencies, parallel waves, role choices, and context-size estimates before coding begins.
 mode: subagent
 model: syv/qwen38-implementation-planner-48k
-steps: 72
+steps: 24
 permission:
   read: allow
   edit:
