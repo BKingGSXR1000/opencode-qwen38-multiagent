@@ -360,7 +360,8 @@ def validate_plan(project: Path, finalize=False):
         manifest_path,
         json.dumps(
             {
-                "protocol": "V2.6.7c",
+                "protocol": "V2.6.9",
+                "recursive_split_protocol": "v2-recursive-split-v1",
                 "project": str(project),
                 "leaves": leaves,
                 "waves": waves,

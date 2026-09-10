@@ -5,7 +5,9 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
-                           MAX_OPERATOR_INFRASTRUCTURE_ABORTS)
+                           MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
+                           RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
+                           split_depth, valid_deliverable_id)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -31,6 +33,7 @@ MAX_PLANNER_RESTARTS=3
 # Existing historical `V2.6.7` ledgers remain readable; newly created ledgers
 # use this unambiguous schema name without a destructive migration.
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
+SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}
 event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set(); worker_progress={}
@@ -72,7 +75,7 @@ def first_user_text_db(sid):
 
 def parse_deliverable(text):
     if not text: return ""
-    m=re.search(r"(?mi)^\s*DELIVERABLE\s*:\s*(D\d{3})\s*$",text)
+    m=re.search(r"(?mi)^\s*DELIVERABLE\s*:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$",text)
     return m.group(1) if m else ""
 
 def implementation_prompt(did):
@@ -83,6 +86,23 @@ def implementation_prompt(did):
         "Inspect your owned project artifacts as they currently exist.\n"
         "Continue from actual filesystem state and execute the deliverable."
     )
+
+def recursive_split_enabled():
+    return load_manifest().get("recursive_split_protocol") == RECURSIVE_SPLIT_PROTOCOL
+
+def leaf_automatic_limit(did):
+    """Two real attempts lead to a split until the terminal split depth."""
+    if recursive_split_enabled() and split_depth(did) >= 0:
+        return 3 if split_depth(did) >= MAX_SPLIT_DEPTH else 2
+    return AUTOMATIC_ATTEMPT_LIMIT
+
+def leaf_children(did):
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    children=leaf.get("split_children",[]) if isinstance(leaf,dict) else []
+    return children if isinstance(children,list) else []
+
+def executable_leaf(did):
+    return valid_deliverable_id(did) and not leaf_children(did)
 
 def strip_subagent_prefix(text):
     """Remove only the beta's deterministic wrapper before the user prompt."""
@@ -128,6 +148,155 @@ def load_manifest():
     if not PROJECT: return {}
     try: return json.loads((Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json").read_text())
     except Exception: return {}
+
+def save_manifest(manifest):
+    path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
+    tmp=path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(manifest,indent=2)+"\n")
+    os.replace(tmp,path)
+
+def split_request_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-request.json"
+
+def split_proposal_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-proposal.json"
+
+def split_history_path():
+    return Path(PROJECT)/".opencode-v2"/"work"/"splits.json"
+
+def expected_children(did):
+    depth=split_depth(did)
+    if depth==0: return [f"{did}-A",f"{did}-B"]
+    if depth==1: return [f"{did}1",f"{did}2"]
+    return []
+
+def _artifact_items(raw):
+    return owned_artifact_paths({"owned_artifacts":raw})
+
+def split_request(did):
+    """Durably request a bounded planner-free split after two real failures."""
+    if not recursive_split_enabled() or split_depth(did) >= MAX_SPLIT_DEPTH:
+        return False,"split-depth-terminal"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did): return False,"not-splittable"
+    path=split_request_path(did); path.parent.mkdir(parents=True,exist_ok=True)
+    attempts=(load_attempts().get("deliverables") or {}).get(did,{})
+    failures=attempts.get("failure_history",[]) if isinstance(attempts,dict) else []
+    compact=[]
+    for item in failures[-2:]:
+        if isinstance(item,dict): compact.append({k:item.get(k) for k in ("attempt","classification","reason","timestamp")})
+    progress_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+    try: progress_text=progress_path.read_text(errors="replace")[:4000]
+    except OSError: progress_text=""
+    payload={
+        "protocol":SPLIT_PROPOSAL_PROTOCOL,"parent_id":did,"depth":split_depth(did),
+        "parent_scope":leaf.get("name",""),"ownership":leaf.get("owned_artifacts",""),
+        "verification":leaf.get("verify_command",""),"durable_progress":{"path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),"contents":progress_text},
+        "existing_artifacts":_artifact_items(leaf.get("owned_artifacts","")),
+        "failed_attempts":compact,"expected_children":expected_children(did),
+    }
+    tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2)+"\n"); os.replace(tmp,path)
+    return True,"split-required"
+
+def validate_split_proposal(parent, proposals):
+    """Validate exactly two child scopes; no model-selected IDs or control edits."""
+    manifest=load_manifest(); leaves=manifest.get("leaves") or {}; leaf=leaves.get(parent)
+    expected=expected_children(parent)
+    if not recursive_split_enabled() or not isinstance(leaf,dict) or not expected:
+        raise ValueError("parent is not eligible for recursive split")
+    if leaf_children(parent): raise ValueError("parent already split")
+    if not isinstance(proposals,list) or len(proposals)!=2: raise ValueError("split requires exactly two proposals")
+    parent_owned=set(_artifact_items(leaf.get("owned_artifacts","")))
+    seen=set(); children=[]
+    for index, proposal in enumerate(proposals):
+        if not isinstance(proposal,dict): raise ValueError("child proposal must be an object")
+        allowed={"scope","owned_artifacts","verify_command","role","depends_on_sibling","done_when"}
+        if set(proposal)-allowed or not all(isinstance(proposal.get(k),str) and proposal[k].strip() for k in ("scope","owned_artifacts","verify_command","role","done_when")):
+            raise ValueError("child proposal has missing or unsupported fields")
+        if proposal["role"] not in IMPLEMENTATION_AGENTS: raise ValueError("child role is invalid")
+        owned=set(_artifact_items(proposal["owned_artifacts"]))
+        if not owned or not owned <= parent_owned or seen & owned:
+            raise ValueError("child ownership must be disjoint and inside parent ownership")
+        seen |= owned
+        sibling=proposal.get("depends_on_sibling", "")
+        if sibling not in ("", "first") or (sibling == "first" and index != 1):
+            raise ValueError("only second child may depend on first child")
+        child=dict(leaf)
+        child.update({"id":expected[index],"name":proposal["scope"],"owned_artifacts":proposal["owned_artifacts"],
+                      "verify_command":proposal["verify_command"],"role":proposal["role"],"done_when":proposal["done_when"],
+                      "parent":parent,"split_depth":split_depth(expected[index]),"split_children":[]})
+        child["launch_deps"]=list(leaf.get("launch_deps",[])) + ([expected[0]] if sibling=="first" else [])
+        children.append(child)
+    if seen != parent_owned: raise ValueError("child ownership must cover all unfinished parent ownership")
+    return expected,children
+
+def persist_split(parent, proposals):
+    """Supervisor-owned mutation of the authoritative manifest and split history."""
+    with dispatch_lock:
+        with attempt_lock():
+            expected,children=validate_split_proposal(parent,proposals)
+            manifest=load_manifest(); leaves=manifest.setdefault("leaves",{})
+            for child in children:
+                leaves[child["id"]]=child
+                scope_path=Path(PROJECT)/".opencode-v2"/"work"/f"{child['id']}.scope.md"
+                scope_path.write_text(
+                    f"# {child['id']} split-child scope\n\n"
+                    f"Parent: {parent}\n\nScope: {child['name']}\n\n"
+                    f"Owned artifacts: {child['owned_artifacts']}\n\n"
+                    f"Verify command: `{child['verify_command']}`\n\nDone when: {child['done_when']}\n"
+                )
+            leaves[parent]["split_children"]=expected
+            leaves[parent]["split_depth"]=split_depth(parent)
+            manifest["recursive_split_protocol"]=RECURSIVE_SPLIT_PROTOCOL
+            save_manifest(manifest)
+            path=split_history_path(); path.parent.mkdir(parents=True,exist_ok=True)
+            try: history=json.loads(path.read_text())
+            except Exception: history={"owner":"supervisor","protocol":SPLIT_PROPOSAL_PROTOCOL,"splits":[]}
+            history.setdefault("splits",[]).append({"parent":parent,"children":expected,
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
+            tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(history,indent=2)+"\n"); os.replace(tmp,path)
+            split_request_path(parent).unlink(missing_ok=True)
+    log(f"RECURSIVE_SPLIT parent={parent} children={','.join(expected)}")
+    csv("RECURSIVE_SPLIT","","supervisor",f"{parent} -> {','.join(expected)}")
+    return expected
+
+def reconcile_split_proposals():
+    """Accept only a validated splitter artifact; malformed plans stay repairable."""
+    if not PROJECT: return
+    for request in (Path(PROJECT)/".opencode-v2"/"work").glob("D*.split-request.json"):
+        did=request.name.removesuffix(".split-request.json")
+        proposal_path=split_proposal_path(did)
+        if not proposal_path.exists(): continue
+        try:
+            payload=json.loads(proposal_path.read_text())
+            if not isinstance(payload,dict) or payload.get("parent_id")!=did:
+                raise ValueError("proposal parent does not match request")
+            children=persist_split(did,payload.get("proposals"))
+            proposal_path.unlink(missing_ok=True)
+            log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
+        except Exception as exc:
+            # Preserve the proposal as auditable repair evidence. The request
+            # remains outstanding and no model-selected control state changes.
+            log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason={exc}")
+
+def record_leaf_failure(did, reason, classification="genuine"):
+    """Record terminal worker outcome and request, but never invent, a split."""
+    if classification not in {"genuine","infrastructure","bad-plan"}: raise ValueError("invalid failure classification")
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict): return False,"missing-ledger-entry"
+            history=entry.setdefault("failure_history",[])
+            attempt=int(entry.get("count") or 0)
+            if any(isinstance(x,dict) and x.get("attempt")==attempt for x in history): return False,"already-recorded"
+            history.append({"attempt":attempt,"classification":classification,"reason":reason,
+                            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
+            save_attempts(data)
+    if classification!="genuine": return True,classification
+    genuine=sum(1 for x in history if isinstance(x,dict) and x.get("classification")=="genuine")
+    if recursive_split_enabled() and genuine>=2 and split_depth(did)<MAX_SPLIT_DEPTH:
+        return split_request(did)
+    return True,"genuine-recorded"
 
 def ready_info(did):
     return state_ready_info(PROJECT,did) if PROJECT and did else {}
@@ -458,6 +627,8 @@ def validate_dispatch(agent,text):
     if not PROJECT or not plan_ready(): return did,"plan_not_ready"
     leaves=(load_manifest().get("leaves") or {}); leaf=leaves.get(did)
     if not leaf: return did,"unknown_deliverable"
+    if leaf.get("split_children"):
+        return did,"split-parent-not-executable"
     expected=leaf.get("role") if isinstance(leaf,dict) else ""
     if expected not in IMPLEMENTATION_AGENTS: return did,"manifest_role_invalid"
     if agent!=expected: return did,f"role_mismatch expected={expected} actual={agent}"
@@ -500,8 +671,10 @@ def grant_operator_retry(dids, reason="explicit operator retry command"):
             entries = data.get("deliverables") if isinstance(data.get("deliverables"), dict) else {}
             selected = []
             for did in dids:
-                if not re.fullmatch(r"D\d{3}", did or "") or did not in leaves:
+                if not valid_deliverable_id(did) or did not in leaves:
                     raise ValueError(f"unknown deliverable {did!r}")
+                if not executable_leaf(did):
+                    raise ValueError(f"{did} is a split parent, not an executable leaf")
                 if ready_info(did):
                     raise ValueError(f"{did} is already complete")
                 entry = entries.get(did)
@@ -536,7 +709,9 @@ def claim_attempt(sid,did):
                 data=load_attempts()
                 if data.get("owner") not in (None,"supervisor"):
                     return "invalid",-1
-                ent=data.setdefault("deliverables",{}).setdefault(did,{"sessions":[],"count":0})
+                initial={"sessions":[],"count":0}
+                if recursive_split_enabled(): initial["automatic_limit"]=leaf_automatic_limit(did)
+                ent=data.setdefault("deliverables",{}).setdefault(did,initial)
                 sessions=ent.setdefault("sessions",[])
                 state=attempt_state(ent)
                 if not state["valid"]:
@@ -1486,6 +1661,7 @@ def persisted_reconcile_loop():
     while not DB.exists(): time.sleep(0.5)
     while True:
         try:
+            reconcile_split_proposals()
             con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction'),s.time_idle FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
             for sid,agent,comps,time_idle in rows:
                 prompt=first_user_text_db(sid)
@@ -1510,6 +1686,17 @@ def persisted_reconcile_loop():
                             ok,detail=post_session_finalize(did)
                             log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
                             csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
+                            if not ok and detail != "not-applicable":
+                                # Missing guard metadata is a plan defect; all
+                                # other post-work verification outcomes are a
+                                # genuine unfinished implementation attempt.
+                                classification=("bad-plan" if detail in {
+                                    "verify-command-missing", "owned-artifacts-missing"
+                                } and not meaningful_worker_execution(sid,did) else "genuine")
+                                recorded,outcome=record_leaf_failure(did,detail,classification)
+                                if recorded:
+                                    log(f"LEAF_FAILURE session={sid} deliverable={did} classification={classification} outcome={outcome}")
+                                    csv("LEAF_FAILURE",sid,agent,f"{did} classification={classification} outcome={outcome}")
                 prev=compaction_seen.get(sid,0)
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
@@ -1520,6 +1707,8 @@ def persisted_reconcile_loop():
                     granted,detail=(False,"not-implementation-child")
                     if failed=="compaction.failed" and did and agent in IMPLEMENTATION_AGENTS:
                         granted,detail=record_compaction_infrastructure_failure(sid,did)
+                        if granted:
+                            record_leaf_failure(did,"opencode-compaction-template","infrastructure")
                     log(f"COMPACTION_FAILED session={sid} agent={agent} deliverable={did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
                     csv("COMPACTION_FAILED",sid,agent,f"{did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
                     continue

@@ -5,7 +5,7 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 DID="$1"
-[[ "$DID" =~ ^D[0-9]{3}$ ]] || { echo "ERROR: deliverable must be exact Dxxx" >&2; exit 2; }
+[[ "$DID" =~ ^D[0-9]{3}(-[AB][12]?)?$ ]] || { echo "ERROR: deliverable must be a canonical split ID" >&2; exit 2; }
 ROOT="${HOME}/AI/opencode-qwen38-multiagent-v2"
 GUARD=".opencode-v2/IMPLEMENTATION_PLAN.guard.json"
 ATTEMPTS=".opencode-v2/work/attempts.json"
@@ -16,6 +16,16 @@ import json,sys
 g=json.load(open(sys.argv[1])); a=json.load(open(sys.argv[2])); did=sys.argv[3]
 leaf=(g.get("leaves") or {}).get(did)
 if not leaf: raise SystemExit(f"ERROR: {did} not in validated plan")
+children=leaf.get("split_children",[])
+if children:
+    if not isinstance(children,list) or len(children)!=2: raise SystemExit(f"ERROR: invalid split children for {did}")
+    def complete(child):
+        p=__import__('pathlib').Path('.opencode-v2/work') / f'{child}.ready'
+        if not p.exists(): return False
+        data=dict(line.split('=',1) for line in p.read_text(errors='replace').splitlines() if '=' in line)
+        return data.get('status')=='complete' and data.get('deliverable')==child and data.get('verified')=='true'
+    missing=[child for child in children if not complete(child)]
+    if missing: raise SystemExit(f"ERROR: {did} split children are not ready: {', '.join(missing)}")
 cmd=(leaf.get("verify_command") or "").strip()
 if not cmd: raise SystemExit(f"ERROR: {did} has no Verify command")
 ent=(a.get("deliverables") or {}).get(did) or {}
@@ -60,7 +70,7 @@ for item in operator_attempts:
     aborted += status=="infrastructure_abort"
 operator_dispatches=max(0,attempt-automatic_limit-infrastructure_grants)
 if len(operator_attempts)>operator_dispatches or aborted>1: valid_operator_attempts=False
-if (automatic_limit != 3 or operator_grants < 0 or infrastructure_grants < 0 or
+if (automatic_limit not in (2,3) or operator_grants < 0 or infrastructure_grants < 0 or
     infrastructure_grants > 1 or len(overrides) != operator_grants or not valid_overrides or
     len(infra) != infrastructure_grants or not valid_infra or
     not valid_operator_attempts or attempt < 1 or

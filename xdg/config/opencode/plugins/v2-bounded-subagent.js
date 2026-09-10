@@ -7,7 +7,7 @@ export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 
 function exactDeliverable(args) {
   const prompt = typeof args?.prompt === "string" ? args.prompt : "";
-  return prompt.match(/^DELIVERABLE:\s*(D\d{3})\s*$/m)?.[1] || "unknown";
+  return prompt.match(/^DELIVERABLE:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/m)?.[1] || "unknown";
 }
 
 function fileStatus(path) {
@@ -19,7 +19,7 @@ function fileStatus(path) {
 }
 
 function attemptFor(directory, did, childSessionID) {
-  if (!/^D\d{3}$/.test(did)) return "unknown";
+  if (!/^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)) return "unknown";
   try {
     const path = join(directory, ".opencode-v2", "work", "attempts.json");
     const entry = JSON.parse(readFileSync(path, "utf8"))?.deliverables?.[did];
@@ -31,7 +31,7 @@ function attemptFor(directory, did, childSessionID) {
 }
 
 function ownedArtifacts(directory, did) {
-  if (!/^D\d{3}$/.test(did)) return ["  (unknown): unknown"];
+  if (!/^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)) return ["  (unknown): unknown"];
   try {
     const path = join(directory, ".opencode-v2", "IMPLEMENTATION_PLAN.guard.json");
     const raw = JSON.parse(readFileSync(path, "utf8"))?.leaves?.[did]?.owned_artifacts;
@@ -51,10 +51,10 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
   }
   const did = exactDeliverable(args);
   const childSessionID = metadata?.sessionID || "unknown";
-  const readyPath = /^D\d{3}$/.test(did)
+  const readyPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
     ? join(directory, ".opencode-v2", "work", `${did}.ready`)
     : "";
-  const progressPath = /^D\d{3}$/.test(did)
+  const progressPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
     ? join(directory, ".opencode-v2", "work", `${did}.progress.md`)
     : "";
   const termination = metadata?.status || (original.length > TARGET_MAX_CHILD_RESULT_CHARS ? "output_limited" : "completed");
@@ -91,7 +91,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     if (agent === "general") {
       throw new Error("DISPATCH_DENY general is not a canonical implementation role");
     }
-    const hasDeliverable = typeof prompt === "string" && /^DELIVERABLE:\s*D\d{3}\s*$/m.test(prompt);
+    const hasDeliverable = typeof prompt === "string" && /^DELIVERABLE:\s*D\d{3}(?:-[AB](?:[12])?)?\s*$/m.test(prompt);
     const implementationAgents = new Set(["probe-builder", "implementer", "core-builder", "feature-builder", "reasoning-builder", "integrator", "tester", "test-builder"]);
     if (!implementationAgents.has(agent) && !hasDeliverable) return;
     // This deterministic supervisor claim occurs before OpenCode materializes

@@ -1385,6 +1385,104 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(control_state.snapshot(td)["resume_phase"], "execution")
 
 
+class RecursiveSplitTests(unittest.TestCase):
+    """Filesystem-only regression coverage for the bounded recursive tree."""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_root, self.old_project = supervisor.ROOT, supervisor.PROJECT
+        supervisor.ROOT, supervisor.PROJECT = Path(self.tmp.name), self.tmp.name
+        self.ctrl = Path(self.tmp.name) / ".opencode-v2"; (self.ctrl / "work").mkdir(parents=True)
+        self.parent = {"id":"D001", "name":"remaining work", "owned_artifacts":"a.txt, b.txt, c.txt, d.txt",
+                       "launch_deps":[], "contract_deps":[], "verify_command":"test -f a.txt -a -f b.txt -a -f c.txt -a -f d.txt",
+                       "role":"implementer", "done_when":"both files exist", "acceptance_ids":["A001"], "parallel":"yes"}
+        self.write_manifest({"D001": dict(self.parent)})
+
+    def tearDown(self):
+        supervisor.ROOT, supervisor.PROJECT = self.old_root, self.old_project
+        self.tmp.cleanup()
+
+    def write_manifest(self, leaves):
+        (self.ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "recursive_split_protocol": control_state.RECURSIVE_SPLIT_PROTOCOL, "leaves": leaves
+        }))
+
+    def proposal(self, first="a.txt, b.txt", second="c.txt, d.txt", sequential=False):
+        return [{"scope":"finish first scope", "owned_artifacts":first, "verify_command":"test -f a.txt",
+                 "role":"implementer", "depends_on_sibling":"", "done_when":"a exists"},
+                {"scope":"finish second scope", "owned_artifacts":second, "verify_command":"test -f b.txt",
+                 "role":"tester", "depends_on_sibling":"first" if sequential else "", "done_when":"b exists"}]
+
+    def fail_twice(self, did="D001"):
+        self.assertEqual(supervisor.claim_attempt("one", did), ("claimed", 1))
+        self.assertEqual(supervisor.record_leaf_failure(did, "verify-failed-1"), (True, "genuine-recorded"))
+        self.assertEqual(supervisor.claim_attempt("two", did), ("claimed", 2))
+        self.assertEqual(supervisor.record_leaf_failure(did, "verify-failed-1"), (True, "split-required"))
+
+    def test_first_genuine_failure_retries_same_leaf_then_root_splits(self):
+        self.assertEqual(supervisor.claim_attempt("one", "D001"), ("claimed", 1))
+        self.assertEqual(supervisor.record_leaf_failure("D001", "verify-failed-1"), (True, "genuine-recorded"))
+        self.assertFalse(supervisor.split_request_path("D001").exists())
+        self.assertEqual(supervisor.claim_attempt("two", "D001"), ("claimed", 2))
+        self.assertEqual(supervisor.record_leaf_failure("D001", "verify-failed-1"), (True, "split-required"))
+        self.assertTrue(supervisor.split_request_path("D001").exists())
+
+    def test_depth_one_splits_and_depth_two_has_three_attempt_limit(self):
+        self.fail_twice(); self.assertEqual(supervisor.persist_split("D001", self.proposal()), ["D001-A", "D001-B"])
+        self.fail_twice("D001-A")
+        self.assertEqual(supervisor.persist_split("D001-A", self.proposal("a.txt", "b.txt")), ["D001-A1", "D001-A2"])
+        for sid in ("a", "b", "c"):
+            self.assertEqual(supervisor.claim_attempt(sid, "D001-A1")[0], "claimed")
+            self.assertEqual(supervisor.record_leaf_failure("D001-A1", "verify-failed-1"), (True, "genuine-recorded"))
+        self.assertEqual(supervisor.claim_attempt("d", "D001-A1"), ("limit", 3))
+        self.assertFalse(supervisor.split_request_path("D001-A1").exists())
+
+    def test_infrastructure_and_bad_plan_do_not_trigger_split(self):
+        self.assertEqual(supervisor.claim_attempt("one", "D001"), ("claimed", 1))
+        self.assertEqual(supervisor.record_leaf_failure("D001", "runtime", "infrastructure"), (True, "infrastructure"))
+        self.assertEqual(supervisor.claim_attempt("two", "D001"), ("claimed", 2))
+        self.assertEqual(supervisor.record_leaf_failure("D001", "bad ownership", "bad-plan"), (True, "bad-plan"))
+        self.assertFalse(supervisor.split_request_path("D001").exists())
+
+    def test_validation_enforces_ownership_and_acyclic_order(self):
+        self.fail_twice()
+        bad = self.proposal(); bad[1]["owned_artifacts"] = "a.txt"
+        with self.assertRaisesRegex(ValueError, "disjoint"):
+            supervisor.persist_split("D001", bad)
+        cyclic = self.proposal(); cyclic[0]["depends_on_sibling"] = "first"
+        with self.assertRaisesRegex(ValueError, "only second"):
+            supervisor.persist_split("D001", cyclic)
+
+    def test_parent_verification_is_preserved_and_requires_children(self):
+        self.fail_twice(); original = self.parent["verify_command"]
+        supervisor.persist_split("D001", self.proposal())
+        manifest = supervisor.load_manifest()
+        self.assertEqual(manifest["leaves"]["D001"]["verify_command"], original)
+        for child in ("D001-A", "D001-B"):
+            (self.ctrl / "work" / f"{child}.ready").write_text(f"status=complete\ndeliverable={child}\nverified=true\n")
+        self.assertFalse(control_state.ready_info(self.tmp.name, "D001"))
+        (self.ctrl / "work" / "attempts.json").write_text(json.dumps({"owner":"supervisor","deliverables":{"D001":{"count":2,"sessions":["one","two"],"automatic_limit":2}}}))
+        self.assertNotEqual(subprocess.run([str(Path(__file__).with_name("leaf-complete.sh")), "D001"], cwd=self.tmp.name).returncode, 0)
+        for name in ("a.txt", "b.txt", "c.txt", "d.txt"): Path(self.tmp.name, name).write_text(name)
+        self.assertEqual(subprocess.run([str(Path(__file__).with_name("leaf-complete.sh")), "D001"], cwd=self.tmp.name).returncode, 0)
+        self.assertTrue(control_state.ready_info(self.tmp.name, "D001"))
+
+    def test_independent_children_are_concurrent_restartable_and_operator_retry_is_leaf_only(self):
+        self.fail_twice(); supervisor.persist_split("D001", self.proposal())
+        state = control_state.snapshot(self.tmp.name)
+        self.assertIn("Owned artifacts: a.txt, b.txt", (self.ctrl / "work/D001-A.scope.md").read_text())
+        self.assertTrue(state["leaves"]["D001-A"]["eligible"])
+        self.assertTrue(state["leaves"]["D001-B"]["eligible"])
+        self.assertFalse(state["leaves"]["D001"]["eligible"])
+        # A fresh process-equivalent snapshot reconstructs the complete tree.
+        self.assertEqual(set(control_state.snapshot(self.tmp.name)["leaves"]), {"D001", "D001-A", "D001-B"})
+        with self.assertRaisesRegex(ValueError, "split parent"):
+            supervisor.grant_operator_retry(["D001"])
+        ledger = json.loads((self.ctrl / "work" / "attempts.json").read_text())
+        ledger["deliverables"]["D001-A"] = {"count":2,"sessions":["x","y"],"automatic_limit":2}
+        (self.ctrl / "work" / "attempts.json").write_text(json.dumps(ledger))
+        self.assertEqual([x for x, _ in supervisor.grant_operator_retry(["D001-A"])], ["D001-A"])
+
+
 class PostSessionFinalizationTests(unittest.TestCase):
     RUNNER = Path(__file__).with_name("run-checks.py")
 

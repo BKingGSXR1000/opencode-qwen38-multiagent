@@ -104,6 +104,18 @@ After it returns or is interrupted:
 EXECUTION
 Read `.opencode-v2/IMPLEMENTATION_PLAN.guard.json`.
 
+RECURSIVE SPLIT
+When `control-status` reports `"resume_phase": "recursive-split"`, launch
+exactly one `task-splitter` for each `split_required` parent, with the short
+prompt `SPLIT_PARENT: Dxxx`. The splitter reads its durable request and writes
+two proposals; it cannot choose child IDs or mutate the manifest/ledger. Wait
+for the supervisor to validate and persist the split, then re-read
+`control-status`. Do not dispatch the split parent, replan the project, grant a
+retry, or manufacture child IDs. At depths 0 and 1 a second genuine failed
+attempt triggers this path; depth 2 never splits and retains its three genuine
+automatic attempts. Infrastructure/runtime failures and bad-plan outcomes do
+not trigger splitting.
+
 Dispatch only exact planned Dxxx leaves whose Launch deps are complete, using
 the exact `Role:` recorded for that Dxxx in `IMPLEMENTATION_PLAN.guard.json`.
 Never substitute `general` (or any other role) for a planned worker role. The
@@ -125,10 +137,16 @@ status rather than trusting their prose.
 
 Use planned parallel-safe leaves to obtain useful C2 when possible.
 
-Attempts belong to the exact Dxxx:
-1. normal attempt
-2. fresh retry preserving useful partial work
-3. final narrowed execution of the SAME Dxxx and SAME complete acceptance obligation
+For recursively created children, the same canonical five-line worker prompt
+applies with the persisted child ID. Their manifest scope is authoritative;
+stay inside it. A split parent becomes ready only after both required children
+are ready and its original unchanged verification succeeds.
+
+Attempts belong to the exact canonical leaf. At split depths 0 and 1, retry the
+same leaf after its first genuine failure; after its second genuine failure,
+wait for the bounded splitter. At terminal depth 2, make up to three genuine
+automatic attempts of the same leaf. Preserve useful partial work and the
+complete acceptance obligation in all retries.
 
 After three automatic attempts without Dxxx.ready, status is execution-blocked
 pending a human operator decision. Never invoke implementation-planner merely

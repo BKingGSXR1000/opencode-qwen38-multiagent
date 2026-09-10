@@ -9,6 +9,8 @@ from pathlib import Path
 
 
 AUTOMATIC_ATTEMPT_LIMIT = 3
+RECURSIVE_SPLIT_PROTOCOL = "v2-recursive-split-v1"
+MAX_SPLIT_DEPTH = 2
 # A bounded, supervisor-recorded OpenCode failure can reserve one additional
 # *dispatch slot* without relabelling a broken beta compaction as a successful
 # implementation attempt.  It is deliberately not a general retry mechanism.
@@ -46,7 +48,7 @@ def _kv(path):
         return {}
 
 
-def ready_info(project, did):
+def _base_ready(project, did):
     project = Path(project)
     data = _kv(project / ".opencode-v2" / "work" / f"{did}.ready")
     if (
@@ -56,6 +58,39 @@ def ready_info(project, did):
     ):
         return data
     return {}
+
+
+def split_depth(did):
+    """Return the deterministic depth for a root or recursively split ID."""
+    if not isinstance(did, str):
+        return -1
+    if __import__("re").fullmatch(r"D\d{3}", did):
+        return 0
+    if __import__("re").fullmatch(r"D\d{3}-[AB]", did):
+        return 1
+    if __import__("re").fullmatch(r"D\d{3}-[AB][12]", did):
+        return 2
+    return -1
+
+
+def valid_deliverable_id(did):
+    return split_depth(did) >= 0
+
+
+def ready_info(project, did, _seen=None):
+    """A split parent is ready only after its children and original check pass."""
+    if not _base_ready(project, did):
+        return {}
+    manifest = load_manifest(project)
+    leaf = (manifest.get("leaves") or {}).get(did, {})
+    children = leaf.get("split_children", []) if isinstance(leaf, dict) else []
+    if not children:
+        return _base_ready(project, did)
+    seen = set() if _seen is None else set(_seen)
+    if did in seen or not isinstance(children, list) or len(children) != 2:
+        return {}
+    seen.add(did)
+    return _base_ready(project, did) if all(ready_info(project, child, seen) for child in children) else {}
 
 
 def phase_ready(project, name, artifact, marker):
@@ -205,7 +240,7 @@ def attempt_state(entry):
     allowed = automatic_limit + operator_grants + infrastructure_grants + aborted_operator_attempts
     valid = (
         count >= 0
-        and automatic_limit == AUTOMATIC_ATTEMPT_LIMIT
+        and automatic_limit in (2, AUTOMATIC_ATTEMPT_LIMIT)
         and operator_grants >= 0
         and infrastructure_grants >= 0
         and infrastructure_grants <= MAX_INFRASTRUCTURE_RETRY_GRANTS
@@ -281,6 +316,13 @@ def snapshot(project):
         deps = leaf.get("launch_deps") if isinstance(leaf, dict) else []
         deps = deps if isinstance(deps, list) else []
         missing = [dep for dep in deps if not ready_info(project, dep)]
+        children = leaf.get("split_children", []) if isinstance(leaf, dict) else []
+        children = children if isinstance(children, list) else []
+        history = entry.get("failure_history", []) if isinstance(entry, dict) else []
+        genuine_failures = sum(
+            1 for item in history if isinstance(item, dict) and item.get("classification") == "genuine"
+        )
+        split_required = (project / ".opencode-v2" / "work" / f"{did}.split-request.json").exists()
         leaf_states[did] = {
             "complete": complete,
             "attempts": count,
@@ -301,7 +343,11 @@ def snapshot(project):
             "allowed_attempts": attempt["allowed_attempts"],
             "attempt_limit_reached": not complete and (not attempt["valid"] or count >= attempt["allowed_attempts"]),
             "launch_deps_missing": missing,
-            "eligible": not complete and attempt["valid"] and count < attempt["allowed_attempts"] and not missing,
+            "split_depth": split_depth(did),
+            "split_children": children,
+            "genuine_failures": genuine_failures,
+            "split_required": split_required,
+            "eligible": not complete and not children and not split_required and attempt["valid"] and count < attempt["allowed_attempts"] and not missing,
         }
     acceptance_complete = phase_ready(
         project, "ACCEPTANCE.ready", "ACCEPTANCE.md", "ACCEPTANCE_COMPLETE"
@@ -316,7 +362,7 @@ def snapshot(project):
     tests = test_state(project)
     execution_blockers = []
     for did, leaf in leaf_states.items():
-        if leaf["complete"] or not leaf["attempt_limit_reached"]:
+        if leaf["complete"] or leaf["split_required"] or leaf["split_children"] or not leaf["attempt_limit_reached"]:
             continue
         execution_blockers.append({
             "deliverable": did,
@@ -356,6 +402,8 @@ def resume_phase(state):
     if not state.get("plan", {}).get("complete"):
         return "implementation-plan"
     leaves = state.get("leaves") or {}
+    if any(leaf.get("split_required") for leaf in leaves.values()):
+        return "recursive-split"
     if any(not leaf.get("complete") and leaf.get("attempt_limit_reached") for leaf in leaves.values()):
         return "execution-blocked"
     if any(not leaf.get("complete") for leaf in leaves.values()):

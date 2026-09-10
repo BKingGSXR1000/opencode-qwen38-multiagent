@@ -41,8 +41,8 @@ Do NOT use your full budget!
 Once you know what to do, make the tool call.
 
 If resumed after an interrupt:
-- reuse your previous reasoning
-- do not derive it again
+- continue from durable filesystem state; do not repeat completed investigation
+- prioritize remaining owned artifacts and verification; split children stay inside child scope
 - your first meaningful action must be a tool call
 - You again will be monitored closely and you WILL be interrupted again if you break the before mentioned rules!
 
@@ -119,6 +119,8 @@ service/API when doing so materially changes what is being implemented.
 ## V2.6.7 bounded durable worker — authoritative
 
 Prompt contains exact `DELIVERABLE: Dxxx`. Work only that validated leaf.
+For a split child, read `.opencode-v2/work/<ID>.scope.md` and stay inside its
+remaining owned artifacts and verification.
 Use short reason -> tool -> inspect -> refine cycles; target <=~2,500 reasoning
 characters before the next meaningful tool action. Inspect owned artifacts and
 Dxxx.progress.md before re-deriving on retries. Externalize numerical/algorithmic
