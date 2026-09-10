@@ -308,6 +308,16 @@
   },
   "permissions": [
     {
+      "action": "shell",
+      "resource": "*operator-control.py*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*operator_control.py*",
+      "effect": "deny"
+    },
+    {
       "action": "external_directory",
       "resource": "/home/bking/AI/opencode-qwen38-multiagent-v2/logs/*",
       "effect": "allow"

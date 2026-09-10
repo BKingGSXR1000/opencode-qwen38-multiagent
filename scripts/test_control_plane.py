@@ -10,6 +10,7 @@ from pathlib import Path
 import control_state
 import supervisor
 import agent_config_audit
+import operator_control
 
 
 def message(parts=None, completed=None):
@@ -38,6 +39,12 @@ class WatchdogShapeTests(unittest.TestCase):
         self.assertTrue(shape["observable"])
         self.assertEqual(shape["reasoning"], 8001)
         self.assertFalse(shape["assistant_completed"])
+
+    def test_live_beta_location_directory_scopes_the_session(self):
+        shape = supervisor.message_shape(
+            [message()], {"parentID": "root", "location": {"directory": "/tmp/live-project"}}
+        )
+        self.assertEqual(shape["directory"], "/tmp/live-project")
 
     def test_missing_parts_waits_instead_of_aging(self):
         shape = supervisor.message_shape(
@@ -122,6 +129,7 @@ class AttemptLedgerTests(unittest.TestCase):
         self.assertEqual(ledger["owner"], "supervisor")
         self.assertEqual(ledger["deliverables"]["D005"]["count"], 3)
         self.assertEqual(len(ledger["deliverables"]["D005"]["sessions"]), 3)
+        self.assertEqual(ledger["protocol"], supervisor.ATTEMPT_LEDGER_PROTOCOL)
 
     def test_existing_session_with_count_four_is_invalid_and_not_repaired(self):
         ledger_path = Path(self.tmp.name) / ".opencode-v2/work/attempts.json"
@@ -163,6 +171,232 @@ class AttemptLedgerTests(unittest.TestCase):
         self.assertEqual(len(aborts), 1)
         self.assertIn("attempt_ledger_invalid", aborts[0][1])
 
+    def _manifest(self, leaves=None):
+        root = Path(self.tmp.name) / ".opencode-v2"
+        root.mkdir(exist_ok=True)
+        leaves = leaves or {
+            "D004": {"role": "implementer", "launch_deps": [], "owned_artifacts": "d004.txt", "verify_command": "test -f d004.txt"},
+            "D008": {"role": "test-builder", "launch_deps": [], "owned_artifacts": "d008.txt", "verify_command": "test -f d008.txt"},
+        }
+        (root / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves": leaves}))
+        return root, leaves
+
+    def _exhaust(self, did):
+        root, _ = self._manifest()
+        root.joinpath("work").mkdir(exist_ok=True)
+        root.joinpath("work/attempts.json").write_text(json.dumps({
+            "owner": "supervisor", "deliverables": {did: {"count": 3, "sessions": ["one", "two", "three"]}},
+        }))
+        return root
+
+    def test_operator_grant_permits_truthful_fourth_attempt_without_reset(self):
+        root = self._exhaust("D004")
+        self.assertEqual(supervisor.claim_attempt("automatic-four", "D004"), ("limit", 3))
+        self.assertEqual([did for did, _ in supervisor.grant_operator_retry(["D004"])], ["D004"])
+        before = json.loads((root / "work/attempts.json").read_text())["deliverables"]["D004"]
+        self.assertEqual(before["count"], 3)
+        self.assertEqual(before["sessions"], ["one", "two", "three"])
+        self.assertEqual(before["automatic_limit"], 3)
+        self.assertEqual(before["operator_retry_grants"], 1)
+        self.assertEqual(before["operator_overrides"][0]["source"], "operator-cli")
+        self.assertEqual(supervisor.claim_attempt("human-four", "D004"), ("claimed", 4))
+        after = json.loads((root / "work/attempts.json").read_text())["deliverables"]["D004"]
+        self.assertEqual(after["count"], 4)
+        self.assertEqual(after["sessions"][:3], ["one", "two", "three"])
+        projected = control_state.attempt_state(after)
+        self.assertTrue(projected["operator_authorized_attempt"])
+        self.assertEqual(projected["operator_grants_remaining"], 0)
+        self.assertEqual(supervisor.claim_attempt("automatic-five", "D004"), ("limit", 4))
+
+    def test_unauthorized_count_four_remains_invalid(self):
+        root, _ = self._manifest()
+        (root / "work").mkdir(exist_ok=True)
+        (root / "work/attempts.json").write_text(json.dumps({
+            "owner": "supervisor", "deliverables": {"D004": {"count": 4, "sessions": ["old"]}},
+        }))
+        self.assertEqual(supervisor.claim_attempt("old", "D004"), ("invalid", 4))
+
+    def test_retry_failed_and_selected_retry_preserve_plan_and_scope(self):
+        root, leaves = self._manifest()
+        (root / "work").mkdir(exist_ok=True)
+        (root / "work/attempts.json").write_text(json.dumps({
+            "owner": "supervisor",
+            "deliverables": {
+                "D004": {"count": 3, "sessions": ["a", "b", "c"]},
+                "D008": {"count": 3, "sessions": ["d", "e", "f"]},
+            },
+        }))
+        original = json.loads((root / "IMPLEMENTATION_PLAN.guard.json").read_text())
+        self.assertEqual(operator_control.exhausted_incomplete(self.tmp.name), ["D004", "D008"])
+        self.assertEqual(operator_control.grant(self.tmp.name, ["D004"]), ["D004"])
+        self.assertEqual(operator_control.exhausted_incomplete(self.tmp.name), ["D008"])
+        ledger = json.loads((root / "work/attempts.json").read_text())
+        self.assertEqual(ledger["deliverables"]["D004"]["operator_retry_grants"], 1)
+        self.assertNotIn("operator_retry_grants", ledger["deliverables"]["D008"])
+        self.assertEqual(json.loads((root / "IMPLEMENTATION_PLAN.guard.json").read_text()), original)
+
+    def test_second_explicit_grant_permits_attempt_five_only_after_four_fails(self):
+        self._exhaust("D004")
+        supervisor.grant_operator_retry(["D004"])
+        self.assertEqual(supervisor.claim_attempt("four", "D004"), ("claimed", 4))
+        self.assertEqual(supervisor.claim_attempt("five", "D004"), ("limit", 4))
+        supervisor.grant_operator_retry(["D004"])
+        self.assertEqual(supervisor.claim_attempt("five", "D004"), ("claimed", 5))
+
+    def test_operator_reservation_releases_after_proven_preexecution_abort(self):
+        root = self._exhaust("D004")
+        supervisor.grant_operator_retry(["D004"])
+        self.assertEqual(supervisor.claim_attempt("dispatch:four", "D004"), ("claimed", 4))
+        self.assertEqual(supervisor.claim_attempt("child-four", "D004"), ("existing", 4))
+        self.assertEqual(
+            supervisor.release_operator_reservation("child-four", "D004", "zero-token runtime abort"),
+            (True, "released"),
+        )
+        entry = json.loads(root.joinpath("work/attempts.json").read_text())["deliverables"]["D004"]
+        self.assertEqual(entry["count"], 4)  # historical sequence never rewrites
+        self.assertEqual(entry["operator_retry_attempts"][0]["outcome"], "infrastructure_abort")
+        self.assertFalse(entry["operator_retry_attempts"][0]["consumes_operator_grant"])
+        state = control_state.attempt_state(entry)
+        self.assertEqual(state["operator_grants_remaining"], 1)
+        self.assertEqual(state["operator_infrastructure_aborted"], 1)
+        self.assertEqual(supervisor.claim_attempt("dispatch:five", "D004"), ("claimed", 5))
+
+    def test_genuine_execution_consumes_reserved_operator_grant(self):
+        self._exhaust("D004")
+        supervisor.grant_operator_retry(["D004"])
+        supervisor.claim_attempt("dispatch:four", "D004")
+        supervisor.claim_attempt("child-four", "D004")
+        self.assertEqual(
+            supervisor.consume_operator_reservation("child-four", "D004", "owned-artifact-or-progress"),
+            (True, "consumed"),
+        )
+        entry = json.loads(Path(self.tmp.name, ".opencode-v2/work/attempts.json").read_text())["deliverables"]["D004"]
+        state = control_state.attempt_state(entry)
+        self.assertEqual(state["operator_grants_used"], 1)
+        self.assertEqual(state["operator_grants_remaining"], 0)
+        self.assertEqual(supervisor.claim_attempt("five", "D004"), ("limit", 4))
+
+    def test_repeated_operator_infrastructure_abort_blocks_without_free_loop(self):
+        self._exhaust("D004")
+        supervisor.grant_operator_retry(["D004"])
+        supervisor.claim_attempt("dispatch:four", "D004")
+        supervisor.claim_attempt("child-four", "D004")
+        self.assertEqual(supervisor.release_operator_reservation("child-four", "D004", "first"), (True, "released"))
+        supervisor.claim_attempt("dispatch:five", "D004")
+        supervisor.claim_attempt("child-five", "D004")
+        self.assertEqual(
+            supervisor.release_operator_reservation("child-five", "D004", "second"),
+            (False, "infrastructure-retry-limit"),
+        )
+        entry = json.loads(Path(self.tmp.name, ".opencode-v2/work/attempts.json").read_text())["deliverables"]["D004"]
+        state = control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["operator_infrastructure_aborted"], 1)
+        self.assertEqual(state["operator_infrastructure_blocked"], 1)
+        self.assertEqual(state["operator_grants_remaining"], 0)
+        self.assertEqual(supervisor.claim_attempt("six", "D004"), ("limit", 5))
+
+    def test_stale_dispatch_placeholders_do_not_reject_operator_child_binding(self):
+        root = self._exhaust("D004")
+        ledger_path = root / "work/attempts.json"
+        ledger = json.loads(ledger_path.read_text())
+        ledger["deliverables"]["D004"]["sessions"] = ["dispatch:old-one", "dispatch:old-two", "three"]
+        ledger_path.write_text(json.dumps(ledger))
+        supervisor.grant_operator_retry(["D004"])
+        self.assertEqual(supervisor.claim_attempt("dispatch:new", "D004"), ("claimed", 4))
+        self.assertEqual(supervisor.claim_attempt("actual-child", "D004"), ("existing", 4))
+        entry = json.loads(ledger_path.read_text())["deliverables"]["D004"]
+        self.assertIn("actual-child", entry["sessions"])
+        self.assertTrue(control_state.attempt_state(entry)["valid"])
+
+    def test_snapshot_exposes_operator_and_infrastructure_accounting(self):
+        root, _ = self._manifest()
+        root.joinpath("work").mkdir(exist_ok=True)
+        root.joinpath("work/attempts.json").write_text(json.dumps({
+            "owner": "supervisor", "deliverables": {"D004": {
+                "count": 4, "sessions": ["one", "two", "three", "four"],
+                "automatic_limit": 3, "operator_retry_grants": 1,
+                "operator_overrides": [{"timestamp":"2026-01-01T00:00:00Z","grant":1,"source":"operator-cli","reason":"test"}],
+                "operator_retry_attempts": [{"sequence":4,"session":"four","source":"supervisor","state":"infrastructure_abort","outcome":"infrastructure_abort","consumes_operator_grant":False}],
+            }},
+        }))
+        leaf = control_state.snapshot(self.tmp.name)["leaves"]["D004"]
+        self.assertEqual(leaf["total_dispatches"], 4)
+        self.assertEqual(leaf["automatic_attempts_consumed"], 3)
+        self.assertEqual(leaf["operator_grants_used"], 0)
+        self.assertEqual(leaf["operator_grants_remaining"], 1)
+        self.assertEqual(leaf["operator_infrastructure_aborted"], 1)
+        self.assertTrue(leaf["eligible"])
+
+    def test_zero_token_zero_tool_aborted_session_is_the_only_auto_release_evidence(self):
+        class Cursor:
+            def __init__(self, rows): self.rows = rows
+            def fetchall(self): return self.rows
+        class Connection:
+            def __init__(self, rows): self.rows = rows
+            def execute(self, *_): return Cursor(self.rows)
+            def close(self): pass
+        old_connect = supervisor.db_connect
+        try:
+            aborted = json.dumps({"finish":"error","error":{"type":"aborted"},"content":[]})
+            supervisor.db_connect = lambda: Connection([("user", "{}"), ("assistant", aborted)])
+            self.assertIn("zero-token-zero-tool", supervisor.immediate_runtime_abort("s"))
+            tool = json.dumps({"type":"tool","id":"t"})
+            supervisor.db_connect = lambda: Connection([("assistant", aborted), ("part", tool)])
+            self.assertEqual(supervisor.immediate_runtime_abort("s"), "")
+            completed_tool = json.dumps({"content":[{"type":"tool","id":"t","state":{"status":"completed"}}]})
+            supervisor.db_connect = lambda: Connection([(completed_tool,)])
+            self.assertEqual(supervisor.meaningful_worker_execution("s", "D404"), "completed-worker-tool-action")
+        finally:
+            supervisor.db_connect = old_connect
+
+    def test_one_pre_artifact_compaction_failure_gets_a_bounded_auditable_slot(self):
+        root, _ = self._manifest({
+            "D008": {"role": "tester", "launch_deps": [], "owned_artifacts": "`tests/ephemeris.test.mjs`.", "verify_command": "test -f tests/ephemeris.test.mjs"},
+        })
+        root.joinpath("work").mkdir(exist_ok=True)
+        root.joinpath("work/attempts.json").write_text(json.dumps({
+            "owner": "supervisor", "deliverables": {"D008": {"count": 1, "sessions": ["compact-fail"]}},
+        }))
+        self.assertEqual(
+            supervisor.record_compaction_infrastructure_failure("compact-fail", "D008"),
+            (True, "granted"),
+        )
+        entry = json.loads(root.joinpath("work/attempts.json").read_text())["deliverables"]["D008"]
+        projected = control_state.attempt_state(entry)
+        self.assertTrue(projected["valid"])
+        self.assertEqual(projected["infrastructure_retry_grants"], 1)
+        self.assertEqual(projected["operator_grants_remaining"], 0)
+        self.assertEqual(entry["infrastructure_failures"][0]["kind"], "opencode-compaction-template")
+        self.assertEqual(operator_control.exhausted_incomplete(self.tmp.name), [])
+        self.assertEqual(supervisor.claim_attempt("real-2", "D008"), ("claimed", 2))
+        self.assertEqual(supervisor.claim_attempt("real-3", "D008"), ("claimed", 3))
+        self.assertEqual(supervisor.claim_attempt("real-4", "D008"), ("claimed", 4))
+        self.assertEqual(supervisor.claim_attempt("real-5", "D008"), ("limit", 4))
+
+    def test_compaction_credit_is_rejected_after_any_durable_worker_state_or_second_failure(self):
+        root, _ = self._manifest({
+            "D008": {"role": "tester", "launch_deps": [], "owned_artifacts": "`artifact.txt`.", "verify_command": "test -f artifact.txt"},
+        })
+        root.joinpath("work").mkdir(exist_ok=True)
+        root.joinpath("work/attempts.json").write_text(json.dumps({
+            "owner": "supervisor", "deliverables": {"D008": {"count": 1, "sessions": ["compact-fail"]}},
+        }))
+        Path(self.tmp.name, "artifact.txt").write_text("partial")
+        self.assertEqual(
+            supervisor.record_compaction_infrastructure_failure("compact-fail", "D008"),
+            (False, "durable-worker-state-present"),
+        )
+        Path(self.tmp.name, "artifact.txt").unlink()
+        self.assertEqual(
+            supervisor.record_compaction_infrastructure_failure("compact-fail", "D008"),
+            (True, "granted"),
+        )
+        self.assertEqual(
+            supervisor.record_compaction_infrastructure_failure("other", "D008"),
+            (False, "session-not-in-ledger"),
+        )
+
 
 class DispatchPromptProtocolTests(unittest.TestCase):
     def setUp(self):
@@ -191,6 +425,42 @@ class DispatchPromptProtocolTests(unittest.TestCase):
     def test_actual_beta_single_newline_subagent_wrapper_is_valid(self):
         wrapped = "You are a subagent spawned by another session.\n" + supervisor.implementation_prompt("D005")
         self.assertEqual(supervisor.implementation_prompt_violation(wrapped), "")
+
+    def test_gametest2x_raw_beta_placeholder_and_success_shapes_normalize_identically(self):
+        # Exact pre-dispatch V2-hook inputs from gametest2x: the first call
+        # retained the beta/root's literal Dxxx placeholder; the retry carried
+        # D001. Both have the same already-bound deliverable in line one.
+        failed_raw = (
+            "DELIVERABLE: D001\n"
+            "Read your Dxxx section in .opencode-v2/IMPLEMENTATION_PLAN.md.\n"
+            "Read .opencode-v2/work/D001.progress.md if present.\n"
+            "Inspect your owned project artifacts as they currently exist.\n"
+            "Continue from actual filesystem state and execute the deliverable."
+        )
+        successful_raw = supervisor.implementation_prompt("D001")
+        self.assertEqual(
+            supervisor.normalize_implementation_prompt(failed_raw), successful_raw
+        )
+        self.assertEqual(
+            supervisor.normalize_implementation_prompt(successful_raw), successful_raw
+        )
+        self.assertEqual(supervisor.implementation_prompt_violation(failed_raw), "")
+        self.assertEqual(supervisor.implementation_prompt_violation(successful_raw), "")
+
+    def test_placeholder_normalization_does_not_allow_wrong_or_appended_handoff(self):
+        placeholder = supervisor.implementation_prompt("D001").replace(
+            "Read your D001 section", "Read your Dxxx section"
+        )
+        self.assertEqual(
+            supervisor.implementation_prompt_violation(
+                placeholder.replace("D001.progress.md", "D002.progress.md")
+            ),
+            "noncanonical_or_model_derived_handoff",
+        )
+        self.assertEqual(
+            supervisor.implementation_prompt_violation(placeholder + "\nPrior worker said done."),
+            "noncanonical_or_model_derived_handoff",
+        )
 
     def test_model_handoff_claim_is_rejected_even_when_short(self):
         prompt = supervisor.implementation_prompt("D006") + "\nAttempt 1 created public/app.js."
@@ -238,6 +508,63 @@ class PreDispatchClaimTests(unittest.TestCase):
         self.assertEqual((status, did, count), ("denied", "D001", 0))
         self.assertIn("role_mismatch expected=probe-builder actual=general", reason)
         self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/attempts.json").exists())
+
+    def test_denied_preclaim_keeps_zero_attempts_and_placeholder_claims_once(self):
+        bad = supervisor.implementation_prompt("D001") + "\nmodel-derived handoff"
+        self.assertEqual(
+            supervisor.preclaim_attempt("probe-builder", bad, "bad")[:1], ("denied",)
+        )
+        self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/attempts.json").exists())
+        beta_placeholder = supervisor.implementation_prompt("D001").replace(
+            "Read your D001 section", "Read your Dxxx section"
+        )
+        self.assertEqual(
+            supervisor.preclaim_attempt("probe-builder", beta_placeholder, "beta"),
+            ("claimed", "D001", "", 1),
+        )
+
+    def test_preclaim_baseline_detects_probe_write_to_d002_owned_package(self):
+        self.assertEqual(
+            supervisor.preclaim_attempt("probe-builder", supervisor.implementation_prompt("D001"), "own"),
+            ("claimed", "D001", "", 1),
+        )
+        Path(self.tmp.name, "package.json").write_text('{"bad":"D001"}\n')
+        self.assertEqual(
+            supervisor.ownership_violations("D001"), ["package.json"]
+        )
+
+
+class ProbeProgressTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_project = supervisor.PROJECT
+        supervisor.PROJECT = self.tmp.name
+        supervisor.worker_progress.clear()
+        ctrl = Path(self.tmp.name, ".opencode-v2")
+        ctrl.mkdir(); (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "leaves": {"D001": {"owned_artifacts": "`notes/PROBE.md`"}}
+        }))
+
+    def tearDown(self):
+        supervisor.PROJECT = self.old_project
+        supervisor.worker_progress.clear()
+        self.tmp.cleanup()
+
+    def test_probe_research_turns_without_durable_progress_recycle_early(self):
+        for turn in range(1, supervisor.PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS):
+            self.assertEqual(supervisor.probe_loop_reason("probe", "probe-builder", "D001", f"tool-{turn}"), "")
+        self.assertIn(
+            "probe_research_loop_no_owned_progress",
+            supervisor.probe_loop_reason("probe", "probe-builder", "D001", "tool-final"),
+        )
+
+    def test_owned_probe_or_progress_write_resets_the_loop_budget(self):
+        for turn in range(1, supervisor.PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS):
+            supervisor.probe_loop_reason("probe", "probe-builder", "D001", f"tool-{turn}")
+        probe = Path(self.tmp.name, "notes/PROBE.md")
+        probe.parent.mkdir(); probe.write_text("node=present\n")
+        self.assertEqual(supervisor.probe_loop_reason("probe", "probe-builder", "D001", "write-probe"), "")
+        self.assertEqual(supervisor.probe_loop_reason("probe", "probe-builder", "D001", "verify"), "")
 
 class BoundedChildResultTests(unittest.TestCase):
     PLUGIN = Path(__file__).parents[1] / "xdg/config/opencode/plugins/v2-bounded-subagent.js"
@@ -586,6 +913,27 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             self.assertIn('".opencode-v2/bin/*": deny', text)
             self.assertIn("meaningful owned artifact early", text)
 
+    def test_internal_policy_prohibits_external_astronomy_probe_requirements(self):
+        acceptance = (self.AGENTS / "acceptance-planner.md").read_text()
+        planner = (self.AGENTS / "implementation-planner.md").read_text()
+        probe = (self.AGENTS / "probe-builder.md").read_text()
+        for text in (acceptance, planner, probe):
+            self.assertIn("Skyfield", text)
+        for text in (acceptance, planner):
+            self.assertIn("as seen from Earth", text)
+        self.assertIn('"package.json": deny', probe)
+        self.assertIn("After at most a handful of probe tool turns", probe)
+
+    def test_workers_are_told_to_follow_the_beta_compaction_template_without_tags(self):
+        global_rules = (self.AGENTS.parent / "AGENTS.md").read_text()
+        self.assertIn("every exact heading supplied by that request", global_rules)
+        self.assertIn("do not include\n  its literal `<template>` tags", global_rules)
+        self.assertIn("project files, not the summary prose", global_rules)
+        beta = Path(__file__).parents[1] / "runtime/opencode2/lib/node_modules/@opencode-ai/cli/node_modules/@opencode-ai/cli-linux-x64/bin/opencode2"
+        text = beta.read_bytes().decode("utf-8", "replace")
+        self.assertIn("Compaction summary did not match the required template", text)
+        self.assertIn("Do not include the <template> tags in your response.", text)
+
     def test_bounded_child_plugin_uses_supported_global_plugin_directory(self):
         config = (self.AGENTS.parent / "opencode.jsonc").read_text()
         plugin = self.AGENTS.parent / "plugins/v2-bounded-subagent.js"
@@ -599,6 +947,16 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         root = (self.AGENTS / "orchestrator.md").read_text()
         self.assertIn("`list` and `execute` are unavailable", root)
         self.assertNotIn("use `list`", root)
+
+    def test_operator_retry_is_human_cli_only_and_never_a_model_planner_escape(self):
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        config = (self.AGENTS.parent / "opencode.jsonc").read_text()
+        self.assertIn("operator-control.py", root)
+        self.assertIn("Never infer a retry grant", root)
+        self.assertIn("Never invoke implementation-planner merely", root)
+        self.assertIn('"resource": "*operator-control.py*"', config)
+        self.assertIn('"resource": "*operator_control.py*"', config)
+        self.assertIn('"effect": "deny"', config)
 
     def test_dispatch_plugin_preclaims_before_child_and_root_forbids_salvage(self):
         plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.js").read_text()
@@ -701,6 +1059,50 @@ class ImplementationPlanSizeTests(unittest.TestCase):
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("must be exact .opencode-v2/bin/run-checks", (ctrl / "IMPLEMENTATION_PLAN.guard-errors.txt").read_text())
 
+    def test_internal_policy_rejects_jupiter_external_reference_probe(self):
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = Path(td) / ".opencode-v2"; ctrl.mkdir()
+            (ctrl / "ACCEPTANCE.md").write_text(
+                "# Acceptance Contract\nReference policy: internal\n"
+                "- [ ] A001: local model\n<!-- ACCEPTANCE_COMPLETE -->\n"
+            )
+            plan = self.plan(40).replace(
+                "### D001 — Tests", "### D001 — JPL Skyfield feasibility probe"
+            ).replace(
+                "- Role: tester", "- Role: probe-builder"
+            ).replace(
+                "- Verify command: `.opencode-v2/bin/run-checks`",
+                "- Verify command: `python3 -c \"import skyfield\"`",
+            )
+            (ctrl / "IMPLEMENTATION_PLAN.md").write_text(plan)
+            rejected = self.validate(td)
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("internal Reference policy forbids", (ctrl / "IMPLEMENTATION_PLAN.guard-errors.txt").read_text())
+
+    def test_correct_earth_view_wording_allows_internal_but_named_external_truth_does_not(self):
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = Path(td) / ".opencode-v2"; ctrl.mkdir()
+            acceptance = ctrl / "ACCEPTANCE.md"
+            acceptance.write_text(
+                "# Acceptance Contract\nReference policy: internal\n"
+                "- [ ] A001: positions are correct as seen from Earth.\n"
+                "<!-- ACCEPTANCE_COMPLETE -->\n"
+            )
+            allowed = subprocess.run(
+                [sys.executable, str(self.GUARD), "--project", td, "--finalize-acceptance"],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            acceptance.write_text(acceptance.read_text().replace(
+                "positions are correct", "Skyfield/JPL verifies positions are correct"
+            ))
+            rejected = subprocess.run(
+                [sys.executable, str(self.GUARD), "--project", td, "--check-acceptance"],
+                text=True, capture_output=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("internal Reference policy cannot require", rejected.stdout)
+
 
 class TestChecksControlContractTests(unittest.TestCase):
     RUNNER = Path(__file__).with_name("run-checks.py")
@@ -740,6 +1142,8 @@ class TestChecksControlContractTests(unittest.TestCase):
                 self.assertIn(required, contract)
             self.assertIn(".opencode-v2/bin/run-checks", contract)
             self.assertIn(".opencode-v2/bin/leaf-complete Dxxx", contract)
+            self.assertIn("v2-attempt-ledger-v1", contract)
+            self.assertIn("historical ledger label", contract)
             self.assertIn("explicitly\n  incomplete scaffold", contract)
             for command in ("run-checks", "leaf-complete", "control-status"):
                 path = project / ".opencode-v2/bin" / command
@@ -835,6 +1239,94 @@ class TestChecksControlContractTests(unittest.TestCase):
             self.assertNotEqual(leaf.returncode, 0)
             self.assertIn("attempt ledger owner is not supervisor", leaf.stderr)
 
+    def test_leaf_complete_rejects_unowned_file_created_after_preclaim_baseline(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td); self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (project / "probe.txt").write_text("ok")
+            (project / "package.json").write_text("unowned")
+            (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "leaves": {"D001": {"verify_command": "test -s probe.txt", "owned_artifacts": "probe.txt"}}
+            }))
+            (ctrl / "work").mkdir()
+            (ctrl / "work/attempts.json").write_text(json.dumps({"owner": "supervisor", "deliverables": {"D001": {"count": 1, "sessions": ["s"]}}}))
+            (ctrl / "work/D001.ownership-baseline.json").write_text(json.dumps({
+                "owner": "supervisor", "deliverable": "D001", "files": {}
+            }))
+            leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D001"], cwd=project, text=True, capture_output=True)
+            self.assertNotEqual(leaf.returncode, 0)
+            self.assertIn("package.json", leaf.stderr)
+            self.assertFalse((ctrl / "work/D001.ready").exists())
+
+    def test_leaf_complete_accepts_operator_authorized_attempt_four(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td); self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (project / "artifact.txt").write_text("ok")
+            (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "leaves": {"D004": {"verify_command": "test -s artifact.txt", "owned_artifacts": "artifact.txt"}},
+            }))
+            (ctrl / "work").mkdir()
+            (ctrl / "work/attempts.json").write_text(json.dumps({
+                "owner": "supervisor", "deliverables": {"D004": {
+                    "count": 4, "sessions": ["one", "two", "three", "four"],
+                    "automatic_limit": 3, "operator_retry_grants": 1,
+                    "operator_overrides": [{"timestamp": "2026-01-01T00:00:00Z", "grant": 1,
+                                             "source": "operator-cli", "reason": "explicit operator retry command"}],
+                }},
+            }))
+            leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D004"], cwd=project, text=True, capture_output=True)
+            self.assertEqual(leaf.returncode, 0, leaf.stderr)
+            self.assertIn("attempt=4", (ctrl / "work/D004.ready").read_text())
+
+    def test_leaf_complete_accepts_one_valid_infrastructure_recovery_attempt_four(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td); self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (project / "artifact.txt").write_text("ok")
+            (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "leaves": {"D008": {"verify_command": "test -s artifact.txt", "owned_artifacts": "`artifact.txt`."}},
+            }))
+            (ctrl / "work").mkdir()
+            (ctrl / "work/attempts.json").write_text(json.dumps({
+                "owner": "supervisor", "deliverables": {"D008": {
+                    "count": 4, "sessions": ["one", "two", "three", "four"],
+                    "automatic_limit": 3, "infrastructure_retry_grants": 1,
+                    "infrastructure_failures": [{
+                        "timestamp": "2026-01-01T00:00:00Z", "grant": 1,
+                        "source": "supervisor", "kind": "opencode-compaction-template",
+                        "session": "one", "evidence": "no-owned-artifact-or-progress",
+                    }],
+                }},
+            }))
+            leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D008"], cwd=project, text=True, capture_output=True)
+            self.assertEqual(leaf.returncode, 0, leaf.stderr)
+            self.assertIn("attempt=4", (ctrl / "work/D008.ready").read_text())
+
+    def test_leaf_complete_accepts_historical_attempt_five_after_released_operator_reservation(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td); self.run_runner(project, "--bootstrap-control-contract")
+            ctrl = project / ".opencode-v2"
+            (project / "artifact.txt").write_text("ok")
+            (ctrl / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "leaves": {"D004": {"verify_command": "test -s artifact.txt", "owned_artifacts": "artifact.txt"}},
+            }))
+            (ctrl / "work").mkdir()
+            override={"timestamp":"2026-01-01T00:00:00Z","grant":1,"source":"operator-cli","reason":"retry"}
+            (ctrl / "work/attempts.json").write_text(json.dumps({
+                "owner":"supervisor", "deliverables":{"D004":{
+                    "count":5,"sessions":["one","two","three","four","five"],
+                    "automatic_limit":3,"operator_retry_grants":1,"operator_overrides":[override],
+                    "operator_retry_attempts":[
+                        {"sequence":4,"session":"four","source":"supervisor","state":"infrastructure_abort","outcome":"infrastructure_abort","consumes_operator_grant":False},
+                        {"sequence":5,"session":"five","source":"supervisor","state":"consumed","outcome":"meaningful_execution","consumes_operator_grant":True},
+                    ],
+                }},
+            }))
+            leaf = subprocess.run([str(ctrl / "bin/leaf-complete"), "D004"], cwd=project, text=True, capture_output=True)
+            self.assertEqual(leaf.returncode, 0, leaf.stderr)
+            self.assertIn("attempt=5", (ctrl / "work/D004.ready").read_text())
+
 
 class StatusTests(unittest.TestCase):
     def test_snapshot_is_derived_from_authoritative_files(self):
@@ -864,6 +1356,33 @@ class StatusTests(unittest.TestCase):
             state = control_state.snapshot(td)
             self.assertTrue(state["plan"]["blocked"])
             self.assertEqual(state["resume_phase"], "implementation-blocked")
+
+    def test_operator_grant_reopens_execution_without_replanning(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / ".opencode-v2"
+            (root / "work").mkdir(parents=True)
+            (root / "ACCEPTANCE.ready").write_text("status=complete\nartifact=ACCEPTANCE.md\nmarker=ACCEPTANCE_COMPLETE\nvalidated=deterministic-test\n")
+            (root / "IMPLEMENTATION_PLAN.ready").write_text("status=complete\nartifact=IMPLEMENTATION_PLAN.md\nmarker=IMPLEMENTATION_PLAN_COMPLETE\nvalidated=deterministic-test\n")
+            (root / "IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves": {"D004": {"launch_deps": []}}}))
+            ledger = {"owner": "supervisor", "deliverables": {"D004": {"count": 3, "sessions": ["a", "b", "c"]}}}
+            (root / "work/attempts.json").write_text(json.dumps(ledger))
+            blocked = control_state.snapshot(td)
+            self.assertEqual(blocked["resume_phase"], "execution-blocked")
+            self.assertEqual(blocked["execution_blockers"], [{
+                "deliverable": "D004", "reason": "attempt_limit_reached",
+                "attempts": 3, "allowed_attempts": 3,
+            }])
+            ledger["deliverables"]["D004"].update({
+                "automatic_limit": 3, "operator_retry_grants": 1,
+                "operator_overrides": [{"timestamp": "2026-01-01T00:00:00Z", "grant": 1,
+                                        "source": "operator-cli", "reason": "explicit operator retry command"}],
+            })
+            (root / "work/attempts.json").write_text(json.dumps(ledger))
+            reopened = control_state.snapshot(td)["leaves"]["D004"]
+            self.assertTrue(reopened["eligible"])
+            self.assertFalse(reopened["attempt_limit_reached"])
+            self.assertEqual(reopened["operator_grants_remaining"], 1)
+            self.assertEqual(control_state.snapshot(td)["resume_phase"], "execution")
 
 
 class PostSessionFinalizationTests(unittest.TestCase):
@@ -901,6 +1420,26 @@ class PostSessionFinalizationTests(unittest.TestCase):
         self.assertEqual(detail, "owned-artifacts-missing")
         self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/D003.ready").exists())
 
+    def test_step_limit_with_durable_progress_is_classified_for_filesystem_continuation(self):
+        self.manifest()
+        progress = Path(self.tmp.name) / ".opencode-v2/work/D003.progress.md"
+        progress.parent.mkdir(parents=True, exist_ok=True)
+        progress.write_text("partial measured facts\n")
+        ok, detail = supervisor.post_session_finalize("D003")
+        self.assertFalse(ok)
+        self.assertEqual(detail, "durable-progress-incomplete")
+        self.assertFalse((Path(self.tmp.name) / ".opencode-v2/work/D003.ready").exists())
+
+    def test_markdown_punctuation_in_guard_owned_artifacts_is_not_a_path_suffix(self):
+        self.manifest()
+        manifest = supervisor.load_manifest()
+        manifest["leaves"]["D003"]["owned_artifacts"] = "`artifact.txt`."
+        ctrl = Path(self.tmp.name) / ".opencode-v2"
+        ctrl.joinpath("IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(manifest))
+        (Path(self.tmp.name) / "artifact.txt").write_text("done\n")
+        ok, detail = supervisor.post_session_finalize("D003")
+        self.assertTrue(ok, detail)
+
 
 class LessonsApiTests(unittest.TestCase):
     def test_lessons_uses_current_session_create_then_prompt_routes(self):
@@ -925,7 +1464,7 @@ class LessonsApiTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][2]["location"], {"directory": "/tmp/project"})
         self.assertNotIn("title", fake.calls[0][2])
         self.assertEqual(fake.calls[1][0:2], ("POST", "/api/session/lessons-1/prompt"))
-        self.assertEqual(fake.calls[1][2], {"prompt": {"text": "retrospective"}, "delivery": "steer"})
+        self.assertEqual(fake.calls[1][2], {"text": "retrospective", "delivery": "steer"})
 
 
 class AcceptanceEvidenceTests(unittest.TestCase):

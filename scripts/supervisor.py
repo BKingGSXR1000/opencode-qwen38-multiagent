@@ -2,7 +2,10 @@
 import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from control_state import (phase_ready, ready_info as state_ready_info,
-                           snapshot as state_snapshot)
+                           snapshot as state_snapshot, attempt_state,
+                           AUTOMATIC_ATTEMPT_LIMIT,
+                           MAX_INFRASTRUCTURE_RETRY_GRANTS,
+                           MAX_OPERATOR_INFRASTRUCTURE_ABORTS)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -11,6 +14,7 @@ PROJECT=os.environ.get("V2_PROJECT","")
 START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
+PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
 # file-existence deadline (150.4-150.5s) without a first write.  The successful
@@ -23,9 +27,13 @@ PLANNER_PROGRESS_STALL_SECONDS=300
 ROOT_CONTEXT_INPUT_CEILING=43000
 MAX_ROOT_RESTARTS=4
 MAX_PLANNER_RESTARTS=3
+# Ledger schema identifier, deliberately independent of the harness release.
+# Existing historical `V2.6.7` ledgers remain readable; newly created ledgers
+# use this unambiguous schema name without a destructive migration.
+ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}
-event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set()
+event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set(); worker_progress={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
@@ -80,11 +88,35 @@ def strip_subagent_prefix(text):
     """Remove only the beta's deterministic wrapper before the user prompt."""
     return re.sub(r"\AYou are a subagent spawned by another session\.\s*", "", text or "", count=1)
 
+def normalize_implementation_prompt(text):
+    """Normalize the two deterministic beta forms before strict validation.
+
+    The V2 hook sees raw task arguments (no wrapper), while persisted child
+    messages add the beta wrapper.  gametest2x also showed the beta/root can
+    emit its literal Dxxx placeholder in the *second canonical line*.  It has
+    already bound the real Dxxx in line one, so replacing only that exact
+    placeholder is semantic normalization, not a model-handoff exemption.
+    Every other byte/line remains subject to the exact five-line comparison.
+    """
+    text=strip_subagent_prefix(text).strip()
+    did=parse_deliverable(text)
+    if not did:
+        return text
+    placeholder=(
+        "Read your Dxxx section in .opencode-v2/IMPLEMENTATION_PLAN.md."
+    )
+    canonical=f"Read your {did} section in .opencode-v2/IMPLEMENTATION_PLAN.md."
+    lines=text.splitlines()
+    if len(lines)==5 and lines[1]==placeholder:
+        lines[1]=canonical
+        return "\n".join(lines)
+    return text
+
 def implementation_prompt_violation(text):
     """Return a dispatch-protocol violation for an implementation prompt."""
     if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
         return f"oversized_first_user_prompt chars={len(text)} max={MAX_IMPLEMENTATION_PROMPT_CHARS}"
-    text=strip_subagent_prefix(text).strip()
+    text=normalize_implementation_prompt(text)
     did=parse_deliverable(text)
     if not did:
         return "missing_exact_DELIVERABLE_Dxxx"
@@ -195,13 +227,82 @@ def planner_retirement_reason(sid,elapsed,plan_path=None):
 def owned_artifact_paths(leaf):
     raw=leaf.get("owned_artifacts","") if isinstance(leaf,dict) else ""
     if not isinstance(raw,str): return []
+    # Guard JSON retains the planner's human-readable field.  Prefer exact
+    # Markdown code spans so trailing sentence punctuation and prose such as
+    # "update of" never become fictional filesystem paths.
+    code_spans=re.findall(r"`([^`]+)`",raw)
+    values=code_spans if code_spans else raw.split(",")
     result=[]
-    for value in raw.split(","):
-        value=value.strip().strip("`")
+    for value in values:
+        value=value.strip().strip("`").rstrip(".,;:")
         if not value or value.lower() in {"-","—","none","n/a"}: continue
         if any(char in value for char in "*?[]{}"): return []
         result.append(value)
     return result
+
+def ownership_baseline_path(did):
+    return Path(PROJECT)/".opencode-v2/work"/f"{did}.ownership-baseline.json"
+
+def project_fingerprints():
+    """Fingerprint regular project files for a claimed leaf's ownership check."""
+    root=Path(PROJECT); result={}
+    for path in root.rglob("*"):
+        if not path.is_file() or ".git" in path.parts:
+            continue
+        relative=path.relative_to(root).as_posix()
+        if relative.startswith(".opencode-v2/work/"):
+            continue
+        try:
+            result[relative]=hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return result
+
+def write_ownership_baseline(did):
+    """Capture state before the provider can run the claimed worker."""
+    path=ownership_baseline_path(did); path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"owner":"supervisor","deliverable":did,
+                               "files":project_fingerprints()},sort_keys=True)+"\n")
+    os.replace(tmp,path)
+
+def ownership_violations(did):
+    """Return files changed by this serial leaf outside its declared ownership.
+
+    The baseline is created synchronously by preclaim. Old/manual projects
+    without one remain readable; normal dispatched workers are always checked.
+    """
+    try:
+        baseline=json.loads(ownership_baseline_path(did).read_text())
+        before=baseline.get("files") if baseline.get("owner")=="supervisor" else None
+        if not isinstance(before,dict): return ["invalid ownership baseline"]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return ["invalid ownership baseline"]
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    allowed=owned_artifact_paths(leaf)+[f".opencode-v2/work/{did}.progress.md"]
+    after=project_fingerprints(); changed=set(before)^set(after)
+    changed.update(path for path in set(before)&set(after) if before[path]!=after[path])
+    def owned(path):
+        return any(path==item or path.startswith(item.rstrip("/")+"/") for item in allowed)
+    return sorted(path for path in changed if not owned(path))
+
+def probe_loop_reason(sid,agent,did,tool_id,now=None):
+    """Stop probe read/research loops before their finite OpenCode step budget."""
+    if agent!="probe-builder" or not did: return ""
+    now=time.monotonic() if now is None else now
+    signature=durable_progress_signature(agent,did)
+    state=worker_progress.setdefault(sid,{"signature":signature,"turns":0,"last_tool":""})
+    if signature!=state["signature"]:
+        state.update(signature=signature,turns=0,last_tool=tool_id or "")
+        return ""
+    if tool_id and tool_id!=state.get("last_tool"):
+        state["last_tool"]=tool_id; state["turns"]+=1
+    if state["turns"]>=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS:
+        return ("probe_research_loop_no_owned_progress "
+                f"tool_turns={state['turns']} limit={PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS}")
+    return ""
 
 def post_session_finalize(did,runner=subprocess.run):
     """Verify actual owned files, then let the canonical leaf guard create ready."""
@@ -209,7 +310,13 @@ def post_session_finalize(did,runner=subprocess.run):
     if not leaf or ready_info(did): return False,"not-applicable"
     paths=owned_artifact_paths(leaf)
     if not paths or any(not (Path(PROJECT)/path).exists() for path in paths):
+        progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
+        if progress.exists() and progress.stat().st_size:
+            return False,"durable-progress-incomplete"
         return False,"owned-artifacts-missing"
+    violations=ownership_violations(did)
+    if violations:
+        return False,"ownership-violation:"+",".join(violations[:4])
     command=(leaf.get("verify_command") or "").strip()
     if not command: return False,"verify-command-missing"
     try:
@@ -222,6 +329,62 @@ def post_session_finalize(did,runner=subprocess.run):
         return (completed.returncode==0,"finalized" if completed.returncode==0 else f"leaf-complete-failed-{completed.returncode}")
     except (OSError,subprocess.TimeoutExpired) as e:
         return False,f"verification-error-{type(e).__name__}"
+
+def record_compaction_infrastructure_failure(sid,did):
+    """Reserve the one bounded recovery slot for a proven beta-only failure.
+
+    A failed compaction is not automatically free: the supervisor grants this
+    credit only when the failed child has neither an owned artifact nor its
+    durable progress file.  The raw dispatch/session count remains truthful;
+    the additional slot simply prevents this non-implementation failure from
+    consuming one of the three real implementation opportunities.
+    """
+    if not did or ready_info(did): return False,"already-complete-or-unknown"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    paths=owned_artifact_paths(leaf)
+    progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
+    if not paths or any((Path(PROJECT)/path).exists() for path in paths) or progress.exists():
+        return False,"durable-worker-state-present"
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict) or sid not in entry.get("sessions",[]):
+                return False,"session-not-in-ledger"
+            state=attempt_state(entry)
+            if not state["valid"]: return False,"attempt-ledger-invalid"
+            failures=entry.setdefault("infrastructure_failures",[])
+            if any(isinstance(item,dict) and item.get("session")==sid for item in failures):
+                return False,"already-recorded"
+            if state["infrastructure_retry_grants"] >= MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"infrastructure-retry-limit"
+            failures.append({
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "grant":1,
+                "source":"supervisor",
+                "kind":"opencode-compaction-template",
+                "session":sid,
+                "evidence":"no-owned-artifact-or-progress",
+            })
+            entry["infrastructure_retry_grants"]=state["infrastructure_retry_grants"]+1
+            save_attempts(data)
+    log(f"INFRASTRUCTURE_RETRY_GRANT session={sid} deliverable={did} kind=opencode-compaction-template grant=1")
+    csv("INFRASTRUCTURE_RETRY_GRANT",sid,"supervisor",f"{did} opencode-compaction-template grant=1")
+    return True,"granted"
+
+def compaction_failure(sid):
+    """Return the terminal beta compaction failure type, if any."""
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1",
+            (sid,),
+        ).fetchone(); con.close()
+        data=json.loads(row[0]) if row else {}
+        error=data.get("error") if isinstance(data.get("error"),dict) else {}
+        return error.get("type") if data.get("status")=="failed" else ""
+    except Exception:
+        return ""
 
 def durable_progress_signature(agent,did=""):
     paths=[]
@@ -267,7 +430,7 @@ def effective_fallback_reason(sid,agent,did,observable,now=None):
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
     try: return json.loads(attempts_path().read_text())
-    except Exception: return {"protocol":"V2.6.7","deliverables":{}}
+    except Exception: return {"protocol":ATTEMPT_LEDGER_PROTOCOL,"deliverables":{}}
 def save_attempts(data):
     p=attempts_path(); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix(".tmp"); t.write_text(json.dumps(data,indent=2)+"\n"); os.replace(t,p)
 
@@ -288,7 +451,7 @@ def attempt_lock():
 
 def validate_dispatch(agent,text):
     """Validate a planned Dxxx dispatch before the child model can start."""
-    normalized=strip_subagent_prefix(text).strip()
+    normalized=normalize_implementation_prompt(text)
     violation=implementation_prompt_violation(normalized)
     if violation: return "",violation
     did=parse_deliverable(normalized)
@@ -309,13 +472,59 @@ def preclaim_attempt(agent,text,dispatch_token):
     if violation: return "denied",did,violation,0
     claim,n=claim_attempt(f"dispatch:{dispatch_token}",did)
     if claim in {"claimed","existing"}:
-        log(f"DISPATCH_CLAIM token={dispatch_token} agent={agent} deliverable={did} attempt={n}")
-        csv("DISPATCH_CLAIM",f"dispatch:{dispatch_token}",agent,f"{did} attempt={n}")
+        if claim=="claimed":
+            write_ownership_baseline(did)
+        authorized = n > AUTOMATIC_ATTEMPT_LIMIT
+        suffix = " operator_authorized=true" if authorized else ""
+        log(f"DISPATCH_CLAIM token={dispatch_token} agent={agent} deliverable={did} attempt={n}{suffix}")
+        csv("DISPATCH_CLAIM",f"dispatch:{dispatch_token}",agent,f"{did} attempt={n}{suffix}")
         return "claimed",did,"",n
     return "denied",did,("attempt_limit" if claim=="limit" else "attempt_ledger_invalid"),n
 
+def grant_operator_retry(dids, reason="explicit operator retry command"):
+    """Record one human-only retry grant for each exhausted incomplete leaf.
+
+    This is called exclusively by scripts/operator-control.py, never from an
+    OpenCode tool or a model prompt.  It preserves every prior session and the
+    truthful count; only the auditable future-attempt budget grows.
+    """
+    dids = list(dict.fromkeys(dids))
+    if not dids:
+        raise ValueError("no deliverables requested")
+    leaves = (load_manifest().get("leaves") or {})
+    with dispatch_lock:
+        with attempt_lock():
+            data = load_attempts()
+            if data.get("owner") != "supervisor":
+                raise ValueError("attempt ledger owner is not supervisor")
+            entries = data.get("deliverables") if isinstance(data.get("deliverables"), dict) else {}
+            selected = []
+            for did in dids:
+                if not re.fullmatch(r"D\d{3}", did or "") or did not in leaves:
+                    raise ValueError(f"unknown deliverable {did!r}")
+                if ready_info(did):
+                    raise ValueError(f"{did} is already complete")
+                entry = entries.get(did)
+                state = attempt_state(entry)
+                if not state["valid"]:
+                    raise ValueError(f"{did} attempt ledger is invalid")
+                if state["count"] < state["allowed_attempts"]:
+                    raise ValueError(f"{did} is not an exhausted incomplete leaf")
+                selected.append((did, entry))
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            for did, entry in selected:
+                entry.setdefault("automatic_limit", AUTOMATIC_ATTEMPT_LIMIT)
+                entry["operator_retry_grants"] = int(entry.get("operator_retry_grants") or 0) + 1
+                entry.setdefault("operator_overrides", []).append({
+                    "timestamp": stamp, "grant": 1, "source": "operator-cli", "reason": reason,
+                })
+                log(f"OPERATOR_RETRY_GRANT deliverable={did} count={entry['count']} grant=1 source=operator-cli")
+                csv("OPERATOR_RETRY_GRANT", "", "operator", f"{did} count={entry['count']} grant=1")
+            save_attempts(data)
+    return selected
+
 def claim_attempt(sid,did):
-    """Atomically reserve one of the three allowed attempts for an exact leaf.
+    """Atomically reserve an automatic or explicitly operator-authorized attempt.
 
     Both the live HTTP dispatcher and persisted reconciliation call this helper.
     A denied fourth attempt is never persisted, so a ready-file verifier can
@@ -329,17 +538,11 @@ def claim_attempt(sid,did):
                     return "invalid",-1
                 ent=data.setdefault("deliverables",{}).setdefault(did,{"sessions":[],"count":0})
                 sessions=ent.setdefault("sessions",[])
-                try:
-                    count=int(ent.get("count") or 0)
-                except (TypeError,ValueError):
+                state=attempt_state(ent)
+                if not state["valid"]:
                     session_task.pop(sid,None)
-                    return "invalid",-1
-                # Do this before existing-session reconciliation. A corrupt
-                # persisted count is invalid state, never an already-claimed
-                # fourth attempt, and supervisors must not repair it.
-                if count<0 or count>3:
-                    session_task.pop(sid,None)
-                    return "invalid",count
+                    return "invalid",state["count"]
+                count=state["count"]
                 if sid in sessions:
                     session_task[sid]=(did,count)
                     return "existing",count
@@ -347,19 +550,149 @@ def claim_attempt(sid,did):
                 # creates a model session. Bind it, never increment again.
                 reservations=[x for x in sessions if isinstance(x,str) and x.startswith("dispatch:")]
                 if reservations and not sid.startswith("dispatch:"):
-                    if len(reservations)!=1:
-                        return "invalid",count
-                    sessions[sessions.index(reservations[0])]=sid
+                    # A previous beta may have failed to materialize a child.
+                    # It leaves a historical dispatch placeholder behind.  Bind
+                    # this observed child to the newest reservation instead of
+                    # declaring the ledger corrupt merely because old, unbound
+                    # placeholders exist (the gametest2y failure mode).
+                    reservation=reservations[-1]
+                    sessions[sessions.index(reservation)]=sid
+                    for item in ent.get("operator_retry_attempts",[]):
+                        if isinstance(item,dict) and item.get("session")==reservation and item.get("state")=="reserved":
+                            item["session"]=sid
                     save_attempts(data); session_task[sid]=(did,count)
                     return "existing",count
-                if count>=3:
+                pending=[item for item in ent.get("operator_retry_attempts",[])
+                         if isinstance(item,dict) and item.get("state")=="reserved" and
+                         isinstance(item.get("session"),str) and item["session"].startswith("dispatch:")]
+                if sid.startswith("dispatch:") and pending:
+                    # Repeated tool delivery of the same Dxxx must re-use the
+                    # extant human authorization, not reserve another one.
+                    session_task[sid]=(did,int(pending[-1]["sequence"]))
+                    return "existing",int(pending[-1]["sequence"])
+                if count>=state["allowed_attempts"]:
                     return "limit",count
                 count+=1; ent["count"]=count; sessions.append(sid)
+                uses_operator=(count > state["automatic_limit"] + state["infrastructure_retry_grants"])
+                if uses_operator:
+                    # This is a reservation, not consumption.  Only the
+                    # supervisor can later mark it consumed after durable work.
+                    ent.setdefault("operator_retry_attempts",[]).append({
+                        "sequence":count, "session":sid, "state":"reserved",
+                        "consumes_operator_grant":False,
+                        "source":"supervisor",
+                        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                    })
                 data["owner"]="supervisor"
                 save_attempts(data)
                 session_task[sid]=(did,count)
                 return "claimed",count
             finally: pass
+
+def consume_operator_reservation(sid,did,evidence):
+    """Consume a reserved human retry only after durable worker execution."""
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict): return False,"missing-ledger-entry"
+            for item in entry.get("operator_retry_attempts",[]):
+                if isinstance(item,dict) and item.get("session")==sid and item.get("state")=="reserved":
+                    item.update({"state":"consumed", "outcome":"meaningful_execution",
+                                 "consumes_operator_grant":True, "evidence":evidence,
+                                 "consumed_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())})
+                    save_attempts(data)
+                    log(f"OPERATOR_RETRY_CONSUMED session={sid} deliverable={did} evidence={evidence}")
+                    csv("OPERATOR_RETRY_CONSUMED",sid,"supervisor",f"{did} evidence={evidence}")
+                    return True,"consumed"
+    return False,"not-reserved"
+
+def release_operator_reservation(sid,did,reason):
+    """Release one proven pre-execution abort; block a repeated one.
+
+    The dispatch sequence remains monotonic.  Releasing changes only the
+    authorization accounting for the existing human grant, never `count`.
+    """
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict): return False,"missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state["valid"]: return False,"attempt-ledger-invalid"
+            for item in entry.get("operator_retry_attempts",[]):
+                if not (isinstance(item,dict) and item.get("session")==sid and item.get("state")=="reserved"):
+                    continue
+                released=state["operator_infrastructure_aborted"] < MAX_OPERATOR_INFRASTRUCTURE_ABORTS
+                item.update({
+                    "state":"infrastructure_abort" if released else "infrastructure_blocked",
+                    "outcome":"infrastructure_abort",
+                    "consumes_operator_grant":False,
+                    "evidence":reason,
+                    "resolved_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                })
+                save_attempts(data)
+                event="OPERATOR_RETRY_RELEASED" if released else "OPERATOR_RETRY_INFRASTRUCTURE_BLOCKED"
+                log(f"{event} session={sid} deliverable={did} reason={reason}")
+                csv(event,sid,"supervisor",f"{did} reason={reason}")
+                return released,"released" if released else "infrastructure-retry-limit"
+    return False,"not-reserved"
+
+def durable_worker_execution(did):
+    """A project-local artifact/progress change is the durable consumption point."""
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    paths=[Path(PROJECT)/p for p in owned_artifact_paths(leaf)]
+    paths.append(Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md")
+    return any(path.exists() and (not path.is_file() or path.stat().st_size > 0) for path in paths)
+
+def meaningful_worker_execution(sid,did):
+    """Return the first durable or completed-tool execution boundary.
+
+    Durable owned state is preferred.  If verification later fails after a
+    completed child tool action, that is still real worker execution and must
+    consume the explicitly authorized retry rather than being mistaken for a
+    pre-provider cancellation.
+    """
+    if durable_worker_execution(did):
+        return "owned-artifact-or-progress"
+    try:
+        con=db_connect(); rows=con.execute(
+            "SELECT data FROM session_message WHERE session_id=? ORDER BY seq",(sid,)
+        ).fetchall(); con.close()
+        for (raw,) in rows:
+            data=json.loads(raw) if raw else {}
+            content=data.get("content") if isinstance(data,dict) else []
+            if not isinstance(content,list): continue
+            for part in content:
+                if not isinstance(part,dict) or part.get("type")!="tool": continue
+                state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                if state.get("status") != "running": return "completed-worker-tool-action"
+    except Exception:
+        pass
+    return ""
+
+def immediate_runtime_abort(sid):
+    """Return evidence only for an observed zero-work beta cancellation."""
+    try:
+        con=db_connect(); rows=con.execute(
+            "SELECT type,data FROM session_message WHERE session_id=? ORDER BY seq",(sid,)
+        ).fetchall(); con.close()
+        assistants=[]
+        for kind,raw in rows:
+            data=json.loads(raw) if raw else {}
+            if kind=="assistant": assistants.append(data if isinstance(data,dict) else {})
+            if isinstance(data,dict) and data.get("type")=="tool": return ""
+            if (isinstance(data,dict) and isinstance(data.get("content"),list) and
+                    any(isinstance(part,dict) and part.get("type")=="tool" for part in data["content"])):
+                return ""
+        if len(assistants)!=1: return ""
+        msg=assistants[0]; err=msg.get("error") if isinstance(msg.get("error"),dict) else {}
+        content=msg.get("content") if isinstance(msg.get("content"),list) else []
+        tokens=msg.get("tokens") if isinstance(msg.get("tokens"),dict) else {}
+        if (msg.get("finish")=="error" and err.get("type")=="aborted" and not content and
+                not any(int(tokens.get(k) or 0) for k in ("input","output","reasoning","cache"))):
+            return "immediate-runtime-cancel zero-token-zero-tool aborted"
+    except Exception:
+        return ""
+    return ""
 
 class OpenCodeHTTP:
     def __init__(self):
@@ -603,7 +936,7 @@ class OpenCodeHTTP:
                 return False,"session-create-missing-id"
             self.request(
                 "POST",f"/api/session/{urllib.parse.quote(sid)}/prompt",
-                payload={"prompt":{"text":text},"delivery":"steer"},
+                payload={"text":text,"delivery":"steer"},
                 timeout=12,
             )
             return True,sid
@@ -765,7 +1098,16 @@ def message_shape(messages,session_info):
 
     agent=user_agent or (session_info.get("agent") if isinstance(session_info,dict) else "") or "unknown"
     parent=(session_info.get("parentID") or session_info.get("parent_id") or "") if isinstance(session_info,dict) else ""
-    directory=(session_info.get("directory") or "") if isinstance(session_info,dict) else ""
+    # The current beta returns the session location under `location.directory`,
+    # not the older top-level `directory`.  Preserve the latter for compatible
+    # versions, but never monitor or enforce a different project as if it were
+    # this supervisor's project.
+    location=session_info.get("location") if isinstance(session_info,dict) else {}
+    directory=(
+        session_info.get("directory")
+        or (location.get("directory") if isinstance(location,dict) else "")
+        or ""
+    ) if isinstance(session_info,dict) else ""
 
     if not assistants:
         return {
@@ -870,6 +1212,12 @@ def maybe_continue_root(active_sids,child_active):
     if not root or root in active_sids: root_idle_since=None; return False
     state=state_snapshot(PROJECT); phase=state.get("resume_phase")
     if phase=="complete": return False
+    if phase in {"implementation-blocked","execution-blocked"}:
+        blockers=",".join(item.get("deliverable","") for item in state.get("execution_blockers",[]))
+        if root_idle_since is None:
+            log(f"ROOT_CONTINUATION_BLOCKED phase={phase} blockers={blockers or 'planner'}")
+            root_idle_since=time.time()
+        return False
     if root_idle_since is None: root_idle_since=time.time(); return False
     if time.time()-root_idle_since<5: return False
     if root_restart_count()>=MAX_ROOT_RESTARTS:
@@ -1016,6 +1364,15 @@ def api_poll_loop():
                     enforce_assignment(sid,agent,shape["first_user"])
 
                 did,attempt=session_task.get(sid,("",0))
+                execution=meaningful_worker_execution(sid,did) if did else ""
+                if execution:
+                    consume_operator_reservation(sid,did,execution)
+                probe_reason=probe_loop_reason(sid,agent,did,shape["last_tool_id"])
+                if probe_reason and not shape["tool_running"]:
+                    abort_session(sid,probe_reason,agent)
+                    log(f"PROBE_RECYCLE session={sid} deliverable={did} {probe_reason}")
+                    csv("PROBE_RECYCLE",sid,agent,probe_reason)
+                    continue
                 key=(shape["message_id"],shape["last_tool_id"])
                 # Critical fail-open rule:
                 # /session/active can expose a running child before its current
@@ -1137,15 +1494,35 @@ def persisted_reconcile_loop():
                 if agent in IMPLEMENTATION_AGENTS and time_idle and sid not in post_finalize_seen:
                     post_finalize_seen.add(sid)
                     did=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))[0]
-                    if did and not ready_info(did):
-                        ok,detail=post_session_finalize(did)
-                        log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
-                        csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
+                    if did:
+                        # A zero-token/zero-tool beta cancellation happened
+                        # before the child could consume its reserved human
+                        # authorization.  Release at most one such reservation
+                        # and let durable status automatically reopen execution.
+                        abort_reason=immediate_runtime_abort(sid)
+                        if abort_reason and not ready_info(did):
+                            release_operator_reservation(sid,did,abort_reason)
+                        else:
+                            execution=meaningful_worker_execution(sid,did)
+                            if execution:
+                                consume_operator_reservation(sid,did,execution)
+                        if not ready_info(did):
+                            ok,detail=post_session_finalize(did)
+                            log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
+                            csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
                 prev=compaction_seen.get(sid,0)
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
                 if did and ready_info(did): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} deliverable={did} compactions={comps}"); continue
                 if agent=="implementation-planner" and plan_ready(): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} control_ready=1"); continue
+                failed=compaction_failure(sid)
+                if failed:
+                    granted,detail=(False,"not-implementation-child")
+                    if failed=="compaction.failed" and did and agent in IMPLEMENTATION_AGENTS:
+                        granted,detail=record_compaction_infrastructure_failure(sid,did)
+                    log(f"COMPACTION_FAILED session={sid} agent={agent} deliverable={did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
+                    csv("COMPACTION_FAILED",sid,agent,f"{did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
+                    continue
                 if comps==1: log(f"COMPACTION_ALLOWED session={sid} agent={agent} count=1"); csv("COMPACTION_ALLOWED",sid,agent,"count=1")
                 elif comps>=2: abort_session(sid,f"child_compaction count={comps}; second incomplete compaction",agent); log(f"RETIRED_COMPACTION session={sid} agent={agent} compactions={comps}")
         except Exception as e: log(f"PERSISTED_RECONCILE_ERROR {e!r}")
@@ -1163,7 +1540,8 @@ def main():
         PROJECT=args.project
         status,did,reason,count=preclaim_attempt(args.agent,args.prompt,args.claim_dispatch)
         if status!="claimed": raise SystemExit(f"DISPATCH_DENY deliverable={did or 'unknown'} reason={reason} count={count}")
-        print(f"DISPATCH_ALLOW deliverable={did} attempt={count}")
+        suffix=" operator_authorized=true" if count>AUTOMATIC_ATTEMPT_LIMIT else ""
+        print(f"DISPATCH_ALLOW deliverable={did} attempt={count}{suffix}")
         return
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} first_compaction=allow second_compaction=retire")
     threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()

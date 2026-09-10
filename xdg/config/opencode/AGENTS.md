@@ -1,10 +1,14 @@
-# Qwen3.8 Multi-Agent V2.6.8
+# Qwen3.8 Multi-Agent V2.6.9
 
 Execution:
 - Parent is a non-thinking dispatcher; workers own one exact planned Dxxx.
 - Preserve DAG-driven concurrency; do not impose an arbitrary two-worker cap.
 - The first incomplete compaction may continue; the second retires that child.
 - A valid `.opencode-v2/work/Dxxx.ready` always wins over later compaction.
+- When OpenCode requests a compaction summary, do not call a tool. Return only
+  terse text using every exact heading supplied by that request; do not include
+  its literal `<template>` tags or an explanatory wrapper. The durable resume
+  source remains project files, not the summary prose.
 - `execute`/CodeMode is disabled; use direct tools only.
 
 Control-plane authority:
@@ -16,7 +20,14 @@ Control-plane authority:
   valid `IMPLEMENTATION_PLAN.ready`; leaves only with valid
   `.opencode-v2/work/Dxxx.ready`.
 - The supervisor solely owns `.opencode-v2/work/attempts.json`; maximum three
-  attempts per exact Dxxx. Never create salvage IDs.
+  automatic implementation attempts per exact Dxxx. A single, proven
+  pre-artifact OpenCode compaction-template failure may receive one
+  supervisor-recorded recovery slot; human override grants remain separately
+  auditable. A human grant is reserved before child launch and consumed only
+  after durable state or a completed worker tool action. One proven zero-work runtime cancellation
+  releases that reservation while retaining its historical dispatch number;
+  repeated runtime aborts are execution-blocked infrastructure until a human
+  explicitly acts. Never create salvage IDs.
 - `scripts/control-status.py --project .` is a read-only derived status view.
 - Final tests require `TEST_REPORT.json` status=pass and checks_run > 0.
 - Exact bare `ACCEPTANCE_PASS` is the only success verdict.

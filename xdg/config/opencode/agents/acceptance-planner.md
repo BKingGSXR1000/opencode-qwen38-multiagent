@@ -47,6 +47,11 @@ REFERENCE POLICY IS STRICT:
   external reference research.
 - Use `internal` for ordinary correctness checked with local independent tests,
   calculations, invariants, fixtures, or implementation-independent test code.
+- Under `internal`, Evidence Strategy must stay local and self-contained. Do
+  not require Skyfield, Astropy, JPL/NASA/NAIF/Horizons, BSP kernels, downloads,
+  or named external astronomical truth merely because the request says correct,
+  real, or as seen from Earth. Use frozen local fixtures or a separate local
+  reference calculation instead.
 - Use `none` only when no meaningful correctness/reference testing applies.
 - Do not invent external-reference requirements.
 

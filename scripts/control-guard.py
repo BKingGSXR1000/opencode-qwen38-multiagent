@@ -13,6 +13,10 @@ PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
 ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
 PLAN_MAX_LINES = 400
 RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
+INTERNAL_EXTERNAL_REFERENCE_RE = re.compile(
+    r"\b(?:skyfield|astropy|jpl|nasa|naif|horizons|de\d{3,4}s?\.bsp|\.bsp\s+kernel)\b",
+    re.I,
+)
 
 FORBIDDEN_WRITE_ROLES = {
     "investigator",
@@ -280,6 +284,10 @@ def validate_acceptance(project: Path, finalize=False):
         text = path.read_text(errors="replace")
         if final_nonempty_line(text) != ACC_MARKER:
             errors.append("final line is not exact ACCEPTANCE_COMPLETE marker")
+        if reference_policy(text) == "internal" and INTERNAL_EXTERNAL_REFERENCE_RE.search(text):
+            errors.append(
+                "internal Reference policy cannot require named external astronomical/reference truth"
+            )
         if not re.findall(r"\bA\d{3}\b", text):
             errors.append("no Axxx acceptance IDs found")
         if not reference_policy(text):
@@ -324,6 +332,22 @@ def validate_plan(project: Path, finalize=False):
             errors.append("final line is not exact IMPLEMENTATION_PLAN_COMPLETE marker")
         leaves, waves, parse_errors = parse_plan(text)
         errors.extend(parse_errors)
+        acceptance = ctrl / "ACCEPTANCE.md"
+        try:
+            policy = reference_policy(acceptance.read_text(errors="replace"))
+        except OSError:
+            policy = ""
+        if policy == "internal":
+            for did, leaf in leaves.items():
+                if leaf.get("role") != "probe-builder":
+                    continue
+                section = " ".join(str(leaf.get(k, "")) for k in (
+                    "name", "owned_artifacts", "verify_command", "done_when"
+                ))
+                if INTERNAL_EXTERNAL_REFERENCE_RE.search(section):
+                    errors.append(
+                        f"{did}: internal Reference policy forbids an external astronomy/reference probe"
+                    )
 
     if errors:
         atomic_write(err, "\n".join(errors) + "\n")

@@ -6,6 +6,9 @@ steps: 18
 permission:
   read: allow
   edit:
+    "package.json": deny
+    "package-lock.json": deny
+    "node_modules/**": deny
     ".opencode-v2/work/attempts.json": deny
     ".opencode-v2/work/planner-restarts.json": deny
     ".opencode-v2/root-rollovers.json": deny
@@ -29,13 +32,27 @@ permission:
   external_directory: allow
 ---
 
-You own ONE S-sized executable probe leaf.
+You own ONE S-sized executable probe leaf. The configured limit is deliberately
+finite: complete the artifact, do not use the budget to become a domain expert.
 
 Your purpose is to replace API assumptions with measured facts before downstream
 implementation begins.
 
-- Prefer the installed/local dependency and executable probes over documentation guesses.
-- Write only the exact owned probe/contract artifacts.
+- First read your Dxxx plan section and existing Dxxx.progress.md. Then make
+  only the minimum probes required by that leaf's Verify command and Done when.
+- After at most a handful of probe tool turns, WRITE/UPDATE the owned probe
+  artifact with known facts and explicit unknowns. Update progress immediately
+  after meaningful discoveries. Do not wait to understand every dependency.
+- Once the artifact's required fields are known, further curiosity, package/API
+  archaeology, astronomy/reference research, or network/kernel downloads are
+  forbidden. Run Verify, then leaf-complete.
+- `Reference policy: internal` means use local, internally consistent facts and
+  deterministic fixtures only. Do not install Skyfield/Astropy, fetch JPL/NAIF
+  data, search external astronomy sources, or create a probe for them unless
+  the original user request explicitly requires that named external truth.
+- Write only the exact owned probe artifact and your own progress file. Never
+  create or modify another Dxxx's artifact (including package.json). Use /tmp
+  or an explicitly Dxxx-owned disposable directory for temporary probes.
 - Record exact package/module/version/import/call/result shapes needed downstream.
 - Test browser/server/path/runtime assumptions when they matter.
 - Do not implement unrelated application features.

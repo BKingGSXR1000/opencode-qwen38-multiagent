@@ -112,7 +112,19 @@ manifest format.
 - A leaf is complete only after the prescribed leaf-completion command creates
   `.opencode-v2/work/Dxxx.ready`. Do not manufacture ready files manually.
 - The supervisor alone owns `.opencode-v2/work/attempts.json`; an exact Dxxx has
-  at most three attempts. Never edit, repair, or create alternative/salvage IDs.
+  at most three automatic implementation attempts. A pre-dispatch denial has
+  no claim. At most one supervisor-recorded OpenCode compaction-template
+  failure with no owned/progress artifact may receive a separately auditable
+  recovery slot. Only a human running the trusted external
+  `./scripts/operator-control.py --project <project> retry-failed` (or `retry
+  Dxxx ...`) can record one additional auditable attempt; agents never invoke or
+  emulate that command. A human grant is reserved before child launch and is
+  consumed only after durable state or a completed worker tool action. One proven zero-work runtime
+  cancellation releases that same reservation without decrementing historical
+  dispatch count; a repeated cancellation is execution-blocked infrastructure
+  until a human explicitly acts. Never edit, repair, or create alternative/salvage IDs.
+  New ledgers identify this stable schema as `v2-attempt-ledger-v1`; legacy
+  `V2.6.7` is a historical ledger label, not the active harness release.
 - `.opencode-v2/work/Dxxx.progress.md` is the durable retry handoff. Read it
   when present before re-deriving work.
 - `.opencode-v2/TEST_REPORT.json` with `status=pass` and `checks_run > 0` is the

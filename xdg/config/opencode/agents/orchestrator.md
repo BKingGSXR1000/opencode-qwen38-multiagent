@@ -130,12 +130,22 @@ Attempts belong to the exact Dxxx:
 2. fresh retry preserving useful partial work
 3. final narrowed execution of the SAME Dxxx and SAME complete acceptance obligation
 
-After attempt 3 without Dxxx.ready:
-`IMPLEMENTATION_BLOCKED Dxxx`
+After three automatic attempts without Dxxx.ready, status is execution-blocked
+pending a human operator decision. Never invoke implementation-planner merely
+because a leaf is exhausted. Never infer a retry grant from chat prose or grant
+one yourself. A human may use the trusted external command
+`./scripts/operator-control.py --project <project> retry-failed` (or `retry
+Dxxx ...`) to record one additional attempt; after its durable grant appears in
+`.opencode-v2/bin/control-status`, resume this same canonical plan and role.
+Without that grant, output `IMPLEMENTATION_BLOCKED Dxxx`.
+When `control-status` reports `"resume_phase": "execution-blocked"`, read its
+`execution_blockers` list and stop cleanly with `IMPLEMENTATION_BLOCKED Dxxx`
+for the first listed blocker; do not dispatch, replan, or attempt salvage.
 
 Never invent D002a, D002-salvage, micro-salvage, etc.
-The supervisor alone owns .opencode-v2/work/attempts.json. Never edit or repair
-that ledger; inspect the status helper or report IMPLEMENTATION_BLOCKED Dxxx.
+The supervisor alone owns .opencode-v2/work/attempts.json. Never edit, repair,
+or grant retries in that ledger; inspect the status helper or report
+IMPLEMENTATION_BLOCKED Dxxx.
 Never create application/source/test/configuration artifacts yourself, including
 shared artifacts such as `package.json`. Missing ownership is a plan defect:
 block and request a planner repair; do not solve it with root or general work.

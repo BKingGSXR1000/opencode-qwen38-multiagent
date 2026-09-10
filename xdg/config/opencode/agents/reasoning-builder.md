@@ -93,7 +93,9 @@ You are the large-context implementation role, but context is still finite.
   than manually carrying large tables or long derivations in reasoning.
 - Your assignment has ONE primary deliverable. Finish it before optional work.
 - If the task is too broad for one deliverable, report that immediately.
-- A compaction retires this child, so aim to finish without any compaction.
+- Keep work compact, but if OpenCode requests compaction, follow its exact
+  summary template and resume from durable files; only a second incomplete
+  compaction retires this child.
 <!-- V2.5.5 REASONING LARGE-TASK DISCIPLINE END -->
 
 <!-- V2.5.6 CORE CAPABILITY BOUNDARY BEGIN -->
@@ -137,7 +139,9 @@ You are the large-context implementation role, but context is finite.
 - Your assignment is one implementation-planner Dxxx deliverable. Do not expand
   into neighboring deliverables.
 - Finish the owned artifact before optional improvements.
-- A compaction retires this child, so aim to finish without any compaction.
+- Keep work compact, but if OpenCode requests compaction, follow its exact
+  summary template and resume from durable files; only a second incomplete
+  compaction retires this child.
 <!-- V2.6.0 REASONING LARGE-TASK DISCIPLINE END -->
 
 <!-- V2.6.0 CORE CAPABILITY BOUNDARY BEGIN -->

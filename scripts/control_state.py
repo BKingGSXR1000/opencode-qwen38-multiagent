@@ -8,6 +8,16 @@ import json
 from pathlib import Path
 
 
+AUTOMATIC_ATTEMPT_LIMIT = 3
+# A bounded, supervisor-recorded OpenCode failure can reserve one additional
+# *dispatch slot* without relabelling a broken beta compaction as a successful
+# implementation attempt.  It is deliberately not a general retry mechanism.
+MAX_INFRASTRUCTURE_RETRY_GRANTS = 1
+# A human authorization may survive one *proven, pre-execution* runtime abort.
+# It releases an existing reservation; it never creates a human grant.
+MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
+
+
 # Bootstrap owns this incomplete plan artifact.  Keeping the text here lets the
 # project bootstrapper and supervisor identify it without independent templates
 # drifting apart.  It deliberately has neither deliverables nor the completion
@@ -77,6 +87,165 @@ def load_attempts(project):
         return {"deliverables": {}}
 
 
+def attempt_state(entry):
+    """Validate and project one supervisor-owned attempt ledger entry.
+
+    Counts above the automatic limit are valid only when every excess attempt
+    is covered by a recorded, bounded grant.  Human operator grants are the
+    normal explicit override.  A single supervisor-recorded OpenCode
+    compaction failure that happened before any owned/progress artifact was
+    created may reserve one separately auditable recovery slot.  Old ledgers
+    without grant fields retain their three-attempt automatic semantics.
+    """
+    entry = entry if isinstance(entry, dict) else {}
+    try:
+        count = int(entry.get("count") or 0)
+        automatic_limit = int(entry.get("automatic_limit", AUTOMATIC_ATTEMPT_LIMIT))
+        operator_grants = int(entry.get("operator_retry_grants") or 0)
+        infrastructure_grants = int(entry.get("infrastructure_retry_grants") or 0)
+    except (TypeError, ValueError):
+        return {"valid": False, "count": -1, "automatic_limit": AUTOMATIC_ATTEMPT_LIMIT,
+                "operator_retry_grants": 0, "operator_grants_remaining": 0,
+                "operator_grants_used": 0, "operator_grants_reserved": 0,
+                "operator_infrastructure_aborted": 0, "operator_infrastructure_blocked": 0,
+                "total_dispatches": -1, "automatic_attempts_consumed": 0,
+                "infrastructure_retry_grants": 0,
+                "infrastructure_grants_remaining": 0,
+                "allowed_attempts": AUTOMATIC_ATTEMPT_LIMIT,
+                "infrastructure_authorized_attempt": False,
+                "operator_authorized_attempt": False}
+    overrides = entry.get("operator_overrides", [])
+    override_grants = 0
+    if overrides:
+        if not isinstance(overrides, list):
+            overrides = None
+        else:
+            for override in overrides:
+                if not isinstance(override, dict) or override.get("source") != "operator-cli":
+                    overrides = None; break
+                try:
+                    grant = int(override.get("grant"))
+                except (TypeError, ValueError):
+                    overrides = None; break
+                if grant != 1 or not override.get("timestamp") or not override.get("reason"):
+                    overrides = None; break
+                override_grants += grant
+    infrastructure_failures = entry.get("infrastructure_failures", [])
+    failure_grants = 0
+    if infrastructure_failures:
+        if not isinstance(infrastructure_failures, list):
+            infrastructure_failures = None
+        else:
+            for failure in infrastructure_failures:
+                if not isinstance(failure, dict):
+                    infrastructure_failures = None; break
+                if failure.get("source") != "supervisor" or failure.get("kind") != "opencode-compaction-template":
+                    infrastructure_failures = None; break
+                if not failure.get("timestamp") or not isinstance(failure.get("session"), str) or not failure["session"]:
+                    infrastructure_failures = None; break
+                if failure.get("evidence") != "no-owned-artifact-or-progress":
+                    infrastructure_failures = None; break
+                try:
+                    grant = int(failure.get("grant"))
+                except (TypeError, ValueError):
+                    infrastructure_failures = None; break
+                if grant != 1:
+                    infrastructure_failures = None; break
+                failure_grants += grant
+    operator_attempts = entry.get("operator_retry_attempts", [])
+    if not isinstance(operator_attempts, list):
+        operator_attempts = None
+    valid_operator_attempts = True
+    consumed_operator_attempts = reserved_operator_attempts = 0
+    aborted_operator_attempts = blocked_operator_attempts = 0
+    seen_operator_sequences = set()
+    if operator_attempts is not None:
+        for item in operator_attempts:
+            if not isinstance(item, dict):
+                valid_operator_attempts = False; break
+            try:
+                sequence = int(item.get("sequence"))
+            except (TypeError, ValueError):
+                valid_operator_attempts = False; break
+            status = item.get("state")
+            if (sequence <= automatic_limit or sequence in seen_operator_sequences or
+                    not isinstance(item.get("session"), str) or not item["session"] or
+                    item.get("source") != "supervisor" or
+                    status not in {"reserved", "consumed", "infrastructure_abort", "infrastructure_blocked"}):
+                valid_operator_attempts = False; break
+            seen_operator_sequences.add(sequence)
+            if status == "consumed":
+                if item.get("consumes_operator_grant") is not True:
+                    valid_operator_attempts = False; break
+                consumed_operator_attempts += 1
+            elif status == "reserved":
+                if item.get("consumes_operator_grant") is not False:
+                    valid_operator_attempts = False; break
+                reserved_operator_attempts += 1
+            elif status == "infrastructure_abort":
+                if item.get("consumes_operator_grant") is not False or not item.get("outcome"):
+                    valid_operator_attempts = False; break
+                aborted_operator_attempts += 1
+            else:
+                # A second immediate runtime abort is historical but blocks
+                # automatic recovery until a human explicitly grants again.
+                if item.get("consumes_operator_grant") is not False or not item.get("outcome"):
+                    valid_operator_attempts = False; break
+                blocked_operator_attempts += 1
+
+    # Existing ledgers have no per-attempt records. Their excess claims retain
+    # the old meaning. In a new ledger, only excess not represented by a record
+    # is legacy consumption, so an infrastructure-aborted dispatch remains
+    # truthful without spending another human authorization.
+    operator_dispatches = max(0, count - automatic_limit - infrastructure_grants)
+    record_count = len(operator_attempts) if operator_attempts is not None else 0
+    legacy_operator_used = max(0, operator_dispatches - record_count)
+    operator_used = legacy_operator_used + consumed_operator_attempts
+    operator_remaining = operator_grants - operator_used - reserved_operator_attempts - blocked_operator_attempts
+    allowed = automatic_limit + operator_grants + infrastructure_grants + aborted_operator_attempts
+    valid = (
+        count >= 0
+        and automatic_limit == AUTOMATIC_ATTEMPT_LIMIT
+        and operator_grants >= 0
+        and infrastructure_grants >= 0
+        and infrastructure_grants <= MAX_INFRASTRUCTURE_RETRY_GRANTS
+        and overrides is not None
+        and override_grants == operator_grants
+        and infrastructure_failures is not None
+        and failure_grants == infrastructure_grants
+        and valid_operator_attempts
+        and record_count <= operator_dispatches
+        and consumed_operator_attempts + reserved_operator_attempts + blocked_operator_attempts <= operator_grants
+        and aborted_operator_attempts <= MAX_OPERATOR_INFRASTRUCTURE_ABORTS
+        and operator_remaining >= 0
+        and count <= allowed
+    )
+    excess = max(0, count - automatic_limit)
+    # Infrastructure credits are consumed first because they are created only
+    # for a prior failed dispatch and cannot be created by a model.  This makes
+    # the remaining-grant fields deterministic even though the ledger records
+    # claims, not a synthetic replacement attempt.
+    infrastructure_remaining = max(0, infrastructure_grants - excess)
+    return {
+        "valid": valid,
+        "count": count,
+        "automatic_limit": automatic_limit,
+        "operator_retry_grants": operator_grants,
+        "operator_grants_used": operator_used if valid else 0,
+        "operator_grants_reserved": reserved_operator_attempts if valid else 0,
+        "operator_grants_remaining": operator_remaining if valid else 0,
+        "operator_infrastructure_aborted": aborted_operator_attempts if valid else 0,
+        "operator_infrastructure_blocked": blocked_operator_attempts if valid else 0,
+        "total_dispatches": count,
+        "automatic_attempts_consumed": min(count, automatic_limit) if valid else 0,
+        "infrastructure_retry_grants": infrastructure_grants,
+        "infrastructure_grants_remaining": infrastructure_remaining if valid else 0,
+        "allowed_attempts": allowed,
+        "infrastructure_authorized_attempt": valid and excess > 0 and excess <= infrastructure_grants,
+        "operator_authorized_attempt": valid and operator_dispatches > 0,
+    }
+
+
 def planner_restarts(project):
     try:
         data = json.loads(
@@ -107,16 +276,32 @@ def snapshot(project):
     for did, leaf in sorted(leaves.items()):
         complete = bool(ready_info(project, did))
         entry = attempts.get(did) if isinstance(attempts.get(did), dict) else {}
-        count = int(entry.get("count") or 0)
+        attempt = attempt_state(entry)
+        count = attempt["count"]
         deps = leaf.get("launch_deps") if isinstance(leaf, dict) else []
         deps = deps if isinstance(deps, list) else []
         missing = [dep for dep in deps if not ready_info(project, dep)]
         leaf_states[did] = {
             "complete": complete,
             "attempts": count,
-            "attempt_limit_reached": count >= 3 and not complete,
+            "total_dispatches": attempt["total_dispatches"],
+            "automatic_attempts_consumed": attempt["automatic_attempts_consumed"],
+            "automatic_limit": attempt["automatic_limit"],
+            "operator_retry_grants": attempt["operator_retry_grants"],
+            "operator_grants_used": attempt["operator_grants_used"],
+            "operator_grants_reserved": attempt["operator_grants_reserved"],
+            "operator_grants_remaining": attempt["operator_grants_remaining"],
+            "operator_infrastructure_aborted": attempt["operator_infrastructure_aborted"],
+            "operator_infrastructure_blocked": attempt["operator_infrastructure_blocked"],
+            "operator_authorized_attempt": attempt["operator_authorized_attempt"],
+            "infrastructure_retry_grants": attempt["infrastructure_retry_grants"],
+            "infrastructure_grants_remaining": attempt["infrastructure_grants_remaining"],
+            "infrastructure_authorized_attempt": attempt["infrastructure_authorized_attempt"],
+            "attempt_ledger_valid": attempt["valid"],
+            "allowed_attempts": attempt["allowed_attempts"],
+            "attempt_limit_reached": not complete and (not attempt["valid"] or count >= attempt["allowed_attempts"]),
             "launch_deps_missing": missing,
-            "eligible": not complete and count < 3 and not missing,
+            "eligible": not complete and attempt["valid"] and count < attempt["allowed_attempts"] and not missing,
         }
     acceptance_complete = phase_ready(
         project, "ACCEPTANCE.ready", "ACCEPTANCE.md", "ACCEPTANCE_COMPLETE"
@@ -129,6 +314,18 @@ def snapshot(project):
     )
     planner_failures = planner_restarts(project)
     tests = test_state(project)
+    execution_blockers = []
+    for did, leaf in leaf_states.items():
+        if leaf["complete"] or not leaf["attempt_limit_reached"]:
+            continue
+        execution_blockers.append({
+            "deliverable": did,
+            "reason": ("attempt_ledger_invalid" if not leaf["attempt_ledger_valid"] else
+                       "execution_blocked_infrastructure" if leaf["operator_infrastructure_blocked"] else
+                       "attempt_limit_reached"),
+            "attempts": leaf["attempts"],
+            "allowed_attempts": leaf["allowed_attempts"],
+        })
     state = {
         "protocol": "V2.6.9",
         "project": str(project),
@@ -140,6 +337,7 @@ def snapshot(project):
             "blocked": not plan_complete and planner_failures >= 3,
         },
         "leaves": leaf_states,
+        "execution_blockers": execution_blockers,
         "tests": tests,
         "acceptance_validation": {
             "complete": (project / ".opencode-v2" / "acceptance-pass.json").exists()
@@ -158,6 +356,8 @@ def resume_phase(state):
     if not state.get("plan", {}).get("complete"):
         return "implementation-plan"
     leaves = state.get("leaves") or {}
+    if any(not leaf.get("complete") and leaf.get("attempt_limit_reached") for leaf in leaves.values()):
+        return "execution-blocked"
     if any(not leaf.get("complete") for leaf in leaves.values()):
         return "execution"
     if not state.get("tests", {}).get("complete"):
