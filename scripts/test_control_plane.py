@@ -586,9 +586,18 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
             self.assertIn('".opencode-v2/bin/*": deny', text)
             self.assertIn("meaningful owned artifact early", text)
 
-    def test_bounded_child_plugin_is_resolved_in_config(self):
+    def test_bounded_child_plugin_uses_supported_global_plugin_directory(self):
         config = (self.AGENTS.parent / "opencode.jsonc").read_text()
-        self.assertIn("v2-bounded-subagent.mjs", config)
+        plugin = self.AGENTS.parent / "plugins/v2-bounded-subagent.mjs"
+        self.assertTrue(plugin.is_file())
+        # This beta auto-loads global local plugins from plugins/. Its config
+        # "plugin" array accepts packages, not a file:// module URL.
+        self.assertNotIn("v2-bounded-subagent.mjs", config)
+
+    def test_orchestrator_does_not_instruct_unavailable_list_or_execute_tools(self):
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        self.assertIn("`list` and `execute` are unavailable", root)
+        self.assertNotIn("use `list`", root)
 
     def test_dispatch_plugin_preclaims_before_child_and_root_forbids_salvage(self):
         plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.mjs").read_text()

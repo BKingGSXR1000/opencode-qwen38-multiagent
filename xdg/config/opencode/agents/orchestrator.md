@@ -178,7 +178,7 @@ patterns.
 
 - NEVER use `glob` to decide whether a known `.opencode-v2` file exists.
 - For a known control path, use direct `read`.
-- To discover files inside `.opencode-v2`, use `list`.
-- If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
-  and do not spend more tool calls investigating the discrepancy.
+- `list` and `execute` are unavailable to this agent. For known control paths,
+  use direct `read`; use `.opencode-v2/bin/control-status` for the derived
+  project dashboard. Do not attempt unavailable tools.
 <!-- V2.6.7c DOTDIR IO END -->

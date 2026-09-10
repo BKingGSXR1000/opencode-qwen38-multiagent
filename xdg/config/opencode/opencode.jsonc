@@ -1,8 +1,5 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    "file:///home/bking/AI/opencode-qwen38-multiagent-v2/xdg/config/opencode/plugins/v2-bounded-subagent.mjs"
-  ],
   "model": "syv/qwen38-orchestrator",
   "default_agent": "orchestrator",
   "providers": {
