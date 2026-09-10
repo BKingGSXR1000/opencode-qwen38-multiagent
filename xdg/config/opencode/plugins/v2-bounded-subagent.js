@@ -100,16 +100,21 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   });
   const after = await api.tool.hook("execute.after", async (event) => {
     if ((event.tool !== "subagent" && event.tool !== "task") || !event.result) return;
-    event.result.output = boundedChildResult({
+    const receipt = boundedChildResult({
       directory,
       args: event.input || {},
       metadata: event.result.metadata,
       original: event.result.output || "",
     });
+    // The beta constructs the parent-visible tool response from `content`.
+    // Updating `output` alone only changed hook metadata, not the text the root
+    // receives, so replace both representations with the same bounded receipt.
+    event.result.output = receipt;
+    event.result.content = [{ type: "text", text: receipt }];
     event.result.metadata = {
       ...event.result.metadata,
       parentResultBounded: true,
-      parentResultChars: event.result.output.length,
+      parentResultChars: receipt.length,
       fullOutputStorage: "session_history",
     };
   });

@@ -606,6 +606,7 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         self.assertIn("--claim-dispatch", plugin)
         self.assertIn("event.input", plugin)
         self.assertIn("before OpenCode materializes", plugin)
+        self.assertIn("event.result.content", plugin)
         self.assertIn('id: "v2-bounded-subagent"', plugin)
         root = (self.AGENTS / "orchestrator.md").read_text()
         self.assertIn("Never substitute `general`", root)
