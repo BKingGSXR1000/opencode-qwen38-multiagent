@@ -101,8 +101,8 @@ def snapshot(project):
         "IMPLEMENTATION_PLAN_COMPLETE",
     )
     tests = test_state(project)
-    return {
-        "protocol": "V2.6.8",
+    state = {
+        "protocol": "V2.6.9",
         "project": str(project),
         "acceptance": {"complete": acceptance_complete},
         "plan": {"complete": plan_complete, "manifest_present": bool(leaves)},
@@ -112,3 +112,21 @@ def snapshot(project):
             "complete": (project / ".opencode-v2" / "acceptance-pass.json").exists()
         },
     }
+    state["resume_phase"] = resume_phase(state)
+    return state
+
+
+def resume_phase(state):
+    """Derive the next root action from durable state only."""
+    if not state.get("acceptance", {}).get("complete"):
+        return "acceptance"
+    if not state.get("plan", {}).get("complete"):
+        return "implementation-plan"
+    leaves = state.get("leaves") or {}
+    if any(not leaf.get("complete") for leaf in leaves.values()):
+        return "execution"
+    if not state.get("tests", {}).get("complete"):
+        return "final-tests"
+    if not state.get("acceptance_validation", {}).get("complete"):
+        return "acceptance-validation"
+    return "complete"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-import base64,fcntl,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.parse,urllib.request
+import base64,fcntl,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
-from control_state import phase_ready, ready_info as state_ready_info
+from control_state import phase_ready, ready_info as state_ready_info, snapshot as state_snapshot
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -11,9 +11,28 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PLANNER_CONTEXT_INPUT_CEILING=45000
+PLANNER_CHECKPOINT_SECONDS=150
+PLANNER_CHECKPOINT_MAX_LINES=120
+ROOT_CONTEXT_INPUT_CEILING=43000
+MAX_ROOT_RESTARTS=4
+MAX_PLANNER_RESTARTS=3
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}
+event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
+
+ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
+Read .opencode-v2/CONTROL_CONTRACT.md.
+Read .opencode-v2/ACCEPTANCE.md.
+Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.
+Derive authoritative current state using .opencode-v2/bin/control-status.
+Continue from durable state only."""
+
+PLANNER_CONTINUATION_PROMPT="""Continue implementation planning for this project.
+Read .opencode-v2/ACCEPTANCE.md.
+Read .opencode-v2/CONTROL_CONTRACT.md.
+Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.
+Continue from durable file state using your progressive planner protocol."""
 
 def log(msg):
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True)
@@ -41,12 +60,32 @@ def parse_deliverable(text):
     m=re.search(r"(?mi)^\s*DELIVERABLE\s*:\s*(D\d{3})\s*$",text)
     return m.group(1) if m else ""
 
+def implementation_prompt(did):
+    return (
+        f"DELIVERABLE: {did}\n"
+        f"Read your {did} section in .opencode-v2/IMPLEMENTATION_PLAN.md.\n"
+        f"Read .opencode-v2/work/{did}.progress.md if present.\n"
+        "Inspect your owned project artifacts as they currently exist.\n"
+        "Continue from actual filesystem state and execute the deliverable."
+    )
+
+def strip_subagent_prefix(text):
+    """Remove only the beta's deterministic wrapper before the user prompt."""
+    marker="\n\n"
+    if text.startswith("You are a subagent") and marker in text:
+        return text.split(marker,1)[1]
+    return text
+
 def implementation_prompt_violation(text):
     """Return a dispatch-protocol violation for an implementation prompt."""
     if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
         return f"oversized_first_user_prompt chars={len(text)} max={MAX_IMPLEMENTATION_PROMPT_CHARS}"
-    if not parse_deliverable(text):
+    text=strip_subagent_prefix(text).strip()
+    did=parse_deliverable(text)
+    if not did:
         return "missing_exact_DELIVERABLE_Dxxx"
+    if text!=implementation_prompt(did):
+        return "noncanonical_or_model_derived_handoff"
     return ""
 
 def load_manifest():
@@ -62,6 +101,94 @@ def plan_ready():
         PROJECT,"IMPLEMENTATION_PLAN.ready","IMPLEMENTATION_PLAN.md",
         "IMPLEMENTATION_PLAN_COMPLETE",
     )
+
+def planner_checkpoint_reason(sid,elapsed,plan_path=None):
+    plan_path=Path(plan_path or (Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"))
+    state=planner_checkpoints.setdefault(sid,{"observed":False})
+    if state["observed"]: return ""
+    if not plan_path.exists():
+        return f"planner_checkpoint_missing elapsed={int(elapsed)}s" if elapsed>=PLANNER_CHECKPOINT_SECONDS else ""
+    try:
+        text=plan_path.read_text(errors="replace")
+    except OSError:
+        return ""
+    lines=len(text.splitlines())
+    complete=any(line.strip()=="<!-- IMPLEMENTATION_PLAN_COMPLETE -->" for line in text.splitlines())
+    if lines>PLANNER_CHECKPOINT_MAX_LINES or complete:
+        return f"planner_first_checkpoint_not_incremental lines={lines} complete_marker={str(complete).lower()}"
+    state.update(observed=True,lines=lines)
+    return ""
+
+def planner_restart_path(): return Path(PROJECT)/".opencode-v2/work/planner-restarts.json"
+
+def planner_restart_count():
+    try: return int(json.loads(planner_restart_path().read_text()).get("count") or 0)
+    except Exception: return 0
+
+def record_planner_restart(sid,reason):
+    path=planner_restart_path(); path.parent.mkdir(parents=True,exist_ok=True)
+    data={"owner":"supervisor","count":planner_restart_count()+1,"retired_session":sid,"reason":reason}
+    temp=path.with_suffix(".tmp"); temp.write_text(json.dumps(data,indent=2)+"\n"); os.replace(temp,path)
+
+def owned_artifact_paths(leaf):
+    raw=leaf.get("owned_artifacts","") if isinstance(leaf,dict) else ""
+    if not isinstance(raw,str): return []
+    result=[]
+    for value in raw.split(","):
+        value=value.strip().strip("`")
+        if not value or value.lower() in {"-","—","none","n/a"}: continue
+        if any(char in value for char in "*?[]{}"): return []
+        result.append(value)
+    return result
+
+def post_session_finalize(did,runner=subprocess.run):
+    """Verify actual owned files, then let the canonical leaf guard create ready."""
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not leaf or ready_info(did): return False,"not-applicable"
+    paths=owned_artifact_paths(leaf)
+    if not paths or any(not (Path(PROJECT)/path).exists() for path in paths):
+        return False,"owned-artifacts-missing"
+    command=(leaf.get("verify_command") or "").strip()
+    if not command: return False,"verify-command-missing"
+    try:
+        checked=runner(command,cwd=PROJECT,shell=True,executable="/bin/bash",timeout=240)
+        if checked.returncode!=0: return False,f"verify-failed-{checked.returncode}"
+        completed=runner(
+            [str(Path(PROJECT)/".opencode-v2/bin/leaf-complete"),did],
+            cwd=PROJECT,timeout=300,
+        )
+        return (completed.returncode==0,"finalized" if completed.returncode==0 else f"leaf-complete-failed-{completed.returncode}")
+    except (OSError,subprocess.TimeoutExpired) as e:
+        return False,f"verification-error-{type(e).__name__}"
+
+def durable_progress_signature(agent,did=""):
+    paths=[]
+    if agent=="implementation-planner":
+        paths=[Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"]
+    elif did:
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        paths=[Path(PROJECT)/p for p in owned_artifact_paths(leaf)]
+        paths.append(Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md")
+    signature=[]
+    for path in paths:
+        try:
+            st=path.stat(); signature.append((str(path),st.st_mtime_ns,st.st_size))
+        except OSError: signature.append((str(path),0,0))
+    return tuple(signature)
+
+def fallback_no_progress_reason(sid,agent,did,observable,now=None):
+    """Bound invisible streams without treating a brief API gap as a failure."""
+    state=event_watch.setdefault(sid,{"stop":threading.Event(),"created":time.monotonic()})
+    if observable:
+        state.pop("fallback_since",None); state.pop("fallback_signature",None); return ""
+    now=time.monotonic() if now is None else now
+    signature=durable_progress_signature(agent,did)
+    if signature!=state.get("fallback_signature"):
+        state["fallback_signature"]=signature; state["fallback_since"]=now; return ""
+    state.setdefault("fallback_since",now)
+    if now-state["fallback_since"]>=300:
+        return f"no_durable_progress_with_invisible_stream={int(now-state['fallback_since'])}s"
+    return ""
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
@@ -304,6 +431,23 @@ class OpenCodeHTTP:
                 pass
         return []
 
+    def stream_session_events(self,sid,on_event,stop):
+        """Consume transient deltas that are intentionally absent from history."""
+        if not self.ensure(): return
+        qsid=urllib.parse.quote(sid)
+        req=urllib.request.Request(
+            self.base+f"/api/session/{qsid}/event",
+            method="GET",headers={**self.headers(),"Accept":"text/event-stream"},
+        )
+        with urllib.request.urlopen(req,timeout=30) as response:
+            for raw in response:
+                if stop.is_set(): return
+                line=raw.decode("utf-8","replace").strip()
+                if not line.startswith("data:"): continue
+                try: event=json.loads(line[5:].strip())
+                except json.JSONDecodeError: continue
+                if isinstance(event,dict): on_event(event)
+
     def interrupt(self,sid):
         if not self.ensure():
             return False
@@ -319,34 +463,36 @@ class OpenCodeHTTP:
                 pass
         return False
 
-    def start_lessons_session(self,text):
-        """Launch lessons in its own session via the current OpenCode2 API."""
+    def start_agent_session(self,agent,text):
+        """Create and steer a v2 session using the installed beta's SDK schema."""
         if not self.ensure():
             return False,"http-not-connected"
         try:
             created=self.request(
                 "POST","/api/session",
-                payload={
-                    "agent":"lessons-learner",
-                    "location":PROJECT,
-                    "title":"V2 lessons retrospective",
-                },
+                payload={"agent":agent,"location":{"directory":PROJECT}},
                 timeout=8,
             )
-            sid=created.get("id") if isinstance(created,dict) else ""
+            data=created.get("data",created) if isinstance(created,dict) else {}
+            sid=data.get("id") if isinstance(data,dict) else ""
             if not sid:
                 return False,"session-create-missing-id"
-            # OpenCode2's current route accepts text/files/agents and delivery;
-            # there is no prompt_async endpoint. A dedicated idle session makes
-            # steer immediate without consuming the root orchestrator budget.
             self.request(
                 "POST",f"/api/session/{urllib.parse.quote(sid)}/prompt",
-                payload={"text":text,"delivery":"steer"},
+                payload={"prompt":{"text":text},"delivery":"steer"},
                 timeout=12,
             )
             return True,sid
+        except urllib.error.HTTPError as e:
+            try: detail=e.read().decode("utf-8","replace")[:1000]
+            except Exception: detail=""
+            return False,f"HTTP {e.code}: {detail}"
         except Exception as e:
             return False,repr(e)
+
+    def start_lessons_session(self,text):
+        """Launch lessons outside the verdict-critical root session."""
+        return self.start_agent_session("lessons-learner",text)
 
 http=OpenCodeHTTP()
 
@@ -381,6 +527,60 @@ def watchdog_limits(agent):
     if agent=="implementation-planner":
         return 300,20000,20000
     return HARD_SECONDS,HARD_REASONING_CHARS,HARD_TEXT_CHARS
+
+def reduce_live_event(state,event):
+    """Track no-tool output directly from the beta's transient SSE deltas."""
+    kind=event.get("type")
+    data=event.get("data") if isinstance(event.get("data"),dict) else {}
+    delta=data.get("delta") if isinstance(data.get("delta"),str) else ""
+    if kind=="session.next.reasoning.delta":
+        state["reasoning"]=state.get("reasoning",0)+len(delta)
+    elif kind=="session.next.text.delta":
+        state["text"]=state.get("text",0)+len(delta)
+    elif kind=="session.next.tool.called":
+        state["tool_running"]=True
+    elif kind=="session.next.tool.success":
+        state.update(reasoning=0,text=0,tool_running=False,last_progress=time.monotonic())
+    elif kind=="session.next.tool.failed":
+        state["tool_running"]=False
+    elif kind=="session.next.step.started":
+        state.update(reasoning=0,text=0,tool_running=False)
+    state["last_event"]=time.monotonic()
+    return state
+
+def event_watchdog_reason(agent,state):
+    if state.get("tool_running"): return ""
+    _,reason_limit,text_limit=watchdog_limits(agent)
+    if state.get("reasoning",0)>=reason_limit:
+        return f"sse_reasoning_chars={state['reasoning']}"
+    if state.get("text",0)>=text_limit:
+        return f"sse_text_chars={state['text']}"
+    return ""
+
+def ensure_event_watch(sid):
+    state=event_watch.get(sid)
+    if state and state.get("thread") and state["thread"].is_alive(): return state
+    stop=threading.Event()
+    state={"reasoning":0,"text":0,"tool_running":False,"tool_successes":0,
+           "connected":False,"last_event":time.monotonic(),"stop":stop}
+    event_watch[sid]=state
+    def consume(event):
+        with lock:
+            state["connected"]=True; state["last_event"]=time.monotonic()
+            kind=event.get("type")
+            reduce_live_event(state,event)
+            if kind=="session.next.tool.called": state["tool_running"]=True
+            elif kind in {"session.next.tool.success","session.next.tool.failed"}:
+                state["tool_running"]=False
+                if kind=="session.next.tool.success":
+                    state["reasoning"]=0; state["text"]=0
+                    state["tool_successes"]+=1
+    def stream():
+        while not stop.is_set():
+            try: http.stream_session_events(sid,consume,stop)
+            except Exception: stop.wait(0.5)
+    thread=threading.Thread(target=stream,daemon=True,name=f"v2-event-{sid[-8:]}")
+    state["thread"]=thread; thread.start(); return state
 
 def message_shape(messages,session_info):
     # Normalize message order: API endpoints may return ascending or descending.
@@ -530,6 +730,41 @@ def root_orchestrator_id():
         con=db_connect(); row=con.execute("SELECT id FROM session_v2 WHERE agent='orchestrator' AND directory=? AND time_created>=? ORDER BY time_created DESC LIMIT 1",(PROJECT,START_MS)).fetchone(); con.close(); return row[0] if row else ""
     except Exception: return ""
 
+def root_rollover_path(): return Path(PROJECT)/".opencode-v2"/"root-rollovers.json"
+
+def root_restart_count():
+    try: return int(json.loads(root_rollover_path().read_text()).get("count") or 0)
+    except Exception: return 0
+
+def record_root_restart(sid,phase):
+    path=root_rollover_path(); path.parent.mkdir(parents=True,exist_ok=True)
+    count=root_restart_count()+1
+    temp=path.with_suffix(".tmp")
+    temp.write_text(json.dumps({"owner":"supervisor","count":count,"latest_session":sid,"phase":phase},indent=2)+"\n")
+    os.replace(temp,path)
+
+def maybe_continue_root(active_sids,child_active):
+    """Replace only a terminated root; never copy its conversation or child prose."""
+    global root_idle_since
+    if not PROJECT or child_active: root_idle_since=None; return False
+    root=root_orchestrator_id()
+    if not root or root in active_sids: root_idle_since=None; return False
+    state=state_snapshot(PROJECT); phase=state.get("resume_phase")
+    if phase=="complete": return False
+    if root_idle_since is None: root_idle_since=time.time(); return False
+    if time.time()-root_idle_since<5: return False
+    if root_restart_count()>=MAX_ROOT_RESTARTS:
+        log(f"ROOT_CONTINUATION_LIMIT phase={phase} count={root_restart_count()}")
+        return False
+    ok,detail=http.start_agent_session("orchestrator",ROOT_CONTINUATION_PROMPT)
+    if not ok:
+        log(f"ROOT_CONTINUATION_FAILED phase={phase} detail={detail}")
+        root_idle_since=time.time(); return False
+    record_root_restart(detail,phase); root_idle_since=None
+    log(f"ROOT_CONTINUATION_STARTED session={detail} phase={phase}")
+    csv("ROOT_CONTINUATION_STARTED",detail,"orchestrator",phase)
+    return True
+
 def control_guard(kind):
     if not PROJECT:
         return False
@@ -600,6 +835,7 @@ def merge_lesson_candidates():
 def maybe_launch_lessons(active_sids,child_active):
     global root_seen_active,root_idle_since,lessons_started,lessons_launch_attempts
     if lessons_started or not PROJECT: return
+    if state_snapshot(PROJECT).get("resume_phase")!="complete": return
     ctrl=Path(PROJECT)/".opencode-v2"
     if (ctrl/"LESSONS.ready").exists(): lessons_started=True; return
     root=root_orchestrator_id()
@@ -633,6 +869,7 @@ def api_poll_loop():
             now=time.time()
             rows={}
             child_active=False
+            root_context_candidate=None
 
             for sid in list(active):
                 info=http.get_session(sid)
@@ -646,6 +883,15 @@ def api_poll_loop():
                 agent=shape["agent"]
                 parent=shape["parent"]
                 child_active=child_active or bool(parent)
+                if (agent=="orchestrator" and not parent and
+                    isinstance(shape.get("context_input"),(int,float)) and
+                    shape["context_input"]>=ROOT_CONTEXT_INPUT_CEILING and
+                    not shape["tool_running"]):
+                    root_context_candidate=(sid,int(shape["context_input"]))
+
+                live=None
+                if parent:
+                    live=ensure_event_watch(sid)
 
                 if agent in IMPLEMENTATION_AGENTS and parent:
                     enforce_assignment(sid,agent,shape["first_user"])
@@ -657,22 +903,43 @@ def api_poll_loop():
                 # assistant message/parts become observable. Unknown is NOT
                 # "no tool for 120s". Start/continue watchdog only when a live,
                 # unfinished assistant message is actually visible.
-                can_watch=(
-                    bool(parent)
-                    and shape.get("observable")
-                    and not shape.get("assistant_completed")
-                    and not shape["tool_running"]
-                )
+                live_observable=bool(live and live.get("connected"))
+                tool_running=shape["tool_running"] or bool(live and live.get("tool_running"))
+                can_watch=(bool(parent) and not shape.get("assistant_completed")
+                           and not tool_running
+                           and (shape.get("observable") or live_observable))
 
                 age,st=watchdog_age(sid,key,can_watch)
-                reasoning=shape["reasoning"]
-                text_chars=shape["text"]
+                reasoning=max(shape["reasoning"],int((live or {}).get("reasoning",0)))
+                text_chars=max(shape["text"],int((live or {}).get("text",0)))
+                fallback_reason=fallback_no_progress_reason(
+                    sid,agent,did,shape.get("observable") or live_observable
+                ) if parent else ""
+                planner_retired=False
 
-                if can_watch and st["aborted_key"]!=key:
+                if agent=="implementation-planner" and parent:
+                    existing_plan=Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
+                    checkpoint=planner_checkpoints.setdefault(
+                        sid,{"observed":existing_plan.exists(),"preexisting":existing_plan.exists(),"started":time.monotonic()}
+                    )
+                    checkpoint.setdefault("started",time.monotonic())
+                    checkpoint_reason=(
+                        f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
+                        if planner_restart_count()>=MAX_PLANNER_RESTARTS and not plan_ready()
+                        else planner_checkpoint_reason(sid,time.monotonic()-checkpoint["started"])
+                    )
+                    if checkpoint_reason and not checkpoint.get("aborted"):
+                        checkpoint["aborted"]=True
+                        if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                            record_planner_restart(sid,checkpoint_reason)
+                        abort_session(sid,checkpoint_reason,agent)
+                        planner_retired=True
+
+                if can_watch and st["aborted_key"]!=key and not planner_retired:
                     hs,hr,ht=watchdog_limits(agent)
 
                     reason=planner_context_reason(
-                        agent,shape["context_input"],shape["tool_running"]
+                        agent,shape["context_input"],tool_running
                     )
                     if not reason:
                         if reasoning>=hr:
@@ -684,12 +951,21 @@ def api_poll_loop():
 
                     if reason:
                         st["aborted_key"]=key
+                        if agent=="implementation-planner":
+                            if planner_restart_count()>=MAX_PLANNER_RESTARTS:
+                                reason=f"planner_restart_limit={MAX_PLANNER_RESTARTS} {reason}"
+                            else:
+                                record_planner_restart(sid,reason)
                         if abort_session(
                             sid,
                             f"runaway {reason} reasoning_chars={reasoning} text_chars={text_chars}",
                             agent,
                         ):
                             abort_count[sid]=abort_count.get(sid,0)+1
+
+                if fallback_reason and not (live or {}).get("fallback_aborted"):
+                    if live is not None: live["fallback_aborted"]=True
+                    abort_session(sid,f"runaway {fallback_reason}",agent)
 
                 rows[sid]={
                     "session":sid,
@@ -699,7 +975,7 @@ def api_poll_loop():
                     "attempt":attempt,
                     "reasoning":reasoning,
                     "text":text_chars,
-                    "tool_running":shape["tool_running"],
+                    "tool_running":tool_running,
                     "context_input":shape["context_input"],
                     "observable":shape.get("observable",False),
                     "assistant_completed":shape.get("assistant_completed",False),
@@ -719,6 +995,11 @@ def api_poll_loop():
             tmp.write_text(json.dumps(payload,separators=(",",":")))
             os.replace(tmp,LIVE_STATUS)
 
+            if root_context_candidate and not child_active:
+                sid,context_input=root_context_candidate
+                abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
+            stop_inactive_event_watches(active)
+            maybe_continue_root(active,child_active)
             maybe_launch_lessons(active,child_active)
             merge_lesson_candidates()
 
@@ -731,10 +1012,17 @@ def persisted_reconcile_loop():
     while not DB.exists(): time.sleep(0.5)
     while True:
         try:
-            con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction') FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
-            for sid,agent,comps in rows:
+            con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction'),s.time_idle FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
+            for sid,agent,comps,time_idle in rows:
                 if agent in IMPLEMENTATION_AGENTS and sid not in dispatch_seen:
                     enforce_assignment(sid,agent,first_user_text_db(sid))
+                if agent in IMPLEMENTATION_AGENTS and time_idle and sid not in post_finalize_seen:
+                    post_finalize_seen.add(sid)
+                    did=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))[0]
+                    if did and not ready_info(did):
+                        ok,detail=post_session_finalize(did)
+                        log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
+                        csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
                 prev=compaction_seen.get(sid,0)
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
