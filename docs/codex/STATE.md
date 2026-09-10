@@ -21,6 +21,14 @@ Branch: v2.6.9-development
   derives canonical child IDs, validates ownership/dependencies, and persists
   the split plus a child scope artifact. Split parents remain authoritative and
   run their original verify command only after required children are ready.
+- Splitter execution is supervisor-preclaimed per parent/generation. Its
+  completion hook immediately validates the one durable proposal and either
+  persists the two executable children or records a finite explicit
+  `splitter-failed`/`split-validation-failed` status. It never relies on a
+  later root/supervisor conversation cycle.
+- `control-status` exposes split state/generation and is the root's only
+  allowlisted shell command. The orchestrator uses it at loop boundaries; it
+  has no general shell or operator-control authority.
 
 ## Attempts / retries
 
@@ -29,6 +37,9 @@ Branch: v2.6.9-development
 - /retry-failed is the intended user-facing operator retry command.
 - Human grants must remain explicit and auditable.
 - Infrastructure/runtime failures must be distinguished from genuine worker failures.
+- Immutable dispatch history is retained, while a bounded no-durable-work
+  runtime/supervisor-compaction abort receives a supervisor infrastructure
+  credit and does not consume a genuine autonomous attempt or split counter.
 - Historical attempt counts must never be reset or rewritten.
 - Depths 0 and 1 split after their second genuine failure; terminal depth 2
   permits three genuine automatic attempts and is then execution-blocked.
@@ -37,11 +48,11 @@ Branch: v2.6.9-development
 
 ## Known current problems
 
-1. Large leaves can repeatedly hit OpenCode maximum-step limits.
-2. Retrying the identical oversized leaf is inefficient.
-3. Probe-builder has shown excessive research before writing its owned artifact.
-4. Infrastructure cancellation must not silently waste scarce operator authorization.
-5. INTERNAL reference policy must not accidentally turn into external JPL/NASA research.
+1. Large leaves may still require the bounded recursive-split path; a leaf with
+   indivisible ownership cannot be split safely and reports an explicit
+   split-validation failure for plan repair.
+2. Probe-builder can still require bounded progress supervision.
+3. INTERNAL reference policy must not accidentally turn into external JPL/NASA research.
 
 ## Important existing controls to preserve
 

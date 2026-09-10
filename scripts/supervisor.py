@@ -35,7 +35,7 @@ MAX_PLANNER_RESTARTS=3
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
-lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}
+lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set(); worker_progress={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 
@@ -161,6 +161,24 @@ def split_request_path(did):
 def split_proposal_path(did):
     return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-proposal.json"
 
+def split_status_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-status.json"
+
+def load_split_status(did):
+    try:
+        data=json.loads(split_status_path(did).read_text())
+        return data if isinstance(data,dict) else {}
+    except Exception:
+        return {}
+
+def save_split_status(did, state, **detail):
+    """Persist a finite supervisor-owned split transition."""
+    path=split_status_path(did); path.parent.mkdir(parents=True,exist_ok=True)
+    payload={"owner":"supervisor","parent_id":did,"state":state,
+             "generation":1,"timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),**detail}
+    tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2)+"\n"); os.replace(tmp,path)
+    return payload
+
 def split_history_path():
     return Path(PROJECT)/".opencode-v2"/"work"/"splits.json"
 
@@ -194,8 +212,10 @@ def split_request(did):
         "verification":leaf.get("verify_command",""),"durable_progress":{"path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),"contents":progress_text},
         "existing_artifacts":_artifact_items(leaf.get("owned_artifacts","")),
         "failed_attempts":compact,"expected_children":expected_children(did),
+        "generation":1,
     }
     tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2)+"\n"); os.replace(tmp,path)
+    split_status_path(did).unlink(missing_ok=True)
     return True,"split-required"
 
 def validate_split_proposal(parent, proposals):
@@ -256,28 +276,68 @@ def persist_split(parent, proposals):
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
             tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(history,indent=2)+"\n"); os.replace(tmp,path)
             split_request_path(parent).unlink(missing_ok=True)
+            split_status_path(parent).unlink(missing_ok=True)
     log(f"RECURSIVE_SPLIT parent={parent} children={','.join(expected)}")
     csv("RECURSIVE_SPLIT","","supervisor",f"{parent} -> {','.join(expected)}")
     return expected
 
+def process_split_proposal(did, session="", require_proposal=False):
+    """Validate one durable proposal and always leave a finite outcome.
+
+    This is callable from the splitter's completion hook as well as the
+    supervisor reconciliation loop.  The hook is the primary path; polling is
+    deliberately only crash recovery, never an undefined external action.
+    """
+    if not split_request_path(did).exists(): return False,"split-request-missing"
+    proposal_path=split_proposal_path(did)
+    if not proposal_path.exists():
+        if require_proposal:
+            save_split_status(did,"splitter-failed",session=session,
+                              reason="splitter-completed-without-durable-proposal")
+            log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason=missing durable proposal")
+            return False,"splitter-completed-without-durable-proposal"
+        return False,"proposal-pending"
+    try:
+        payload=json.loads(proposal_path.read_text())
+        request=json.loads(split_request_path(did).read_text())
+        if (not isinstance(payload,dict) or payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL or
+                payload.get("parent_id")!=did or payload.get("depth")!=split_depth(did) or
+                payload.get("generation")!=request.get("generation",1)):
+            raise ValueError("proposal protocol, parent, depth, or generation does not match request")
+        children=persist_split(did,payload.get("proposals"))
+        proposal_path.unlink(missing_ok=True)
+        log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
+        return True,"accepted"
+    except Exception as exc:
+        # Keep the model artifact as audit evidence, but never leave a root
+        # waiting forever for a transition that cannot happen.
+        save_split_status(did,"split-validation-failed",session=session,reason=str(exc)[:1000])
+        log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason={exc}")
+        return False,"split-validation-failed"
+
+def claim_splitter(parent, dispatch_token):
+    """Preclaim exactly one splitter for a pending split generation."""
+    if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
+        return False,"split-request-missing"
+    with dispatch_lock:
+        status=load_split_status(parent)
+        if status.get("state") in {"splitter-active","split-validation-failed","splitter-failed"}:
+            return False,status.get("state")
+        if leaf_children(parent): return False,"already-split"
+        save_split_status(parent,"splitter-active",dispatch_token=dispatch_token)
+    log(f"SPLITTER_CLAIM parent={parent} generation=1 token={dispatch_token}")
+    return True,"claimed"
+
+def complete_splitter(parent, session=""):
+    """Completion callback: process proposal now, not on a later root cycle."""
+    return process_split_proposal(parent,session,require_proposal=True)
+
 def reconcile_split_proposals():
-    """Accept only a validated splitter artifact; malformed plans stay repairable."""
+    """Crash-recovery reconciliation for proposal files already on disk."""
     if not PROJECT: return
     for request in (Path(PROJECT)/".opencode-v2"/"work").glob("D*.split-request.json"):
         did=request.name.removesuffix(".split-request.json")
-        proposal_path=split_proposal_path(did)
-        if not proposal_path.exists(): continue
-        try:
-            payload=json.loads(proposal_path.read_text())
-            if not isinstance(payload,dict) or payload.get("parent_id")!=did:
-                raise ValueError("proposal parent does not match request")
-            children=persist_split(did,payload.get("proposals"))
-            proposal_path.unlink(missing_ok=True)
-            log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
-        except Exception as exc:
-            # Preserve the proposal as auditable repair evidence. The request
-            # remains outstanding and no model-selected control state changes.
-            log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason={exc}")
+        if split_proposal_path(did).exists(): process_split_proposal(did)
 
 def record_leaf_failure(did, reason, classification="genuine"):
     """Record terminal worker outcome and request, but never invent, a split."""
@@ -499,14 +559,13 @@ def post_session_finalize(did,runner=subprocess.run):
     except (OSError,subprocess.TimeoutExpired) as e:
         return False,f"verification-error-{type(e).__name__}"
 
-def record_compaction_infrastructure_failure(sid,did):
-    """Reserve the one bounded recovery slot for a proven beta-only failure.
+def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
+    """Record one bounded non-implementation dispatch without rewriting history.
 
-    A failed compaction is not automatically free: the supervisor grants this
-    credit only when the failed child has neither an owned artifact nor its
-    durable progress file.  The raw dispatch/session count remains truthful;
-    the additional slot simply prevents this non-implementation failure from
-    consuming one of the three real implementation opportunities.
+    A runtime abort is not automatically free: it receives one recovery credit
+    only when the child has no owned artifact or durable progress.  The raw
+    dispatch/session count remains truthful; the additional slot prevents this
+    non-implementation event from consuming a genuine autonomous attempt.
     """
     if not did or ready_info(did): return False,"already-complete-or-unknown"
     leaf=(load_manifest().get("leaves") or {}).get(did)
@@ -531,15 +590,20 @@ def record_compaction_infrastructure_failure(sid,did):
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                 "grant":1,
                 "source":"supervisor",
-                "kind":"opencode-compaction-template",
+                "kind":kind,
                 "session":sid,
                 "evidence":"no-owned-artifact-or-progress",
+                "reason":reason,
             })
             entry["infrastructure_retry_grants"]=state["infrastructure_retry_grants"]+1
             save_attempts(data)
-    log(f"INFRASTRUCTURE_RETRY_GRANT session={sid} deliverable={did} kind=opencode-compaction-template grant=1")
-    csv("INFRASTRUCTURE_RETRY_GRANT",sid,"supervisor",f"{did} opencode-compaction-template grant=1")
+    log(f"INFRASTRUCTURE_RETRY_GRANT session={sid} deliverable={did} kind={kind} grant=1 reason={reason}")
+    csv("INFRASTRUCTURE_RETRY_GRANT",sid,"supervisor",f"{did} {kind} grant=1 reason={reason}")
     return True,"granted"
+
+def record_compaction_infrastructure_failure(sid,did):
+    """Compatibility wrapper for a failed beta compaction template."""
+    return record_infrastructure_abort(sid,did,"opencode-compaction-template","opencode-compaction-template")
 
 def compaction_failure(sid):
     """Return the terminal beta compaction failure type, if any."""
@@ -1129,7 +1193,13 @@ class OpenCodeHTTP:
 http=OpenCodeHTTP()
 
 def abort_session(sid,reason,agent=""):
-    ok=http.interrupt(sid); kind="INTERRUPT" if ok else "INTERRUPT_FAILED"; log(f"{kind} session={sid} agent={agent} reason={reason}"); csv(kind,sid,agent,reason); return ok
+    ok=http.interrupt(sid)
+    if ok:
+        # The persisted reconciler can distinguish a supervisor-imposed abort
+        # from a worker that completed unsuccessfully.  This is deliberately
+        # not inferred from an ambiguous UI "cancelled" label.
+        supervisor_abort_reasons[sid]=reason
+    kind="INTERRUPT" if ok else "INTERRUPT_FAILED"; log(f"{kind} session={sid} agent={agent} reason={reason}"); csv(kind,sid,agent,reason); return ok
 
 def watchdog_age(sid,key,can_watch,now=None):
     """Advance a watchdog only for observable, unfinished no-tool output."""
@@ -1676,13 +1746,25 @@ def persisted_reconcile_loop():
                         # authorization.  Release at most one such reservation
                         # and let durable status automatically reopen execution.
                         abort_reason=immediate_runtime_abort(sid)
-                        if abort_reason and not ready_info(did):
-                            release_operator_reservation(sid,did,abort_reason)
+                        supervisor_abort=supervisor_abort_reasons.pop(sid,"")
+                        infrastructure_reason=abort_reason or supervisor_abort
+                        # A direct runtime cancellation or our bounded
+                        # compaction/runaway retirement has no durable owned
+                        # work. It is infrastructure, not a genuine failure,
+                        # even if the model made read-only tool calls first.
+                        if (infrastructure_reason and not ready_info(did) and
+                                not durable_worker_execution(did)):
+                            kind=("supervisor-compaction-retire" if "child_compaction" in infrastructure_reason
+                                  else "runtime-cancel")
+                            granted,_=record_infrastructure_abort(sid,did,infrastructure_reason,kind)
+                            record_leaf_failure(did,infrastructure_reason,"infrastructure")
+                            release_operator_reservation(sid,did,infrastructure_reason)
+                            log(f"LEAF_INFRASTRUCTURE_ABORT session={sid} deliverable={did} granted={str(granted).lower()} reason={infrastructure_reason}")
                         else:
                             execution=meaningful_worker_execution(sid,did)
                             if execution:
                                 consume_operator_reservation(sid,did,execution)
-                        if not ready_info(did):
+                        if not ready_info(did) and not (infrastructure_reason and not durable_worker_execution(did)):
                             ok,detail=post_session_finalize(did)
                             log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
                             csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
@@ -1718,19 +1800,37 @@ def persisted_reconcile_loop():
         time.sleep(0.5)
 
 def main():
+    global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--agent")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
+    ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     args,unknown=ap.parse_known_args()
     if args.claim_dispatch:
         if unknown or not args.project or not args.agent or args.prompt is None:
             raise SystemExit("dispatch claim requires --project --agent --prompt --claim-dispatch")
-        global PROJECT
         PROJECT=args.project
         status,did,reason,count=preclaim_attempt(args.agent,args.prompt,args.claim_dispatch)
         if status!="claimed": raise SystemExit(f"DISPATCH_DENY deliverable={did or 'unknown'} reason={reason} count={count}")
         suffix=" operator_authorized=true" if count>AUTOMATIC_ATTEMPT_LIMIT else ""
         print(f"DISPATCH_ALLOW deliverable={did} attempt={count}{suffix}")
+        return
+    if args.claim_splitter:
+        if unknown or not args.project or args.agent!="task-splitter" or args.prompt is None:
+            raise SystemExit("splitter claim requires --project --agent task-splitter --prompt --claim-splitter")
+        PROJECT=args.project
+        match=re.fullmatch(r"\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*",args.prompt)
+        if not match: raise SystemExit("SPLIT_DENY invalid splitter prompt")
+        ok,detail=claim_splitter(match.group(1),args.claim_splitter)
+        if not ok: raise SystemExit(f"SPLIT_DENY parent={match.group(1)} reason={detail}")
+        print(f"SPLIT_ALLOW parent={match.group(1)} generation=1")
+        return
+    if args.complete_splitter:
+        if unknown or not args.project:
+            raise SystemExit("splitter completion requires --project --complete-splitter")
+        PROJECT=args.project
+        ok,detail=complete_splitter(args.complete_splitter,args.prompt or "")
+        print(f"SPLIT_{'ACCEPTED' if ok else 'FAILED'} parent={args.complete_splitter} result={detail}")
         return
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} first_compaction=allow second_compaction=retire")
     threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()

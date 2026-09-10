@@ -34,6 +34,15 @@ IMPLEMENTATION_PLAN.ready, Dxxx.ready, TEST_REPORT.json, and exact
 ACCEPTANCE_PASS decide progress. Use `.opencode-v2/bin/control-status`
 for the deterministic derived status/dashboard.
 
+CONTROL LOOP — REQUIRED AND TERSE
+Your sole shell authority is the exact, argument-free command
+`.opencode-v2/bin/control-status`; it is explicitly allowlisted and returns
+the authoritative JSON state. Run it as your first action and after each
+dispatch or splitter receipt. Do not delegate it, inspect/reconstruct its
+inputs, invoke any other shell command, or narrate exploratory reasoning.
+Choose the next action directly from `resume_phase` and `eligible` leaves. If
+the status has no legal action, return its explicit blocker once and stop.
+
 FRESH ROOT CONTINUATION
 When this is a continuation session, do not ask for or reconstruct any previous
 conversation. Read `.opencode-v2/CONTROL_CONTRACT.md`, `ACCEPTANCE.md`, and
@@ -108,9 +117,10 @@ RECURSIVE SPLIT
 When `control-status` reports `"resume_phase": "recursive-split"`, launch
 exactly one `task-splitter` for each `split_required` parent, with the short
 prompt `SPLIT_PARENT: Dxxx`. The splitter reads its durable request and writes
-two proposals; it cannot choose child IDs or mutate the manifest/ledger. Wait
-for the supervisor to validate and persist the split, then re-read
-`control-status`. Do not dispatch the split parent, replan the project, grant a
+two proposals; it cannot choose child IDs or mutate the manifest/ledger. Its
+completion event deterministically invokes supervisor validation/persistence;
+immediately re-run `control-status`. Never wait for a separate supervisor or
+human cycle. Do not dispatch the split parent, replan the project, grant a
 retry, or manufacture child IDs. At depths 0 and 1 a second genuine failed
 attempt triggers this path; depth 2 never splits and retains its three genuine
 automatic attempts. Infrastructure/runtime failures and bad-plan outcomes do
@@ -174,11 +184,11 @@ The second incomplete compaction retires/recycles that child.
 A valid Dxxx.ready always wins over later compaction/cancellation.
 
 ROOT CONTINUATION
-This conversation is disposable. A supervisor-created fresh orchestrator reads
-only CONTROL_CONTRACT.md, ACCEPTANCE.md, IMPLEMENTATION_PLAN.md when present,
-and `.opencode-v2/bin/control-status`, then continues its reported phase from
-durable state. Never request or copy an earlier root transcript or child output,
-and never redispatch a ready Dxxx.
+This conversation is disposable. A supervisor-created fresh orchestrator runs
+the allowlisted status command, then takes only its reported next action. Never
+request or copy an earlier root transcript or child output, reread unchanged
+control files, relaunch a splitter for an existing split generation, or
+redispatch a ready Dxxx.
 
 WORKER COMPLETION
 Workers finish through:

@@ -985,6 +985,32 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         planner = (self.AGENTS / "implementation-planner.md").read_text()
         self.assertIn("steps: 24", planner)
 
+    def test_root_has_only_the_exact_readonly_status_shell_capability(self):
+        root = (self.AGENTS / "orchestrator.md").read_text()
+        self.assertIn("sole shell authority", root)
+        self.assertIn("Do not delegate it", root)
+        self.assertIn("immediately re-run `control-status`", root)
+        self.assertIn('".opencode-v2/bin/control-status": allow', root)
+        self.assertIn('"*": deny', root)
+        config = json.loads((self.AGENTS.parent / "opencode.jsonc").read_text())
+        self.assertEqual(
+            config["providers"]["syv"]["models"]["qwen38-orchestrator"]["body"]["chat_template_kwargs"],
+            {"enable_thinking": False, "preserve_thinking": False},
+        )
+
+    def test_task_splitter_is_single_write_and_completion_hook_is_authoritative(self):
+        splitter = (self.AGENTS / "task-splitter.md").read_text()
+        plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.js").read_text()
+        self.assertIn("steps: 3", splitter)
+        self.assertIn('"protocol": "v2-task-split-proposal-v1"', splitter)
+        self.assertIn("read the request, then\nwrite the proposal", splitter)
+        self.assertIn("--claim-splitter", plugin)
+        self.assertIn("--complete-splitter", plugin)
+        self.assertIn("splitter for the same generation", plugin)
+        self.assertIn("materializeSplitterProposal", plugin)
+        self.assertIn("proposalFromOutput", plugin)
+        self.assertIn("never derive children, scopes, IDs", plugin)
+
     def test_root_never_resets_or_relaunches_a_blocked_planner_ledger(self):
         root = (self.AGENTS / "orchestrator.md").read_text()
         self.assertIn("planner-restarts.json", root)
@@ -1409,8 +1435,13 @@ class RecursiveSplitTests(unittest.TestCase):
     def proposal(self, first="a.txt, b.txt", second="c.txt, d.txt", sequential=False):
         return [{"scope":"finish first scope", "owned_artifacts":first, "verify_command":"test -f a.txt",
                  "role":"implementer", "depends_on_sibling":"", "done_when":"a exists"},
-                {"scope":"finish second scope", "owned_artifacts":second, "verify_command":"test -f b.txt",
-                 "role":"tester", "depends_on_sibling":"first" if sequential else "", "done_when":"b exists"}]
+                 {"scope":"finish second scope", "owned_artifacts":second, "verify_command":"test -f b.txt",
+                  "role":"tester", "depends_on_sibling":"first" if sequential else "", "done_when":"b exists"}]
+
+    def proposal_payload(self, did="D001"):
+        return {"protocol": supervisor.SPLIT_PROPOSAL_PROTOCOL, "parent_id": did,
+                "depth": control_state.split_depth(did), "generation": 1,
+                "proposals": self.proposal()}
 
     def fail_twice(self, did="D001"):
         self.assertEqual(supervisor.claim_attempt("one", did), ("claimed", 1))
@@ -1442,6 +1473,48 @@ class RecursiveSplitTests(unittest.TestCase):
         self.assertEqual(supervisor.claim_attempt("two", "D001"), ("claimed", 2))
         self.assertEqual(supervisor.record_leaf_failure("D001", "bad ownership", "bad-plan"), (True, "bad-plan"))
         self.assertFalse(supervisor.split_request_path("D001").exists())
+
+    def test_runtime_abort_preserves_dispatch_history_but_not_genuine_budget(self):
+        self.assertEqual(supervisor.claim_attempt("cancelled", "D001"), ("claimed", 1))
+        self.assertEqual(
+            supervisor.record_infrastructure_abort("cancelled", "D001", "runtime cancelled"),
+            (True, "granted"),
+        )
+        self.assertEqual(supervisor.record_leaf_failure("D001", "runtime cancelled", "infrastructure"), (True, "infrastructure"))
+        entry = supervisor.load_attempts()["deliverables"]["D001"]
+        self.assertEqual(entry["count"], 1)  # historical dispatch remains true
+        self.assertEqual(control_state.attempt_state(entry)["automatic_attempts_consumed"], 0)
+        self.assertEqual(supervisor.claim_attempt("real-one", "D001"), ("claimed", 2))
+        self.assertEqual(supervisor.record_leaf_failure("D001", "verify-failed"), (True, "genuine-recorded"))
+        self.assertEqual(supervisor.claim_attempt("real-two", "D001"), ("claimed", 3))
+        self.assertEqual(supervisor.record_leaf_failure("D001", "verify-failed"), (True, "split-required"))
+
+    def test_splitter_completion_persists_children_once_without_root_cycle(self):
+        self.fail_twice()
+        request = supervisor.split_request_path("D001")
+        self.assertTrue(request.exists())
+        self.assertEqual(supervisor.claim_splitter("D001", "launch-1"), (True, "claimed"))
+        self.assertEqual(supervisor.claim_splitter("D001", "launch-2"), (False, "splitter-active"))
+        supervisor.split_proposal_path("D001").write_text(json.dumps(self.proposal_payload()))
+        self.assertEqual(supervisor.complete_splitter("D001", "split-session"), (True, "accepted"))
+        self.assertFalse(request.exists())
+        state = control_state.snapshot(self.tmp.name)
+        self.assertEqual(state["leaves"]["D001"]["split_children"], ["D001-A", "D001-B"])
+        self.assertTrue(state["leaves"]["D001-A"]["eligible"])
+        self.assertTrue(state["leaves"]["D001-B"]["eligible"])
+        self.assertEqual(supervisor.claim_splitter("D001", "restart"), (False, "split-request-missing"))
+
+    def test_splitter_missing_or_invalid_proposal_is_a_finite_explicit_failure(self):
+        self.fail_twice()
+        self.assertEqual(supervisor.claim_splitter("D001", "launch"), (True, "claimed"))
+        self.assertEqual(supervisor.complete_splitter("D001", "split-session"),
+                         (False, "splitter-completed-without-durable-proposal"))
+        leaf = control_state.snapshot(self.tmp.name)["leaves"]["D001"]
+        self.assertEqual(leaf["split_state"], "splitter-failed")
+        state = {"acceptance":{"complete":True}, "plan":{"complete":True},
+                 "leaves":{"D001":leaf}, "tests":{"complete":False},
+                 "acceptance_validation":{"complete":False}}
+        self.assertEqual(control_state.resume_phase(state), "execution-blocked")
 
     def test_validation_enforces_ownership_and_acyclic_order(self):
         self.fail_twice()
@@ -1481,6 +1554,32 @@ class RecursiveSplitTests(unittest.TestCase):
         ledger["deliverables"]["D001-A"] = {"count":2,"sessions":["x","y"],"automatic_limit":2}
         (self.ctrl / "work" / "attempts.json").write_text(json.dumps(ledger))
         self.assertEqual([x for x, _ in supervisor.grant_operator_retry(["D001-A"])], ["D001-A"])
+
+
+class SplitterPluginMaterializationTests(unittest.TestCase):
+    def test_complete_structured_splitter_output_becomes_one_durable_proposal(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td) / ".opencode-v2/work"; work.mkdir(parents=True)
+            request = {"parent_id": "D001", "depth": 0, "generation": 1}
+            (work / "D001.split-request.json").write_text(json.dumps(request))
+            proposal = {
+                "protocol": supervisor.SPLIT_PROPOSAL_PROTOCOL, "parent_id": "D001",
+                "depth": 0, "generation": 1, "proposals": [{"one": 1}, {"two": 2}],
+            }
+            output = "summary\n```json\n" + json.dumps(proposal) + "\n```\n"
+            plugin = Path(__file__).parents[1] / "xdg/config/opencode/plugins/v2-bounded-subagent.js"
+            module = Path(td) / "plugin.mjs"
+            module.write_text(plugin.read_text())
+            code = (
+                f"import {{materializeSplitterProposal}} from {json.dumps(str(module))};"
+                f"if (!materializeSplitterProposal({json.dumps(td)}, 'D001', {json.dumps(output)})) process.exit(2);"
+            )
+            result = subprocess.run(
+                ["node", "--input-type=module", "-e", code],
+                text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads((work / "D001.split-proposal.json").read_text()), proposal)
 
 
 class PostSessionFinalizationTests(unittest.TestCase):

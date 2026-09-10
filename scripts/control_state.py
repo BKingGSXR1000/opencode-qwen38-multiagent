@@ -18,6 +18,7 @@ MAX_INFRASTRUCTURE_RETRY_GRANTS = 1
 # A human authorization may survive one *proven, pre-execution* runtime abort.
 # It releases an existing reservation; it never creates a human grant.
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
+SPLIT_STATUS_SUFFIX = ".split-status.json"
 
 
 # Bootstrap owns this incomplete plan artifact.  Keeping the text here lets the
@@ -122,6 +123,17 @@ def load_attempts(project):
         return {"deliverables": {}}
 
 
+def split_status(project, did):
+    """Return the supervisor's finite state for one pending split request."""
+    try:
+        data = json.loads(
+            (Path(project) / ".opencode-v2" / "work" / f"{did}{SPLIT_STATUS_SUFFIX}").read_text()
+        )
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def attempt_state(entry):
     """Validate and project one supervisor-owned attempt ledger entry.
 
@@ -174,7 +186,11 @@ def attempt_state(entry):
             for failure in infrastructure_failures:
                 if not isinstance(failure, dict):
                     infrastructure_failures = None; break
-                if failure.get("source") != "supervisor" or failure.get("kind") != "opencode-compaction-template":
+                if (failure.get("source") != "supervisor" or
+                        failure.get("kind") not in {
+                            "opencode-compaction-template", "runtime-cancel",
+                            "supervisor-compaction-retire", "child-binding-failure",
+                        }):
                     infrastructure_failures = None; break
                 if not failure.get("timestamp") or not isinstance(failure.get("session"), str) or not failure["session"]:
                     infrastructure_failures = None; break
@@ -272,7 +288,11 @@ def attempt_state(entry):
         "operator_infrastructure_aborted": aborted_operator_attempts if valid else 0,
         "operator_infrastructure_blocked": blocked_operator_attempts if valid else 0,
         "total_dispatches": count,
-        "automatic_attempts_consumed": min(count, automatic_limit) if valid else 0,
+        # `count` is the immutable dispatch history.  A bounded infrastructure
+        # credit represents one dispatch that never became a real autonomous
+        # implementation attempt, so derive the latter rather than rewriting
+        # history.
+        "automatic_attempts_consumed": max(0, min(count - infrastructure_grants, automatic_limit)) if valid else 0,
         "infrastructure_retry_grants": infrastructure_grants,
         "infrastructure_grants_remaining": infrastructure_remaining if valid else 0,
         "allowed_attempts": allowed,
@@ -323,6 +343,8 @@ def snapshot(project):
             1 for item in history if isinstance(item, dict) and item.get("classification") == "genuine"
         )
         split_required = (project / ".opencode-v2" / "work" / f"{did}.split-request.json").exists()
+        pending_split = split_status(project, did) if split_required else {}
+        split_state = pending_split.get("state", "split-required") if split_required else ""
         leaf_states[did] = {
             "complete": complete,
             "attempts": count,
@@ -347,6 +369,8 @@ def snapshot(project):
             "split_children": children,
             "genuine_failures": genuine_failures,
             "split_required": split_required,
+            "split_state": split_state,
+            "split_generation": pending_split.get("generation", 1) if split_required else 0,
             "eligible": not complete and not children and not split_required and attempt["valid"] and count < attempt["allowed_attempts"] and not missing,
         }
     acceptance_complete = phase_ready(
@@ -362,11 +386,14 @@ def snapshot(project):
     tests = test_state(project)
     execution_blockers = []
     for did, leaf in leaf_states.items():
-        if leaf["complete"] or leaf["split_required"] or leaf["split_children"] or not leaf["attempt_limit_reached"]:
+        if leaf["complete"] or leaf["split_children"]:
+            continue
+        if leaf["split_required"] and leaf.get("split_state") not in {"split-validation-failed", "splitter-failed"}:
             continue
         execution_blockers.append({
             "deliverable": did,
-            "reason": ("attempt_ledger_invalid" if not leaf["attempt_ledger_valid"] else
+            "reason": (leaf.get("split_state") if leaf["split_required"] else
+                       "attempt_ledger_invalid" if not leaf["attempt_ledger_valid"] else
                        "execution_blocked_infrastructure" if leaf["operator_infrastructure_blocked"] else
                        "attempt_limit_reached"),
             "attempts": leaf["attempts"],
@@ -402,7 +429,8 @@ def resume_phase(state):
     if not state.get("plan", {}).get("complete"):
         return "implementation-plan"
     leaves = state.get("leaves") or {}
-    if any(leaf.get("split_required") for leaf in leaves.values()):
+    if any(leaf.get("split_required") and leaf.get("split_state") in {"split-required", "splitter-active"}
+           for leaf in leaves.values()):
         return "recursive-split"
     if any(not leaf.get("complete") and leaf.get("attempt_limit_reached") for leaf in leaves.values()):
         return "execution-blocked"

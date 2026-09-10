@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -8,6 +8,50 @@ export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 function exactDeliverable(args) {
   const prompt = typeof args?.prompt === "string" ? args.prompt : "";
   return prompt.match(/^DELIVERABLE:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/m)?.[1] || "unknown";
+}
+
+function splitParent(args) {
+  const prompt = typeof args?.prompt === "string" ? args.prompt : "";
+  return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/)?.[1] || "";
+}
+
+function supervisor(directory, args) {
+  return execFileSync("python3", [
+    "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/supervisor.py",
+    "--project", directory, ...args,
+  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+export function proposalFromOutput(output, parent, directory) {
+  if (typeof output !== "string") return null;
+  // The task-splitter is instructed to use its second tool turn for a write.
+  // Some beta turns nevertheless reach their cap after returning a complete
+  // fenced JSON proposal. Materialize only that exact structured contract;
+  // never derive children, scopes, IDs, or control state from prose.
+  const match = output.match(/```json\s*([\s\S]*?)\s*```/i);
+  if (!match) return null;
+  try {
+    const proposal = JSON.parse(match[1]);
+    const request = JSON.parse(readFileSync(join(directory, ".opencode-v2", "work", `${parent}.split-request.json`), "utf8"));
+    if (proposal?.protocol !== "v2-task-split-proposal-v1" ||
+        proposal?.parent_id !== parent || proposal?.depth !== request?.depth ||
+        proposal?.generation !== request?.generation || !Array.isArray(proposal?.proposals) ||
+        proposal.proposals.length !== 2) return null;
+    return proposal;
+  } catch {
+    return null;
+  }
+}
+
+export function materializeSplitterProposal(directory, parent, output) {
+  const path = join(directory, ".opencode-v2", "work", `${parent}.split-proposal.json`);
+  if (existsSync(path)) return true;
+  const proposal = proposalFromOutput(output, parent, directory);
+  if (!proposal) return false;
+  const temp = `${path}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(proposal, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  renameSync(temp, path);
+  return true;
 }
 
 function fileStatus(path) {
@@ -88,6 +132,14 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     const args = event.input || {};
     const agent = args.agent;
     const prompt = args.prompt;
+    if (agent === "task-splitter") {
+      const parent = splitParent(args);
+      if (!parent) throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
+      // This durable preclaim prevents a restarted root from launching another
+      // splitter for the same generation. It has no attempt/operator authority.
+      supervisor(directory, ["--agent", "task-splitter", "--prompt", prompt, "--claim-splitter", event.id]);
+      return;
+    }
     if (agent === "general") {
       throw new Error("DISPATCH_DENY general is not a canonical implementation role");
     }
@@ -96,10 +148,24 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     if (!implementationAgents.has(agent) && !hasDeliverable) return;
     // This deterministic supervisor claim occurs before OpenCode materializes
     // the child session or sends a provider request.
-    execFileSync("python3", ["/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/supervisor.py", "--project", directory, "--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", event.id], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", event.id]);
   });
   const after = await api.tool.hook("execute.after", async (event) => {
     if ((event.tool !== "subagent" && event.tool !== "task") || !event.result) return;
+    const splitterParent = event.input?.agent === "task-splitter" ? splitParent(event.input) : "";
+    if (splitterParent) {
+      // The completion event is the deterministic validation trigger. The
+      // supervisor reads only the splitter's durable proposal and records an
+      // explicit failure if it is absent or invalid; no root cycle is needed.
+      const session = String(event.result.metadata?.sessionID || "");
+      try {
+        materializeSplitterProposal(directory, splitterParent, event.result.output || "");
+        supervisor(directory, ["--complete-splitter", splitterParent, "--prompt", session]);
+      } catch {
+        // The supervisor has the durable preclaim/status and will surface a
+        // finite failure rather than making the parent-visible receipt trusted.
+      }
+    }
     const receipt = boundedChildResult({
       directory,
       args: event.input || {},
