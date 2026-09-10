@@ -154,7 +154,7 @@ def post_session_finalize(did,runner=subprocess.run):
         checked=runner(command,cwd=PROJECT,shell=True,executable="/bin/bash",timeout=240)
         if checked.returncode!=0: return False,f"verify-failed-{checked.returncode}"
         completed=runner(
-            [str(Path(PROJECT)/".opencode-v2/bin/leaf-complete"),did],
+            [str(ROOT/"scripts/leaf-complete.sh"),did],
             cwd=PROJECT,timeout=300,
         )
         return (completed.returncode==0,"finalized" if completed.returncode==0 else f"leaf-complete-failed-{completed.returncode}")
@@ -577,8 +577,13 @@ def ensure_event_watch(sid):
                     state["tool_successes"]+=1
     def stream():
         while not stop.is_set():
-            try: http.stream_session_events(sid,consume,stop)
-            except Exception: stop.wait(0.5)
+            try:
+                http.stream_session_events(sid,consume,stop)
+            except Exception as e:
+                state["stream_error"]=repr(e)
+            finally:
+                state["connected"]=False
+            stop.wait(0.5)
     thread=threading.Thread(target=stream,daemon=True,name=f"v2-event-{sid[-8:]}")
     state["thread"]=thread; thread.start(); return state
 
