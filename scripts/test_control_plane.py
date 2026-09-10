@@ -554,6 +554,23 @@ class AgentConfigurationAndPromptAuditTests(unittest.TestCase):
         config = (self.AGENTS.parent / "opencode.jsonc").read_text()
         self.assertIn("v2-bounded-subagent.mjs", config)
 
+    def test_planner_uses_the_bounded_nonthinking_qwen_profile(self):
+        config = json.loads((self.AGENTS.parent / "opencode.jsonc").read_text())
+        model = config["providers"]["syv"]["models"][
+            "qwen38-implementation-planner-48k"
+        ]
+        self.assertEqual(model["limit"]["output"], 1536)
+        self.assertEqual(
+            model["body"]["chat_template_kwargs"],
+            {"enable_thinking": False, "preserve_thinking": False},
+        )
+        self.assertNotIn("settings", model)
+        planner = (self.AGENTS / "implementation-planner.md").read_text()
+        self.assertIn("steps: 24", planner)
+        # 24 turns × 1,536 completion tokens keeps one planner session below
+        # the failed runs' 90K+ pre-tool output, even before the no-think mode.
+        self.assertLessEqual(24 * model["limit"]["output"], 36864)
+
 
 class ImplementationPlanSizeTests(unittest.TestCase):
     GUARD = Path(__file__).with_name("control-guard.py")
