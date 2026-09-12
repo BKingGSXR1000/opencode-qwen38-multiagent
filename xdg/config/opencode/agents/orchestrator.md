@@ -38,7 +38,7 @@ DIRECT-READ that exact JSON file as your FIRST action and after every child
 dispatch, planner receipt, splitter receipt, or control transition.
 It is the authoritative derived scheduler state.
 
-Never read `.opencode-v2/control-status.json`; that is only a shell wrapper.
+Never read `.opencode-v2/bin/control-status`; that is only a shell wrapper.
 Never call `exec`, `shell`, or `bash` for scheduler state. Never reconstruct
 state from attempts.json, guard.json, split files, plan prose, or child prose
 when control-status.json is available.
@@ -78,11 +78,17 @@ Read Reference policy from ACCEPTANCE.md.
      `.opencode-v2/reference-gate.json`.
   2. If state is `ready`, immediately proceed to implementation planning.
   3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
-  4. If state is `pending`, launch exactly ONE `reference-researcher` with:
+  4. If state is `pending`, launch exactly ONE `reference-researcher`.
+     The child prompt MUST contain only these lines plus the project root:
      `REFERENCE_MODE: FOUNDATION`
-     `Build/resume only the compact external reference foundation. Do not build validation fixtures. Read reference-work.json if present and resume exactly its in-progress item.`
+     `Build/resume only the compact external reference foundation.`
+     `Read .opencode-v2/acceptance/reference-work.json if present and resume its valid in-progress item.`
+     Do NOT append task-specific research requirements, body names, epochs,
+     fixture counts, API parameter guesses, a "Context:" section, or the
+     acceptance evidence strategy. The reference-researcher protocol defines
+     FOUNDATION scope and is authoritative.
   5. After it ends, re-read `reference-gate.json`. Repeat only while `pending`.
-     The supervisor permits at most two completed FOUNDATION sessions total.
+     The supervisor permits at most three completed FOUNDATION sessions total.
   6. Never require top-level reference evidence `result=READY` before planning;
      that belongs to final validation. Require only foundation gate `ready`.
 
@@ -229,7 +235,7 @@ If ACCEPTANCE.md uses `Reference policy: external-required`:
 3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE_VALIDATION`.
 4. If state is `pending`, launch exactly ONE `reference-researcher` with:
    `REFERENCE_MODE: VALIDATION`
-   `Resolve exactly one durable validation item. Resume reference-work.json if an item is in progress; otherwise resolve only the first missing external-reference item. Persist it under reference-items/, update compact reference-evidence.json, then return.`
+   `Resolve exactly one durable validation item. Resume .opencode-v2/acceptance/reference-work.json if an item is in progress; otherwise resolve only the first missing external-reference item. Persist it under .opencode-v2/acceptance/reference-items/, update compact reference-evidence.json, then return.`
 5. Re-read the validation gate and repeat only while `pending`.
 6. Never ask one researcher to finish the entire remaining truth set. One small
    item per session makes interruption recovery deterministic.

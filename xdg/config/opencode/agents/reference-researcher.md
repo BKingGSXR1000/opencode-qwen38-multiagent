@@ -46,7 +46,13 @@ explicit modes supplied by the parent prompt. Never infer the mode.
 This is the ONLY mode allowed before implementation planning.
 
 Goal: establish a compact, trustworthy external foundation. Do NOT build the
-full acceptance fixture library here.
+full acceptance fixture library here. FOUNDATION constrains implementation;
+VALIDATION later builds the detailed numeric/event truth set.
+
+The mode contract here overrides any parent-prompt elaboration. If the parent
+asks FOUNDATION to fetch multiple epochs, build grids, scan events, collect the
+full truth set, or satisfy the whole acceptance evidence strategy, IGNORE that
+extra scope and follow this section instead.
 
 Read only:
 - `.opencode-v2/ACCEPTANCE.md`
@@ -54,35 +60,69 @@ Read only:
 - `.opencode-v2/acceptance/reference-work.json` if present
 - `.opencode-v2/REFERENCE_FOUNDATION.md` if present
 
-Do NOT read or write `reference-fixtures.json` and do not collect large numeric
-grids/event scans in FOUNDATION mode.
+Do NOT read or write `reference-fixtures.json`. Do NOT collect large numeric
+grids, event scans, multi-epoch fixture sets, or full validation datasets in
+FOUNDATION mode.
 
 Foundation is READY when you have verified enough to constrain implementation:
-1. authoritative source/service and documentation;
-2. required object identifiers/names;
+1. authoritative source/service and authoritative documentation;
+2. required object identifiers/names or an authoritative lookup method;
 3. observer/center convention;
 4. coordinate frame, units, time convention, and geometric/apparent convention;
-5. a proven query/reference method;
+5. a documented, reproducible query/reference method;
 6. confirmation that external data is validation/development truth, not a runtime
    dependency unless the user explicitly requested one.
+
+## Documentation-first research protocol
+
+Never construct an API request from model memory.
+
+- Before the first live data query, verify the endpoint, parameter names,
+  allowable values, identifier scheme/lookup method, and a minimal example from
+  authoritative documentation.
+- If a guessed/documentation URL redirects to a data endpoint or cannot be
+  fetched, use `websearch` for `<source name> official API documentation` and
+  follow an official documentation/manual result. Documentation may live on a
+  different official host from the data endpoint.
+- Do not use unverified body/object IDs, parameter names, quoting rules, date
+  syntax, or center conventions in a live request, even when they "look
+  standard".
+- A HTTP 4xx from an unverified request is NOT evidence that quotes, percent
+  encoding, target cardinality, or one particular parameter caused the error.
+  Do not binary-search guessed syntax.
+- After authoritative documentation is obtained, use at most TWO live data
+  probes in FOUNDATION. One successful minimal probe is sufficient.
+- A successful ephemeris/data row is preferred but is NOT mandatory for
+  FOUNDATION READY when authoritative documentation itself gives an exact
+  reproducible API/reference contract and the tool transport is the reason a
+  live probe cannot be completed. Record that transport limitation explicitly
+  and leave actual frozen-data acquisition to VALIDATION.
+
+If an existing `reference-work.json` asks you to repeat a speculative request
+that used unverified identifiers or undocumented parameter names, do NOT repeat
+it merely because it is durable. Mark that item `superseded_unverified` in the
+work file and replace it with the documentation-verification item. Durable
+resume preserves verified work; it does not perpetuate a known protocol error.
 
 Use at most SIX web calls in the whole FOUNDATION session and checkpoint after
 at most TWO. Usually far fewer are needed.
 
 When those six foundation facts are verified:
-- update `reference-evidence.json` with top-level
+- update `.opencode-v2/acceptance/reference-evidence.json` with top-level
   `"foundation_result": "READY"` while leaving top-level `"result": "PARTIAL"`
   until full validation evidence exists;
 - initialize/maintain a compact `missing` list for later validation work;
 - write a concise `.opencode-v2/REFERENCE_FOUNDATION.md` (target < 8 KB) ending
   with the exact marker:
   `<!-- REFERENCE_FOUNDATION_READY -->`
-- set `reference-work.json` to `{"mode":"foundation","status":"complete"}`;
+- set `.opencode-v2/acceptance/reference-work.json` to
+  `{"mode":"foundation","status":"complete"}`;
 - return exactly `REFERENCE_FOUNDATION_READY`.
 
 If the foundation cannot be completed in this invocation, persist the exact
-remaining item in `reference-work.json`, keep `foundation_result` PARTIAL, and
-return `REFERENCE_PARTIAL`. A fresh researcher resumes that exact item.
+remaining item in `.opencode-v2/acceptance/reference-work.json`, keep
+`foundation_result` PARTIAL, and return `REFERENCE_PARTIAL`. A fresh researcher
+resumes that exact VALID item.
 
 # REFERENCE_MODE: VALIDATION
 This mode runs AFTER implementation/testing, before final acceptance.

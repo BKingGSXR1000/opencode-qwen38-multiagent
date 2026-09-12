@@ -1,0 +1,28 @@
+Applied: 2026-09-12T21:41:34+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew14-foundation-20260912-214134
+
+GametestNew14 findings/fixes:
+- FOUNDATION failed after two productive sessions because the child was given an
+  expanded full-fixture task and then spent web calls probing unverified API
+  parameter/identifier guesses.
+- orchestrator FOUNDATION prompt is now exact and may not append task-specific
+  Context, fixture counts, epochs, body names, or API guesses.
+- durable reference-work path is explicit:
+  .opencode-v2/acceptance/reference-work.json
+- fixed accidental control-status wording that called the JSON file a shell
+  wrapper; the shell wrapper is .opencode-v2/bin/control-status.
+- reference researcher is documentation-first and must not construct API calls
+  from model memory.
+- 4xx responses to unverified requests no longer justify quote/encoding syntax
+  bisection.
+- compact FOUNDATION needs an authoritative documented reproducible method; a
+  live data row is preferred but may be deferred to VALIDATION when tool
+  transport blocks it.
+- full multi-epoch/event/numeric fixture work remains VALIDATION-only.
+- one bounded recovery FOUNDATION session is added: hard ceiling 3 sessions.
+
+Not changed:
+- model/backend
+- MTP
+- reasoning token budgets
+- implementation worker concurrency/watchdog logic
