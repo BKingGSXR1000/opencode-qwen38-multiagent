@@ -80,8 +80,10 @@ Read Reference policy from ACCEPTANCE.md.
      `Complete the external reference foundation for this project. Read ACCEPTANCE.md and existing reference evidence. Resolve only the remaining external-reference gaps. Persist progress under .opencode-v2/acceptance/, including reference-fixtures.json when numeric fixtures are required, and write REFERENCE_FOUNDATION.md.`
   5. After that child returns or is interrupted, run control-status again and
      direct-read `reference-gate.json`. Repeat only while its durable state is
-     `pending`. The supervisor owns the GLOBAL attempt count; a root rollover
-     NEVER resets it.
+     `pending`. The supervisor owns the GLOBAL project-wide research gate; a
+     root rollover NEVER resets it. Productive PARTIAL slices are expected and
+     may continue; the supervisor blocks only after its hard completed-session
+     ceiling or repeated completed sessions with no durable reference progress.
   6. Require BOTH `.opencode-v2/REFERENCE_FOUNDATION.md` and
      `.opencode-v2/acceptance/reference-evidence.json` with top-level
      `"result": "READY"` before launching implementation-planner.
@@ -203,8 +205,10 @@ shared artifacts such as `package.json`. Missing ownership is a plan defect:
 block and request a planner repair; do not solve it with root or general work.
 
 COMPACTION
-One incomplete automatic compaction is allowed.
-The second incomplete compaction retires/recycles that child.
+Ordinary implementation children allow one incomplete automatic compaction;
+their second incomplete compaction retires/recycles that child.
+Reference-researcher is different: external source payloads can be large, so
+the supervisor allows up to two completed compactions in one research slice.
 A valid Dxxx.ready always wins over later compaction/cancellation.
 
 ROOT CONTINUATION

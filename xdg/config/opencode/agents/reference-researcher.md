@@ -216,3 +216,20 @@ entire external-reference project in one session.
 - Do not keep reasoning merely because step budget remains. Durable progress
   and a clean handoff are more valuable than exhausting the session.
 <!-- V2.6.9 GAMETESTNEW8 BOUNDED RESEARCH SLICE END -->
+
+<!-- V2.6.9 GAMETESTNEW9 COMPACTION SLICE RULE BEGIN -->
+## Compaction-aware slice rule
+
+Large authoritative web responses can trigger context compaction even in a
+well-bounded research slice.
+
+- After the FIRST automatic compaction in this session, do not start a new
+  broad research branch. Finish the current small fact group, persist it, and
+  prefer returning `REFERENCE_PARTIAL`.
+- A SECOND compaction is permitted by the supervisor for this role, but treat
+  it as the hard end of the slice: immediately persist any newly verified
+  facts/fixtures/foundation state and return `REFERENCE_PARTIAL` unless the
+  evidence is already READY.
+- Never treat a productive PARTIAL return as failure. Fresh research sessions
+  continue from the durable evidence files.
+<!-- V2.6.9 GAMETESTNEW9 COMPACTION SLICE RULE END -->

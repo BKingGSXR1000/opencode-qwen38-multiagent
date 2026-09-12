@@ -17,7 +17,9 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
-MAX_REFERENCE_SESSIONS=6
+MAX_REFERENCE_SESSIONS=12
+MAX_REFERENCE_STAGNANT_SESSIONS=2
+MAX_REFERENCE_COMPACTIONS=2
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
 # file-existence deadline (150.4-150.5s) without a first write.  The successful
@@ -1867,12 +1869,54 @@ def record_root_restart(sid,phase):
 
 
 # V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
+def reference_session_made_progress(sid):
+    # Did this completed reference slice persist authoritative durable state?
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq",
+            (sid,),
+        ).fetchall()
+        con.close()
+    except Exception as e:
+        log(f"REFERENCE_PROGRESS_DB_ERROR session={sid} error={e!r}")
+        return False
+
+    for (raw,) in rows:
+        try:
+            data=json.loads(raw)
+        except Exception:
+            continue
+        content=data.get("content") if isinstance(data,dict) else None
+        if not isinstance(content,list):
+            continue
+        for item in content:
+            if not isinstance(item,dict) or item.get("type")!="tool":
+                continue
+            if item.get("name") not in {"edit","write"}:
+                continue
+            state=item.get("state") if isinstance(item.get("state"),dict) else {}
+            if state.get("status")!="completed":
+                continue
+            inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+            path=str(inp.get("path") or "")
+            if (
+                ".opencode-v2/acceptance/" in path
+                or path.endswith(".opencode-v2/REFERENCE_FOUNDATION.md")
+            ):
+                return True
+    return False
+
+
 def reference_gate_snapshot():
     if not PROJECT:
         return {
             "state":"not-applicable",
             "attempts":0,
             "max_attempts":MAX_REFERENCE_SESSIONS,
+            "productive_sessions":0,
+            "stagnant_tail":0,
         }
 
     ctrl=Path(PROJECT)/".opencode-v2"
@@ -1885,6 +1929,8 @@ def reference_gate_snapshot():
             "state":"not-required",
             "attempts":0,
             "max_attempts":MAX_REFERENCE_SESSIONS,
+            "productive_sessions":0,
+            "stagnant_tail":0,
         }
 
     evidence_path=ctrl/"acceptance"/"reference-evidence.json"
@@ -1898,28 +1944,45 @@ def reference_gate_snapshot():
         except Exception:
             result="MALFORMED"
 
-    attempts=0
-    session_ids=[]
+    session_rows=[]
     try:
         con=db_connect()
-        rows=con.execute(
-            "SELECT id FROM session_v2 "
+        session_rows=con.execute(
+            "SELECT id,time_idle FROM session_v2 "
             "WHERE agent='reference-researcher' AND directory=? "
             "ORDER BY time_created",
             (PROJECT,),
         ).fetchall()
         con.close()
-        session_ids=[r[0] for r in rows]
-        attempts=len(session_ids)
     except Exception as e:
         log(f"REFERENCE_GATE_DB_ERROR {e!r}")
+
+    # Active researchers must get a chance to work. Only completed sessions
+    # count against the durable project-wide limits.
+    completed_ids=[sid for sid,time_idle in session_rows if time_idle]
+    active_ids=[sid for sid,time_idle in session_rows if not time_idle]
+    progress_flags=[
+        (sid,reference_session_made_progress(sid))
+        for sid in completed_ids
+    ]
+
+    productive=sum(1 for _,made_progress in progress_flags if made_progress)
+    stagnant_tail=0
+    for _,made_progress in reversed(progress_flags):
+        if made_progress:
+            break
+        stagnant_tail+=1
+
+    attempts=len(completed_ids)
+    hard_exhausted=(attempts>=MAX_REFERENCE_SESSIONS)
+    stalled=(stagnant_tail>=MAX_REFERENCE_STAGNANT_SESSIONS)
 
     ready=(result=="READY" and foundation.exists())
     state=(
         "ready"
         if ready
         else "blocked"
-        if attempts>=MAX_REFERENCE_SESSIONS
+        if hard_exhausted or stalled
         else "pending"
     )
 
@@ -1927,9 +1990,13 @@ def reference_gate_snapshot():
         "state":state,
         "attempts":attempts,
         "max_attempts":MAX_REFERENCE_SESSIONS,
+        "productive_sessions":productive,
+        "stagnant_tail":stagnant_tail,
+        "max_stagnant_sessions":MAX_REFERENCE_STAGNANT_SESSIONS,
+        "active_sessions":active_ids,
         "evidence_result":result or "MISSING",
         "foundation_present":foundation.exists(),
-        "session_ids":session_ids[-MAX_REFERENCE_SESSIONS:],
+        "session_ids":completed_ids[-MAX_REFERENCE_SESSIONS:],
     }
 
 
@@ -1957,6 +2024,8 @@ def sync_reference_gate():
             log(
                 f"REFERENCE_GATE state={data['state']} "
                 f"attempts={data['attempts']} "
+                f"productive={data.get('productive_sessions',0)} "
+                f"stagnant_tail={data.get('stagnant_tail',0)} "
                 f"evidence={data['evidence_result']} "
                 f"foundation={str(data['foundation_present']).lower()}"
             )
@@ -2222,15 +2291,18 @@ def api_poll_loop():
 
                 if agent=="reference-researcher" and parent:
                     ref_gate=reference_gate_snapshot()
-                    if ref_gate.get("attempts",0)>MAX_REFERENCE_SESSIONS:
+                    if ref_gate.get("state")=="blocked":
                         abort_session(
                             sid,
-                            f"reference_attempt_limit={MAX_REFERENCE_SESSIONS}",
+                            "reference_gate_blocked "
+                            f"attempts={ref_gate.get('attempts',0)} "
+                            f"stagnant_tail={ref_gate.get('stagnant_tail',0)}",
                             agent,
                         )
                         log(
                             f"REFERENCE_GATE_ABORT session={sid} "
-                            f"attempts={ref_gate.get('attempts')}"
+                            f"attempts={ref_gate.get('attempts',0)} "
+                            f"stagnant_tail={ref_gate.get('stagnant_tail',0)}"
                         )
                         continue
 
@@ -2462,8 +2534,30 @@ def persisted_reconcile_loop():
                     log(f"COMPACTION_FAILED session={sid} agent={agent} deliverable={did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
                     csv("COMPACTION_FAILED",sid,agent,f"{did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
                     continue
-                if comps==1: log(f"COMPACTION_ALLOWED session={sid} agent={agent} count=1"); csv("COMPACTION_ALLOWED",sid,agent,"count=1")
-                elif comps>=2: abort_session(sid,f"child_compaction count={comps}; second incomplete compaction",agent); log(f"RETIRED_COMPACTION session={sid} agent={agent} compactions={comps}")
+                compaction_limit=(
+                    MAX_REFERENCE_COMPACTIONS
+                    if agent=="reference-researcher"
+                    else 1
+                )
+                if comps<=compaction_limit:
+                    log(
+                        f"COMPACTION_ALLOWED session={sid} agent={agent} "
+                        f"count={comps} limit={compaction_limit}"
+                    )
+                    csv(
+                        "COMPACTION_ALLOWED",sid,agent,
+                        f"count={comps} limit={compaction_limit}"
+                    )
+                else:
+                    abort_session(
+                        sid,
+                        f"child_compaction count={comps}; limit={compaction_limit}",
+                        agent,
+                    )
+                    log(
+                        f"RETIRED_COMPACTION session={sid} agent={agent} "
+                        f"compactions={comps} limit={compaction_limit}"
+                    )
         except Exception as e: log(f"PERSISTED_RECONCILE_ERROR {e!r}")
         time.sleep(0.5)
 
