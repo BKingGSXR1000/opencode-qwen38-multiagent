@@ -198,3 +198,21 @@ A worker session must own the complete lifecycle of every command it starts.
   progress and return a bounded blocker/split signal instead of orphaning a
   process.
 <!-- V2.6.9 NO DETACHED DELIVERABLE JOBS END -->
+
+<!-- V2.6.9 SUPERVISOR-OWNED LEAF FINALIZATION BEGIN -->
+## Supervisor-owned leaf finalization
+
+For implementation leaves, your responsibility ends after the owned artifacts
+are complete and the plan's exact Verify command has passed.
+
+- Persist the verification result in `.opencode-v2/work/Dxxx.progress.md`.
+- Then RETURN normally.
+- Do **not** invoke `.opencode-v2/bin/leaf-complete Dxxx` yourself.
+- Do not investigate/retry a leaf-complete ownership error.
+
+The supervisor has the session identity needed for concurrency-aware ownership
+attribution. It re-runs Verify after your session becomes idle and atomically
+creates `Dxxx.ready` only if ownership and verification both pass. This runtime
+policy supersedes the legacy project-contract line telling workers to call
+leaf-complete directly.
+<!-- V2.6.9 SUPERVISOR-OWNED LEAF FINALIZATION END -->

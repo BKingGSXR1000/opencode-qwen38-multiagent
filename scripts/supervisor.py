@@ -763,22 +763,49 @@ def session_tool_inputs(sid):
         pass
     return out
 
-def session_explicitly_touched_path(sid,path):
-    """Best-effort proof that THIS worker targeted path in edit/shell input."""
-    if not sid: return False
+def session_explicitly_mutated_path(sid,path):
+    """Best-effort proof that THIS worker MUTATED path, not merely read it.
+
+    Direct edit/write/apply_patch tools are authoritative. Shell commands only
+    count when the path is coupled to an obvious mutating operation/redirection.
+    Plain ls/cat/head/stat/sha256sum/grep references are never mutations.
+    """
+    if not sid:
+        return False
     rel=path.lstrip("./")
     absolute=str(Path(PROJECT)/rel)
+    quoted=[rel,absolute]
+
+    def direct_path_matches(value):
+        if not isinstance(value,str):
+            return False
+        value=value.replace("\\","/")
+        return value==rel or value.endswith("/"+rel) or value==absolute
+
     for name,inp in session_tool_inputs(sid):
         if name in {"edit","write","apply_patch"}:
             for key in ("path","file","filePath","filename"):
-                value=inp.get(key)
-                if isinstance(value,str):
-                    value=value.replace("\\","/")
-                    if value==rel or value.endswith("/"+rel) or value==absolute:
-                        return True
-        if name in {"shell","bash"}:
-            command=inp.get("command")
-            if isinstance(command,str) and (rel in command or absolute in command):
+                if direct_path_matches(inp.get(key)):
+                    return True
+            continue
+
+        if name not in {"shell","bash"}:
+            continue
+        command=inp.get("command")
+        if not isinstance(command,str) or not any(x in command for x in quoted):
+            continue
+
+        # Only obvious shell writes count. Read-only mentions do not.
+        for target in quoted:
+            q=re.escape(target)
+            patterns=[
+                rf"(?:>|>>)\s*['\"]?{q}(?:['\"]|\s|$)",
+                rf"\btee(?:\s+-a)?\s+['\"]?{q}(?:['\"]|\s|$)",
+                rf"\b(?:touch|truncate|rm|unlink)\b[^\n;]*{q}",
+                rf"\b(?:sed\s+-i|perl\s+-pi)\b[^\n;]*{q}",
+                rf"\b(?:cp|mv|install)\b[^\n;]*\s['\"]?{q}(?:['\"]|\s|$)",
+            ]
+            if any(re.search(p,command) for p in patterns):
                 return True
     return False
 
@@ -846,10 +873,10 @@ def ownership_violations(did,sid=""):
     for path in sorted(changed):
         if inside(path,allowed):
             continue
-        if supervisor_dynamic_control_path(path) and not session_explicitly_touched_path(sid,path):
+        if supervisor_dynamic_control_path(path) and not session_explicitly_mutated_path(sid,path):
             log(f"OWNERSHIP_SUPERVISOR_EXEMPT session={sid} deliverable={did} path={path}")
             continue
-        if sibling_owned and inside(path,sibling_owned) and not session_explicitly_touched_path(sid,path):
+        if sibling_owned and inside(path,sibling_owned) and not session_explicitly_mutated_path(sid,path):
             log(f"OWNERSHIP_CONCURRENT_EXEMPT session={sid} deliverable={did} path={path}")
             continue
         violations.append(path)
@@ -870,6 +897,40 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
                 f"tool_turns={state['turns']} limit={PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS}")
     return ""
 
+def supervisor_finalize_ready(did):
+    """Atomically mint the standard Dxxx.ready after supervisor-side checks."""
+    if ready_info(did):
+        return True,"already-complete"
+    try:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            state=attempt_state(entry)
+            if not isinstance(entry,dict) or not state.get("valid"):
+                return False,"attempt-ledger-invalid"
+            count=int(state.get("count") or entry.get("count") or 0)
+            allowed=int(state.get("allowed_attempts") or count)
+            if count < 1 or count > allowed:
+                return False,f"attempt-count-invalid-{count}-of-{allowed}"
+
+        path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready"
+        path.parent.mkdir(parents=True,exist_ok=True)
+        body=(
+            "status=complete\n"
+            f"deliverable={did}\n"
+            f"attempt={count}\n"
+            "verified=true\n"
+            "protocol=V2.6.9\n"
+        )
+        tmp=path.with_suffix(".tmp")
+        tmp.write_text(body)
+        os.replace(tmp,path)
+        log(f"SUPERVISOR_LEAF_READY deliverable={did} attempt={count}")
+        csv("SUPERVISOR_LEAF_READY","","supervisor",f"{did} attempt={count}")
+        return True,"finalized"
+    except Exception as exc:
+        return False,f"ready-write-error-{type(exc).__name__}"
+
 def post_session_finalize(did,sid="",runner=subprocess.run):
     """Verify actual owned files, then let the canonical leaf guard create ready."""
     leaf=(load_manifest().get("leaves") or {}).get(did)
@@ -888,11 +949,7 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
     try:
         checked=runner(command,cwd=PROJECT,shell=True,executable="/bin/bash",timeout=240)
         if checked.returncode!=0: return False,f"verify-failed-{checked.returncode}"
-        completed=runner(
-            [str(ROOT/"scripts/leaf-complete.sh"),did],
-            cwd=PROJECT,timeout=300,
-        )
-        return (completed.returncode==0,"finalized" if completed.returncode==0 else f"leaf-complete-failed-{completed.returncode}")
+        return supervisor_finalize_ready(did)
     except (OSError,subprocess.TimeoutExpired) as e:
         return False,f"verification-error-{type(e).__name__}"
 
@@ -1037,13 +1094,32 @@ def durable_progress_signature(agent,did=""):
         except OSError: signature.append((str(path),0,0))
     return tuple(signature)
 
+def session_activity_signature(sid):
+    """Persisted OpenCode heartbeat for invisible-stream fallback.
+
+    A child can be healthy and actively producing completed model/tool turns
+    while the beta HTTP/SSE view is temporarily not observable.  MAX(seq) and
+    row count advance whenever such a turn is persisted, so they are a safe
+    heartbeat without pretending that read-only activity is durable work.
+    """
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT COALESCE(MAX(seq),-1),COUNT(*) FROM session_message WHERE session_id=?",
+            (sid,),
+        ).fetchone()
+        con.close()
+        return tuple(row or (-1,0))
+    except Exception:
+        return (-1,0)
+
 def fallback_no_progress_reason(sid,agent,did,observable,now=None):
     """Bound invisible streams without treating a brief API gap as a failure."""
     state=event_watch.setdefault(sid,{"stop":threading.Event(),"created":time.monotonic()})
     if observable:
         state.pop("fallback_since",None); state.pop("fallback_signature",None); return ""
     now=time.monotonic() if now is None else now
-    signature=durable_progress_signature(agent,did)
+    signature=(durable_progress_signature(agent,did),session_activity_signature(sid))
     if signature!=state.get("fallback_signature"):
         state["fallback_signature"]=signature; state["fallback_since"]=now; return ""
     state.setdefault("fallback_since",now)

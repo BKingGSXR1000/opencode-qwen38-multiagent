@@ -1,0 +1,23 @@
+Applied: 2026-09-12T21:19:17+02:00
+Project repaired: /home/bking/AI/gametestNew13
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/new13-cancellation-fixes-20260912-211916
+
+New13 evidence and fixes:
+- D003, D004 and D006 were supervisor-interrupted together at ~300s with
+  no_durable_progress_with_invisible_stream=300s despite repeated persisted
+  model/tool turns. Invisible-stream fallback now resets on persisted message
+  activity as well as durable owned-file changes.
+- ownership attribution confused read-only shell mentions (ls/cat/stat/hash)
+  with mutations. It now distinguishes direct/obvious mutations from reads.
+- direct worker leaf-complete was context-blind to concurrent sibling writes.
+  Workers now verify + persist progress + return; the supervisor performs the
+  session-aware ownership check, re-runs Verify, and mints the standard ready
+  marker atomically.
+- D001-A and D007 receive one auditable infrastructure-repair slot because
+  their recorded ownership failures came from the old attribution bug.
+- stale D001-A split request is removed only when no D001-A split was accepted.
+
+Not changed:
+- model/backend/MTP/prefix cache/async scheduling
+- 4096 MEDIUM reasoning budget
+- recursive D001 -> D001-A,D001-B accepted split
