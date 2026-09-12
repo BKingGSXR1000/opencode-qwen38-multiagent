@@ -1,0 +1,10 @@
+Applied: 2026-09-11T23:31:48+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/autocontinue-exact-20260911-233148
+
+Changes:
+- add OpenCodeHTTP.steer_session() using the exact current /api/session/{sid}/prompt API
+- auto-steer an idle completed root session while durable state is nonterminal
+- completed child sessions no longer keep child_active=true
+- child NOT READY text cannot by itself authorize recursive split
+- split-request-missing forces a durable-state re-read instead of stopping
+- no project source files, ready files, attempt ledgers, or split state changed

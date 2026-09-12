@@ -1,0 +1,22 @@
+Applied: 2026-09-12T14:17:31+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew8-fixes-20260912-141731
+
+GametestNew8 findings/fixes:
+- New8 correctly stopped at external reference truth; no implementation ran.
+- All 4 reference-researcher sessions were cancelled at ~300.6 seconds.
+- Reference sessions now count reference evidence/fixtures/foundation as durable progress.
+- Generic invisible-stream fallback for reference research is 600s instead of 300s.
+- Reference attempt cap 4 -> 6.
+- Reference work is explicitly split into short durable slices: <=4 web calls/session,
+  <=2 per tool step, checkpoint after <=2 calls, persist numeric source output before derivation.
+- PARTIAL REFERENCE_FOUNDATION.md is required as a handoff checkpoint.
+- Supervisor deterministically aborts any implementation-planner launched while
+  external reference gate is pending/blocked.
+- Orchestrator is explicitly forbidden from entering planner phase unless the
+  external reference gate is exactly READY.
+
+Not changed:
+- vLLM backend
+- MTP
+- prefix caching
+- async scheduling

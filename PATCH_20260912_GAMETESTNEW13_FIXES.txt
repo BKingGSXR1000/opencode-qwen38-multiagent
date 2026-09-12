@@ -1,0 +1,23 @@
+Applied: 2026-09-12T20:33:35+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew13-fixes-20260912-203335
+
+GametestNew13 fixes:
+- normalize contradictory execution_blockers before supervisor/root decisions
+- discard attempt_limit_reached blockers when the leaf's own canonical flag is false
+- recover execution phase when legal eligible leaves exist
+- exempt supervisor-rewritten control-status/gate/manifest files from worker ownership
+  unless the worker explicitly targeted those paths
+- require plan top-level Status=COMPLETE and Planner checkpoint Status=COMPLETE
+  before deterministic PLAN.ready finalization
+
+New13 evidence:
+- D001 attempt 2 created the required probe artifact but was falsely failed for
+  ownership-violation:.opencode-v2/control-status.json
+- recursive split D001 -> D001-A,D001-B was accepted
+- D001-A was eligible with 0 attempts, but control-status incorrectly listed it
+  as attempt_limit_reached and set resume_phase=execution-blocked
+
+Not changed:
+- model/backend
+- MTP/prefix cache/async scheduling
+- reasoning budgets

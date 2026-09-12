@@ -115,3 +115,22 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- V2.6.9 NO DETACHED DELIVERABLE JOBS BEGIN -->
+## No detached deliverable jobs
+
+A worker session must own the complete lifecycle of every command it starts.
+
+- NEVER use `nohup`, `disown`, `setsid`, shell `&`, or a tool
+  `background: true` option for deliverable generation, downloads, builds,
+  tests, data acquisition, or verification.
+- Do not launch work that is expected to continue after this session returns,
+  compacts, reaches its step limit, or is recycled.
+- Long work must run in the foreground with a bounded timeout so success or
+  failure is observed before the next step.
+- A short-lived local server MAY be backgrounded only inside ONE shell command
+  that captures its PID and kills it before that same tool call returns.
+- If required foreground work cannot finish within the leaf budget, persist
+  progress and return a bounded blocker/split signal instead of orphaning a
+  process.
+<!-- V2.6.9 NO DETACHED DELIVERABLE JOBS END -->

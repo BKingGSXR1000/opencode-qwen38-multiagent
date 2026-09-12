@@ -1,0 +1,19 @@
+Applied: 2026-09-12T16:53:01+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/thinking-budgets-20260912-165301
+
+Reasoning-budget policy:
+- OFF: thinking disabled, no inherited hard budget
+- LOW: 2048 thinking tokens maximum per model request
+- MEDIUM: 4096 thinking tokens maximum per model request
+- HIGH: 8192 thinking tokens maximum per model request
+- thinking enabled without an explicit effort: MEDIUM 4096 ceiling
+
+The budgets are hard ceilings, not targets. Reasoning-enabled role prompts also
+instruct the model to stop reasoning as soon as the next action is clear.
+
+No changes to:
+- vLLM launch configuration
+- MTP
+- prefix caching
+- async scheduling
+- model weights

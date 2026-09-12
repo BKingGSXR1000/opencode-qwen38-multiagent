@@ -1,0 +1,18 @@
+Applied: 2026-09-12T09:17:06+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew4-control-fixes-20260912-091706
+
+Based on gametestNew4 analysis. Fixes:
+1. Parallel ownership attribution no longer blames a leaf for an overlapping
+   sibling's owned file unless the current leaf explicitly targeted that path.
+2. Plan guard rejects hard Done-when/Verify references to another leaf's file
+   unless that owner is a declared/transitive dependency.
+3. Literal Dxxx placeholder handoffs are rejected; exact canonical ID required
+   in both orchestrator and /oneshot-v2 instructions.
+4. Splitter now reads one request and returns final JSON; supervisor persists
+   and validates the proposal. Model-side proposal writes are removed.
+5. Reasoning profiles are explicit end-to-end:
+   implementation-planner=MEDIUM, reasoning-builder=MEDIUM,
+   integrator=LOW, qwen38-light=LOW; fast aliases remain OFF.
+
+NOT changed:
+- MTP / backend speculation / prefix cache. User explicitly excluded backend A/B.

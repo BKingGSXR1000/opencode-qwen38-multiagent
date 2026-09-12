@@ -69,6 +69,30 @@ Planning target:
   a required `package.json`) must be owned by one exact Dxxx. Do not leave
   required artifacts for the root to improvise during execution.
 
+<!-- V2.6.9 PLAN CONTRACT EVIDENCE AND RUNTIME BOUNDS BEGIN -->
+## Evidence-based verification and bounded leaf runtime
+
+A Verify command is a machine contract. Do not invent arbitrary numeric gates.
+
+- Numeric thresholds (file size, counts, tolerances, versions, time limits)
+  must come from ACCEPTANCE.md, REFERENCE_FOUNDATION.md, a documented format,
+  or a preceding probe contract. Otherwise verify the semantic property
+  directly (parse/load/import/version/API shape).
+- Never use a guessed file-size threshold as a proxy for validity.
+- When a later leaf depends on a probe for an unknown property, do not freeze a
+  contradictory guessed value before that probe runs.
+
+Every S/M implementation leaf must be operationally bounded:
+- design normal execution to finish in <=10 minutes;
+- do not require thousands of sequential network calls;
+- external acquisition must use bounded batching/concurrency and terminate
+  inside the worker session;
+- never rely on a detached/background job after the worker returns;
+- prefer compact deterministic algorithms/coefficient sets over enormous
+  precomputed remote tables when both satisfy acceptance.
+If required work cannot fit this bound, decompose it before dispatch.
+<!-- V2.6.9 PLAN CONTRACT EVIDENCE AND RUNTIME BOUNDS END -->
+
 ## Progressive externalization — mandatory
 
 Do not compose or retain the whole final plan in model context and do not wait
@@ -89,8 +113,10 @@ to write the complete file atomically at the end.
    details; do not add narrative essays.
 5. After each bounded batch, continue from the file. Reread only the section or
    nearby dependency information needed for the next edit.
-6. Add the exact completion marker only after all sections and waves are
-   complete. The deterministic guard then validates the file.
+6. Immediately before adding the exact completion marker, set the top-level
+   `Status:` to `COMPLETE` and set the `## Planner checkpoint` status to
+   `COMPLETE`. Only then add the marker. The deterministic guard validates the
+   file.
 
 On a fresh continuation session, treat the existing plan file as the durable
 handoff: preserve completed sections, fill or correct only what remains, and do

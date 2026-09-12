@@ -1,0 +1,15 @@
+Applied: 2026-09-12T20:50:16+02:00
+Project repaired: /home/bking/AI/gametestNew13
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/split-overlay-20260912-205016
+
+Fix:
+- accepted recursive split child definitions now live in
+  .opencode-v2/work/split-leaves.json
+- supervisor load_manifest overlays those durable child definitions
+- control-guard merges the overlay whenever it regenerates guard.json
+- accepted splits therefore survive restart/fresh-session plan regeneration
+- current accepted split definitions were bootstrapped from the latest analysis
+  archive if the regenerated manifest had already lost them
+
+No operator retry was granted.
+The exhausted parent is not rerun.

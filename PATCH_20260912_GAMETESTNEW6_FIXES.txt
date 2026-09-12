@@ -1,0 +1,19 @@
+Applied: 2026-09-12T11:54:33+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew6-fixes-20260912-115433
+
+GametestNew6 fixes:
+- split parents now deterministically finalize after all direct children are ready
+- parent original verification + canonical leaf-complete are rerun by supervisor
+- nested split parents can collapse upward automatically
+- external-required reference research is now a hard pre-planning gate
+- implementation-planner refuses to edit/plan without READY reference evidence
+- reference-researcher can write REFERENCE_FOUNDATION.md (previous permission contradiction fixed)
+- reference-researcher steps 10 -> 20
+- reference researcher must persist PARTIAL evidence by tool turn 4
+- stale splitter wording corrected: splitter returns JSON, supervisor persists it
+
+Not changed:
+- vLLM backend
+- MTP
+- prefix caching
+- async scheduling

@@ -1,0 +1,23 @@
+Applied: 2026-09-12T15:17:53+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew9-fixes-20260912-151753
+
+GametestNew9 findings/fixes:
+- all 6 reference-researcher sessions made durable reference writes
+- 4 productive sessions ended when their second auto-compaction was interrupted
+- supervisor's generic "second child compaction retires" policy was the direct
+  cause of those reference interruptions
+- reference-researcher now allows 2 completed compactions; ordinary workers
+  retain the old 1-compaction limit
+- fixed 6-session terminal gate replaced by a progress-aware gate:
+  * hard ceiling: 12 COMPLETED reference sessions
+  * block after 2 consecutive COMPLETED sessions with no durable reference write
+  * active session does not count against the ceiling until it finishes
+  * productive PARTIAL slices may continue
+- reference researcher is instructed to checkpoint/end the slice after
+  compaction instead of refilling compacted context
+
+Not changed:
+- vLLM backend
+- MTP
+- prefix caching
+- async scheduling

@@ -11,9 +11,7 @@ permission:
   glob: deny
   grep: deny
   list: deny
-  bash:
-    ".opencode-v2/bin/control-status": allow
-    "*": deny
+  bash: deny
   task: allow
   webfetch: deny
   websearch: deny
@@ -31,22 +29,28 @@ permission resolves to allow. Revisit on a future OpenCode2 version.
 
 Filesystem state remains authoritative: valid ACCEPTANCE.ready,
 IMPLEMENTATION_PLAN.ready, Dxxx.ready, TEST_REPORT.json, and exact
-ACCEPTANCE_PASS decide progress. Use `.opencode-v2/bin/control-status`
+ACCEPTANCE_PASS decide progress. Use `.opencode-v2/control-status.json`
 for the deterministic derived status/dashboard.
 
 CONTROL LOOP — REQUIRED AND TERSE
-Your sole shell authority is the exact, argument-free command
-`.opencode-v2/bin/control-status`; it is explicitly allowlisted and returns
-the authoritative JSON state. Run it as your first action and after each
-dispatch or splitter receipt. Do not delegate it, inspect/reconstruct its
-inputs, invoke any other shell command, or narrate exploratory reasoning.
-Choose the next action directly from `resume_phase` and `eligible` leaves. If
-the status has no legal action, return its explicit blocker once and stop.
+The supervisor continuously writes `.opencode-v2/control-status.json`.
+DIRECT-READ that exact JSON file as your FIRST action and after every child
+dispatch, planner receipt, splitter receipt, or control transition.
+It is the authoritative derived scheduler state.
+
+Never read `.opencode-v2/control-status.json`; that is only a shell wrapper.
+Never call `exec`, `shell`, or `bash` for scheduler state. Never reconstruct
+state from attempts.json, guard.json, split files, plan prose, or child prose
+when control-status.json is available.
+
+Choose the next action directly from `resume_phase`, `eligible`, and explicit
+blockers in control-status.json. If it reports no legal action, return its
+explicit blocker once and stop.
 
 FRESH ROOT CONTINUATION
 When this is a continuation session, do not ask for or reconstruct any previous
 conversation. Read `.opencode-v2/CONTROL_CONTRACT.md`, `ACCEPTANCE.md`, and
-`IMPLEMENTATION_PLAN.md` when present, then run `.opencode-v2/bin/control-status`.
+`IMPLEMENTATION_PLAN.md` when present, then run `.opencode-v2/control-status.json`.
 Continue from that durable state only. Never redispatch a ready Dxxx; the
 supervisor ledger remains the sole authority for attempt claims.
 
@@ -70,7 +74,7 @@ Read Reference policy from ACCEPTANCE.md.
 - `internal` or `none`: skip external reference research.
 - `external-required`: implementation planning waits only for the COMPACT
   external foundation, not the complete validation fixture library.
-  1. Run `.opencode-v2/bin/control-status`, then direct-read
+  1. Run `.opencode-v2/control-status.json`, then direct-read
      `.opencode-v2/reference-gate.json`.
   2. If state is `ready`, immediately proceed to implementation planning.
   3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
@@ -92,9 +96,9 @@ exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
 
 Before launching ANY implementation-planner (initial, continuation, or repair),
 read `.opencode-v2/work/planner-restarts.json` when present and derive current
-state with `.opencode-v2/bin/control-status`. This supervisor-owned ledger is
+state with `.opencode-v2/control-status.json`. This supervisor-owned ledger is
 durable project state: it does NOT reset when a root or supervisor session is
-replaced. If its count is already 3, or `control-status` reports
+replaced. If its count is already 3, or `control-status.json` reports
 `"resume_phase": "implementation-blocked"`, launch no planner and output
 exactly `IMPLEMENTATION_BLOCKED`.
 
@@ -123,7 +127,7 @@ After it returns or is interrupted:
   `Never create or request IMPLEMENTATION_PLAN.ready.`
 - never request a shorter self-contained retry or an atomic end-of-session write
 - after three supervisor-recorded unsuccessful planner sessions, do not invent
-  or write a plan; when `.opencode-v2/bin/control-status` reports
+  or write a plan; when `.opencode-v2/control-status.json` reports
   JSON `"resume_phase": "implementation-blocked"`, stop this phase with exact
   `IMPLEMENTATION_BLOCKED`
 - wait for the deterministic control guard to create the real sentinel
@@ -133,12 +137,12 @@ EXECUTION
 Read `.opencode-v2/IMPLEMENTATION_PLAN.guard.json`.
 
 RECURSIVE SPLIT
-When `control-status` reports `"resume_phase": "recursive-split"`, launch
+When `control-status.json` reports `"resume_phase": "recursive-split"`, launch
 exactly one `task-splitter` for each `split_required` parent, with the short
 prompt `SPLIT_PARENT: Dxxx`. The splitter reads its durable request and RETURNS one JSON object containing
 two proposals; it cannot choose child IDs or mutate the manifest/ledger. The
 supervisor persists and validates that JSON on completion;
-immediately re-run `control-status`. Never wait for a separate supervisor or
+immediately re-run `control-status.json`. Never wait for a separate supervisor or
 human cycle. Do not dispatch the split parent, replan the project, grant a
 retry, or manufacture child IDs. At depths 0 and 1 a second genuine failed
 attempt triggers this path; depth 2 never splits and retains its three genuine
@@ -183,9 +187,9 @@ because a leaf is exhausted. Never infer a retry grant from chat prose or grant
 one yourself. A human may use the trusted external command
 `./scripts/operator-control.py --project <project> retry-failed` (or `retry
 Dxxx ...`) to record one additional attempt; after its durable grant appears in
-`.opencode-v2/bin/control-status`, resume this same canonical plan and role.
+`.opencode-v2/control-status.json`, resume this same canonical plan and role.
 Without that grant, output `IMPLEMENTATION_BLOCKED Dxxx`.
-When `control-status` reports `"resume_phase": "execution-blocked"`, read its
+When `control-status.json` reports `"resume_phase": "execution-blocked"`, read its
 `execution_blockers` list and stop cleanly with `IMPLEMENTATION_BLOCKED Dxxx`
 for the first listed blocker; do not dispatch, replan, or attempt salvage.
 
@@ -253,7 +257,7 @@ patterns.
 - NEVER use `glob` to decide whether a known `.opencode-v2` file exists.
 - For a known control path, use direct `read`.
 - `list` and `execute` are unavailable to this agent. For known control paths,
-  use direct `read`; use `.opencode-v2/bin/control-status` for the derived
+  use direct `read`; use `.opencode-v2/control-status.json` for the derived
   project dashboard. Do not attempt unavailable tools.
 <!-- V2.6.7c DOTDIR IO END -->
 
@@ -262,14 +266,14 @@ patterns.
 
 When executing the canonical V2 pipeline:
 
-- `.opencode-v2/bin/control-status` plus supervisor-owned durable control files
+- `.opencode-v2/control-status.json` plus supervisor-owned durable control files
   are authoritative for scheduler state.
 - Child prose such as `NOT READY`, "retry", or "split this" is advisory only.
 - Do not dispatch `task-splitter` unless authoritative state requires a
   recursive split for that exact parent AND
   `.opencode-v2/work/Dxxx.split-request.json` exists.
 - `SPLIT_DENY ... reason=split-request-missing` means the split decision was
-  stale. Re-read `control-status` and continue the canonical action it selects.
+  stale. Re-read `control-status.json` and continue the canonical action it selects.
 - Do not terminate a root turn merely because a child returned NOT READY, a
   tool/dispatch was denied, or compaction completed. Continue until exact
   `ACCEPTANCE_PASS` or a genuine terminal blocked phase.
@@ -294,3 +298,18 @@ Continue from actual filesystem state and execute the deliverable.
 Substitute only the actual canonical ID. The supervisor rejects placeholder or
 model-derived variants before the child starts.
 <!-- V2.6.9 EXACT DELIVERABLE HANDOFF END -->
+
+<!-- V2.6.9 SPLIT STATE AUTHORITY BEGIN -->
+## Split state authority
+
+After a task-splitter returns, immediately re-read
+`.opencode-v2/control-status.json`.
+
+- If the scheduler exposes a split child as eligible, the split SUCCEEDED.
+  Dispatch the eligible child.
+- The supervisor intentionally consumes the parent `.split-request.json` after
+  an accepted split. Its absence after acceptance is NOT a failure.
+- Never launch another splitter merely because the old request file is gone.
+- Never infer child absence from a truncated manifest read; the scheduler JSON
+  is authoritative.
+<!-- V2.6.9 SPLIT STATE AUTHORITY END -->

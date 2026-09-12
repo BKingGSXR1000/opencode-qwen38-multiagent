@@ -1,0 +1,17 @@
+Applied: 2026-09-12T18:33:08+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/reference-two-phase-20260912-183308
+
+Architecture change after gametestNew11:
+- external reference work is split into two phases
+- PRE-PLANNING FOUNDATION: compact source/API/body-id/frame/unit/query foundation only
+- foundation hard cap: 2 completed researcher sessions
+- full numeric/event fixtures no longer block implementation planning
+- FINAL VALIDATION: after implementation/tests, one small missing reference item per researcher session
+- durable reference-work.json records current in-progress item BEFORE external work
+- interruption recovery repeats only that exact item, never the whole research project
+- large monolithic reference-fixtures.json is retired for new runs
+- detailed validation data goes to small reference-items/<item>.json files
+- compact reference-evidence.json remains the index/status document
+- full external evidence result=READY is required only before final acceptance-validator
+- MEDIUM 4096 thinking cap remains unchanged
+- backend/MTP/prefix-cache/async settings unchanged

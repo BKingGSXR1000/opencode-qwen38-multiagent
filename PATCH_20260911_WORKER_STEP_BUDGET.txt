@@ -1,0 +1,17 @@
+Applied: 2026-09-11T23:58:25+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/worker-step-budget-20260911-235825
+
+Changes:
+- implementer: steps 9 -> 24
+- probe-builder: steps 18 -> 24
+- task-splitter: steps 3 -> 5
+- task-splitter: glob/grep/list disabled to match its two-tool contract
+- implementer: by tool turn 4 create/update a primary owned artifact
+- probe-builder: by tool turn 4 write/update required probe artifact
+- preserve turns for verification + leaf-complete
+
+Reason:
+gametestNew3 showed workers successfully using tools and modifying files, but
+OpenCode terminated them at Maximum steps before required durable artifacts
+and completion calls were produced. Both splitters consumed their 3-step
+budget on read + forbidden glob + termination.

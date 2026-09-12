@@ -425,6 +425,35 @@ def validate_acceptance(project: Path, finalize=False):
         )
     return True, []
 
+def merge_split_leaf_overlay(project: Path, leaves: dict):
+    # Restore supervisor-created recursive split leaves after plan regeneration.
+    path = project / ".opencode-v2" / "work" / "split-leaves.json"
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return leaves
+
+    parents = data.get("parents") if isinstance(data, dict) else {}
+    if not isinstance(parents, dict):
+        return leaves
+
+    for parent, entry in parents.items():
+        if not isinstance(entry, dict):
+            continue
+        child_defs = entry.get("child_defs")
+        if not isinstance(child_defs, dict):
+            continue
+        children = entry.get("children")
+        if not isinstance(children, list):
+            children = list(child_defs)
+        if parent in leaves and isinstance(leaves[parent], dict):
+            leaves[parent]["split_children"] = list(children)
+        for did, child in child_defs.items():
+            if isinstance(child, dict):
+                leaves[did] = child
+    return leaves
+
+
 def validate_plan(project: Path, finalize=False):
     ctrl = project / ".opencode-v2"
     path = ctrl / "IMPLEMENTATION_PLAN.md"
@@ -445,8 +474,16 @@ def validate_plan(project: Path, finalize=False):
             )
         if final_nonempty_line(text) != PLAN_MARKER:
             errors.append("final line is not exact IMPLEMENTATION_PLAN_COMPLETE marker")
+        if not re.search(r"(?m)^Status:\s*COMPLETE\s*$", text):
+            errors.append("top-level plan Status must be COMPLETE before finalization")
+        if not re.search(
+            r"(?ms)^##\s+Planner checkpoint\s*\nStatus:\s*COMPLETE\s*$",
+            text,
+        ):
+            errors.append("Planner checkpoint Status must be COMPLETE before finalization")
         leaves, waves, parse_errors = parse_plan(text)
         errors.extend(parse_errors)
+        leaves = merge_split_leaf_overlay(project, leaves)
         acceptance = ctrl / "ACCEPTANCE.md"
         try:
             policy = reference_policy(acceptance.read_text(errors="replace"))
@@ -517,6 +554,9 @@ def selftest():
         AGENTS = fake
         try:
             valid = """# Plan
+Status: COMPLETE
+## Planner checkpoint
+Status: COMPLETE
 ## Deliverables
 ### D001 — Scaffold
 - Outcome: scaffold

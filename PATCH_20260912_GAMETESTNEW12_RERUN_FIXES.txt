@@ -1,0 +1,18 @@
+Applied: 2026-09-12T20:01:54+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew12-resume-fixes-20260912-200154
+
+GametestNew12 resumed-run fixes:
+- supervisor writes authoritative .opencode-v2/control-status.json every poll
+- root no longer depends on shell-tool naming for scheduler state
+- root must use scheduler JSON after every dispatch/split transition
+- accepted recursive splits retain split-status=accepted audit evidence
+- workers cannot leave detached/background deliverable jobs behind
+- planner verification thresholds must be evidence-based
+- S/M leaves are designed for <=10 minute bounded execution
+
+Not changed:
+- model/backend
+- MTP
+- prefix caching
+- async scheduling
+- reasoning token budgets

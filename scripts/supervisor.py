@@ -63,7 +63,7 @@ instead of the task in ORIGINAL_TASK.md:
 ORIGINAL_TASK_STATE_MISMATCH
 STOP.
 
-Derive authoritative current state using .opencode-v2/bin/control-status.
+Read `.opencode-v2/control-status.json` for the authoritative derived scheduler state.
 Continue the ORIGINAL task from durable state only."""
 
 PLANNER_CONTINUATION_PROMPT="""Continue implementation planning for this project.
@@ -176,10 +176,57 @@ def implementation_prompt_violation(text):
         return "noncanonical_or_model_derived_handoff"
     return ""
 
+def split_leaf_overlay_path():
+    return Path(PROJECT)/".opencode-v2"/"work"/"split-leaves.json"
+
+def load_split_leaf_overlay():
+    if not PROJECT:
+        return {"owner":"supervisor","protocol":"v2-split-leaf-overlay-v1","parents":{}}
+    try:
+        data=json.loads(split_leaf_overlay_path().read_text())
+        if not isinstance(data,dict):
+            raise ValueError("overlay is not an object")
+        data.setdefault("owner","supervisor")
+        data.setdefault("protocol","v2-split-leaf-overlay-v1")
+        data.setdefault("parents",{})
+        return data
+    except Exception:
+        return {"owner":"supervisor","protocol":"v2-split-leaf-overlay-v1","parents":{}}
+
+def save_split_leaf_overlay(data):
+    path=split_leaf_overlay_path()
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data,indent=2)+"\n")
+    os.replace(tmp,path)
+
+def apply_split_leaf_overlay(manifest):
+    if not isinstance(manifest,dict):
+        manifest={}
+    leaves=manifest.setdefault("leaves",{})
+    overlay=load_split_leaf_overlay()
+    parents=overlay.get("parents") if isinstance(overlay.get("parents"),dict) else {}
+    for parent,entry in parents.items():
+        if not isinstance(entry,dict):
+            continue
+        child_defs=entry.get("child_defs") if isinstance(entry.get("child_defs"),dict) else {}
+        children=entry.get("children") if isinstance(entry.get("children"),list) else list(child_defs)
+        if parent in leaves and isinstance(leaves[parent],dict):
+            leaves[parent]["split_children"]=list(children)
+            leaves[parent]["split_depth"]=split_depth(parent)
+        for did,child in child_defs.items():
+            if isinstance(child,dict):
+                leaves[did]=child
+    return manifest
+
 def load_manifest():
-    if not PROJECT: return {}
-    try: return json.loads((Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json").read_text())
-    except Exception: return {}
+    if not PROJECT:
+        return {}
+    try:
+        manifest=json.loads((Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json").read_text())
+    except Exception:
+        manifest={}
+    return apply_split_leaf_overlay(manifest)
 
 def save_manifest(manifest):
     path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
@@ -304,6 +351,16 @@ def persist_split(parent, proposals):
             leaves[parent]["split_depth"]=split_depth(parent)
             manifest["recursive_split_protocol"]=RECURSIVE_SPLIT_PROTOCOL
             save_manifest(manifest)
+
+            overlay=load_split_leaf_overlay()
+            parents=overlay.setdefault("parents",{})
+            parents[parent]={
+                "children":list(expected),
+                "child_defs":{child["id"]:child for child in children},
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            }
+            save_split_leaf_overlay(overlay)
+
             path=split_history_path(); path.parent.mkdir(parents=True,exist_ok=True)
             try: history=json.loads(path.read_text())
             except Exception: history={"owner":"supervisor","protocol":SPLIT_PROPOSAL_PROTOCOL,"splits":[]}
@@ -311,7 +368,8 @@ def persist_split(parent, proposals):
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
             tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(history,indent=2)+"\n"); os.replace(tmp,path)
             split_request_path(parent).unlink(missing_ok=True)
-            split_status_path(parent).unlink(missing_ok=True)
+            save_split_status(parent,"accepted",children=expected)
+    sync_control_status_snapshot()
     log(f"RECURSIVE_SPLIT parent={parent} children={','.join(expected)}")
     csv("RECURSIVE_SPLIT","","supervisor",f"{parent} -> {','.join(expected)}")
     return expected
@@ -432,6 +490,61 @@ def record_leaf_failure(did, reason, classification="genuine"):
     if recursive_split_enabled() and genuine>=2 and split_depth(did)<MAX_SPLIT_DEPTH:
         return split_request(did)
     return True,"genuine-recorded"
+
+# V2.6.9 NORMALIZED SCHEDULER STATE BEGIN
+def normalized_state_snapshot(project):
+    data=state_snapshot(project)
+    if not isinstance(data,dict):
+        return data
+
+    leaves=data.get("leaves") if isinstance(data.get("leaves"),dict) else {}
+    clean=[]
+    for item in data.get("execution_blockers",[]) if isinstance(data.get("execution_blockers"),list) else []:
+        if not isinstance(item,dict):
+            continue
+        did=str(item.get("deliverable") or "")
+        leaf=leaves.get(did) if isinstance(leaves.get(did),dict) else {}
+        # New13 regression: control_state emitted attempt_limit_reached for
+        # leaves whose own canonical flag was false (often attempts=0).
+        if item.get("reason")=="attempt_limit_reached" and not leaf.get("attempt_limit_reached",False):
+            log(
+                f"STATE_BLOCKER_EXEMPT deliverable={did} reason=attempt_limit_reached "
+                f"attempts={leaf.get('attempts',0)}"
+            )
+            continue
+        clean.append(item)
+    data["execution_blockers"]=clean
+
+    # If the only reason for execution-blocked was the contradictory blocker
+    # list and at least one leaf is legally eligible, execution can continue.
+    if data.get("resume_phase")=="execution-blocked" and not clean:
+        if any(isinstance(v,dict) and v.get("eligible") for v in leaves.values()):
+            data["resume_phase"]="execution"
+    return data
+# V2.6.9 NORMALIZED SCHEDULER STATE END
+
+# V2.6.9 DURABLE CONTROL STATUS SNAPSHOT BEGIN
+def sync_control_status_snapshot():
+    # Persist the authoritative derived scheduler state for the root model.
+    if not PROJECT:
+        return {}
+    try:
+        data=normalized_state_snapshot(PROJECT)
+        if not isinstance(data,dict):
+            return {}
+        payload={"owner":"supervisor",**data}
+        path=Path(PROJECT)/".opencode-v2"/"control-status.json"
+        path.parent.mkdir(parents=True,exist_ok=True)
+        rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
+        if not path.exists() or path.read_text(errors="replace")!=rendered:
+            tmp=path.with_suffix(".tmp")
+            tmp.write_text(rendered)
+            os.replace(tmp,path)
+        return payload
+    except Exception as exc:
+        log(f"CONTROL_STATUS_SNAPSHOT_ERROR {exc!r}")
+        return {}
+# V2.6.9 DURABLE CONTROL STATUS SNAPSHOT END
 
 def ready_info(did):
     return state_ready_info(PROJECT,did) if PROJECT and did else {}
@@ -694,6 +807,18 @@ def overlapping_other_owned_paths(sid,did):
         result.update(owned_artifact_paths(leaf))
     return result
 
+# V2.6.9 SUPERVISOR DYNAMIC OWNERSHIP EXEMPTION BEGIN
+SUPERVISOR_DYNAMIC_CONTROL_PATHS={
+    ".opencode-v2/control-status.json",
+    ".opencode-v2/reference-gate.json",
+    ".opencode-v2/reference-validation-gate.json",
+    ".opencode-v2/IMPLEMENTATION_PLAN.guard.json",
+}
+
+def supervisor_dynamic_control_path(path):
+    return path in SUPERVISOR_DYNAMIC_CONTROL_PATHS
+# V2.6.9 SUPERVISOR DYNAMIC OWNERSHIP EXEMPTION END
+
 def ownership_violations(did,sid=""):
     """Return changes attributable to this leaf outside declared ownership.
 
@@ -720,6 +845,9 @@ def ownership_violations(did,sid=""):
     violations=[]
     for path in sorted(changed):
         if inside(path,allowed):
+            continue
+        if supervisor_dynamic_control_path(path) and not session_explicitly_touched_path(sid,path):
+            log(f"OWNERSHIP_SUPERVISOR_EXEMPT session={sid} deliverable={did} path={path}")
             continue
         if sibling_owned and inside(path,sibling_owned) and not session_explicitly_touched_path(sid,path):
             log(f"OWNERSHIP_CONCURRENT_EXEMPT session={sid} deliverable={did} path={path}")
@@ -2108,7 +2236,7 @@ def maybe_nudge_idle_root(active_sids,child_active):
         root_same_session_idle_since=None
         return False
 
-    state=state_snapshot(PROJECT)
+    state=normalized_state_snapshot(PROJECT)
     phase=state.get("resume_phase")
     if phase=="complete" or phase in {"implementation-blocked","execution-blocked"}:
         root_same_session_idle_since=None
@@ -2195,7 +2323,7 @@ def maybe_continue_root(active_sids,child_active):
         root_idle_since=None
         return False
 
-    state=state_snapshot(PROJECT); phase=state.get("resume_phase")
+    state=normalized_state_snapshot(PROJECT); phase=state.get("resume_phase")
     if phase=="complete": return False
     if phase in {"implementation-blocked","execution-blocked"}:
         blockers=",".join(item.get("deliverable","") for item in state.get("execution_blockers",[]))
@@ -2287,7 +2415,7 @@ def merge_lesson_candidates():
 def maybe_launch_lessons(active_sids,child_active):
     global root_seen_active,root_idle_since,lessons_started,lessons_launch_attempts
     if lessons_started or not PROJECT: return
-    if state_snapshot(PROJECT).get("resume_phase")!="complete": return
+    if normalized_state_snapshot(PROJECT).get("resume_phase")!="complete": return
     ctrl=Path(PROJECT)/".opencode-v2"
     if (ctrl/"LESSONS.ready").exists(): lessons_started=True; return
     root=root_orchestrator_id()
@@ -2506,6 +2634,7 @@ def api_poll_loop():
             stop_inactive_event_watches(active)
             sync_reference_gate()
             sync_reference_validation_gate()
+            sync_control_status_snapshot()
             nudged=maybe_nudge_idle_root(active,child_active)
             if not nudged:
                 maybe_continue_root(active,child_active)
@@ -2523,6 +2652,7 @@ def persisted_reconcile_loop():
         try:
             reconcile_split_proposals()
             reconcile_split_parent_completions()
+            sync_control_status_snapshot()
             con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction'),s.time_idle FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
             for sid,agent,comps,time_idle in rows:
                 prompt=first_user_text_db(sid)

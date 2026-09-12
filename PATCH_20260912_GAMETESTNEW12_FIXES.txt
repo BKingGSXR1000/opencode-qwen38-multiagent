@@ -1,0 +1,22 @@
+Applied: 2026-09-12T19:19:41+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew12-fixes-20260912-191941
+
+GametestNew12 findings/fixes:
+- two-phase reference architecture worked: one foundation researcher reached
+  FOUNDATION READY in one session
+- implementation planning was then blocked by a stale planner-local rule that
+  still required full top-level reference evidence result=READY
+- planner now requires only the durable FOUNDATION gate before implementation
+- top-level reference result=PARTIAL is explicitly valid until final validation
+- completed planner sessions that leave the plan with zero Dxxx structure now
+  consume the durable planner retry ledger
+- productive partial implementation plans are not counted as no-progress
+- this prevents root rollovers from repeatedly launching fresh zero-progress
+  planners if a future planner protocol mismatch occurs
+
+Not changed:
+- vLLM backend
+- MTP
+- prefix caching
+- async scheduling
+- LOW/MEDIUM thinking budgets

@@ -1,0 +1,22 @@
+Applied: 2026-09-12T13:03:07+02:00
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/gametestnew7-fixes-20260912-130306
+
+GametestNew7 fixes:
+- reference-researcher now uses qwen38-reasoning-48k (MEDIUM thinking)
+- reference-researcher steps 20 -> 36
+- glob/grep/list traps removed from reference research role
+- required durable PARTIAL evidence by tool turn 3
+- reference numerical fixtures use .opencode-v2/acceptance/reference-fixtures.json
+- reference foundation is kept useful even while PARTIAL
+- supervisor now owns durable .opencode-v2/reference-gate.json
+- global reference-researcher attempt cap is 4 per project, across root rollovers
+- root same-session nudges and root rollovers stop after reference gate BLOCKED
+- a fifth researcher is retired as a fail-safe
+- orchestrator reads the supervisor-owned durable reference gate instead of
+  resetting a local "initial + repair" count on every root
+
+Not changed:
+- vLLM backend
+- MTP
+- prefix caching
+- async scheduling
