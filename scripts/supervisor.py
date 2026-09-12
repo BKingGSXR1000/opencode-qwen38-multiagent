@@ -764,6 +764,64 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
     except (OSError,subprocess.TimeoutExpired) as e:
         return False,f"verification-error-{type(e).__name__}"
 
+# V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION BEGIN
+_split_parent_finalize_next = {}
+
+def reconcile_split_parent_completions():
+    """Finalize a split parent after every direct child is durably ready.
+
+    Recursive splitting replaces execution of the failed parent with child
+    leaves, but downstream Launch deps still point at the canonical parent ID.
+    Therefore the supervisor must deterministically re-run the parent's
+    unchanged verification and canonical leaf-complete guard once all direct
+    children are ready. The root model must never dispatch the split parent or
+    manufacture its ready sentinel.
+    """
+    if not PROJECT:
+        return
+
+    leaves = (load_manifest().get("leaves") or {})
+    now = time.monotonic()
+
+    # Deepest parents first so nested splits can collapse upward cleanly.
+    parents = []
+    for did, leaf in leaves.items():
+        if not isinstance(leaf, dict):
+            continue
+        children = leaf.get("split_children")
+        if isinstance(children, list) and children:
+            parents.append((split_depth(did), did, children))
+    parents.sort(reverse=True)
+
+    for _depth, did, children in parents:
+        if ready_info(did):
+            _split_parent_finalize_next.pop(did, None)
+            continue
+        if not all(ready_info(child) for child in children):
+            continue
+        if now < _split_parent_finalize_next.get(did, 0):
+            continue
+
+        ok, detail = post_session_finalize(did)
+        log(
+            f"SPLIT_PARENT_FINALIZE parent={did} "
+            f"children={','.join(children)} result={detail}"
+        )
+        csv(
+            "SPLIT_PARENT_FINALIZE",
+            "",
+            "supervisor",
+            f"{did} children={','.join(children)} result={detail}",
+        )
+
+        if ok:
+            _split_parent_finalize_next.pop(did, None)
+        else:
+            # Retry slowly instead of creating a 0.5-second failure/log storm.
+            _split_parent_finalize_next[did] = time.monotonic() + 10.0
+
+# V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION END
+
 def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
     """Record one bounded non-implementation dispatch without rewriting history.
 
@@ -2180,6 +2238,7 @@ def persisted_reconcile_loop():
     while True:
         try:
             reconcile_split_proposals()
+            reconcile_split_parent_completions()
             con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction'),s.time_idle FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
             for sid,agent,comps,time_idle in rows:
                 prompt=first_user_text_db(sid)

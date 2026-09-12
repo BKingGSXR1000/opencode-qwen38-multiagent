@@ -2,7 +2,7 @@
 description: Obtains independent authoritative reference evidence for acceptance checks. Research only; cannot modify product code.
 mode: subagent
 model: syv/qwen38-reference-nothink
-steps: 10
+steps: 20
 permission:
   read:
     "*": deny
@@ -10,6 +10,7 @@ permission:
   edit:
     "*": deny
     ".opencode-v2/acceptance/**": allow
+    ".opencode-v2/REFERENCE_FOUNDATION.md": allow
   glob:
     "*": deny
     ".opencode-v2/**": allow
@@ -143,3 +144,22 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- V2.6.9 REFERENCE DURABILITY GATE BEGIN -->
+## Durable reference-stage rule
+
+This stage is a hard prerequisite for implementation planning when the
+acceptance policy is `external-required`.
+
+- By tool turn 4, create/update
+  `.opencode-v2/acceptance/reference-evidence.json` with every verified source
+  and check known so far. Use `"result": "PARTIAL"` while unresolved.
+- Do not spend the entire step budget browsing without durable evidence.
+- As soon as the required checks are resolved, write the compact
+  `.opencode-v2/REFERENCE_FOUNDATION.md`, set evidence `"result": "READY"`,
+  and stop researching.
+- A missing foundation/evidence file is failure, not an advisory result.
+- Never invent data merely to reach READY. If authoritative truth genuinely
+  remains unresolved after bounded research, persist PARTIAL honestly and
+  return `REFERENCE_PARTIAL` with the unresolved Axxx IDs.
+<!-- V2.6.9 REFERENCE DURABILITY GATE END -->

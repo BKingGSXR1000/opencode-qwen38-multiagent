@@ -31,6 +31,15 @@ Read:
 - `.opencode-v2/LESSONS_LEARNED.md` when present
 - `.opencode-v2/REFERENCE_FOUNDATION.md` only when Reference policy is external-required
 
+EXTERNAL-REFERENCE HARD GATE:
+Before making ANY edit to `IMPLEMENTATION_PLAN.md`, inspect Reference policy in
+`ACCEPTANCE.md`. If it is `external-required`:
+- direct-read `.opencode-v2/REFERENCE_FOUNDATION.md`;
+- direct-read `.opencode-v2/acceptance/reference-evidence.json`;
+- require top-level `"result": "READY"`.
+If either file is missing, malformed, `PARTIAL`, or otherwise not READY, return
+exactly `REFERENCE_NOT_READY` and STOP without changing the plan.
+
 Use the available `write` or `edit` tool to create or modify only:
 `.opencode-v2/IMPLEMENTATION_PLAN.md`
 
