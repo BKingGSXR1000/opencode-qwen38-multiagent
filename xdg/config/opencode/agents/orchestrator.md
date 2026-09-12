@@ -72,8 +72,9 @@ Read Reference policy from ACCEPTANCE.md.
   1. Run `.opencode-v2/bin/control-status`, then direct-read
      `.opencode-v2/reference-gate.json`.
   2. If gate state is `ready`, proceed to implementation planning.
-  3. If gate state is `blocked`, launch NO researcher and return exactly
-     `IMPLEMENTATION_BLOCKED REFERENCE`.
+  3. If gate state is `blocked`, STOP THE CURRENT TURN IMMEDIATELY.
+     Launch NO researcher, NO implementation-planner, and NO repair planner.
+     Do not inspect planner state. Return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
   4. If gate state is `pending`, launch exactly ONE `reference-researcher`
      with the short prompt:
      `Complete the external reference foundation for this project. Read ACCEPTANCE.md and existing reference evidence. Resolve only the remaining external-reference gaps. Persist progress under .opencode-v2/acceptance/, including reference-fixtures.json when numeric fixtures are required, and write REFERENCE_FOUNDATION.md.`
@@ -88,6 +89,12 @@ Read Reference policy from ACCEPTANCE.md.
      NEVER launch a researcher after the gate says `blocked`.
 
 PHASE 0.5 — IMPLEMENTATION PLAN
+HARD PRECONDITION: if ACCEPTANCE.md says `Reference policy: external-required`,
+direct-read `.opencode-v2/reference-gate.json` immediately before EVERY
+implementation-planner launch. Its state must be exactly `ready`. If it is
+`pending` or `blocked`, launch no planner and return exactly
+`IMPLEMENTATION_BLOCKED REFERENCE`.
+
 Before launching ANY implementation-planner (initial, continuation, or repair),
 read `.opencode-v2/work/planner-restarts.json` when present and derive current
 state with `.opencode-v2/bin/control-status`. This supervisor-owned ledger is

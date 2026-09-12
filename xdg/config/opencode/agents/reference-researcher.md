@@ -190,3 +190,29 @@ Required sequence:
 Do not spend tool calls probing unavailable shell/Python capabilities. This
 role has `read`, `edit/write`, `webfetch`, and `websearch`; use those directly.
 <!-- V2.6.9 GAMETESTNEW7 RESEARCH EXECUTION END -->
+
+<!-- V2.6.9 GAMETESTNEW8 BOUNDED RESEARCH SLICE BEGIN -->
+## Bounded durable research slice
+
+Treat each invocation as ONE short research slice, not a mandate to finish the
+entire external-reference project in one session.
+
+- Make at most FOUR `webfetch`/`websearch` calls total in this invocation.
+- Never batch more than TWO web calls in one assistant tool step.
+- After at most TWO web calls, the next meaningful tool call MUST persist the
+  newly learned facts to `reference-evidence.json` and/or
+  `reference-fixtures.json` before doing more research.
+- If a web response contains numerical vectors, event times, constants, or
+  other reference values, DO NOT spend a long reasoning turn transcribing or
+  deriving from them first. The very next meaningful tool call must persist
+  the raw/structured source values in `reference-fixtures.json`.
+- Create/update `REFERENCE_FOUNDATION.md` during PARTIAL work too. It should
+  summarize verified conventions, identifiers, frame/units, authoritative
+  sources, and the exact remaining work so the next fresh researcher continues
+  rather than rediscovers.
+- After the fourth web call (or earlier when a useful checkpoint is complete),
+  persist state and RETURN. Use `REFERENCE_PARTIAL` while unresolved. A later
+  fresh researcher will continue from disk.
+- Do not keep reasoning merely because step budget remains. Durable progress
+  and a clean handoff are more valuable than exhausting the session.
+<!-- V2.6.9 GAMETESTNEW8 BOUNDED RESEARCH SLICE END -->

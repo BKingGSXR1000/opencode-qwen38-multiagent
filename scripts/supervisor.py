@@ -17,7 +17,7 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
-MAX_REFERENCE_SESSIONS=4
+MAX_REFERENCE_SESSIONS=6
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
 # file-existence deadline (150.4-150.5s) without a first write.  The successful
@@ -887,6 +887,13 @@ def durable_progress_signature(agent,did=""):
     paths=[]
     if agent=="implementation-planner":
         paths=[Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"]
+    elif agent=="reference-researcher":
+        ctrl=Path(PROJECT)/".opencode-v2"
+        paths=[
+            ctrl/"acceptance"/"reference-evidence.json",
+            ctrl/"acceptance"/"reference-fixtures.json",
+            ctrl/"REFERENCE_FOUNDATION.md",
+        ]
     elif did:
         leaf=(load_manifest().get("leaves") or {}).get(did,{})
         paths=[Path(PROJECT)/p for p in owned_artifact_paths(leaf)]
@@ -908,7 +915,8 @@ def fallback_no_progress_reason(sid,agent,did,observable,now=None):
     if signature!=state.get("fallback_signature"):
         state["fallback_signature"]=signature; state["fallback_since"]=now; return ""
     state.setdefault("fallback_since",now)
-    if now-state["fallback_since"]>=300:
+    limit=600 if agent=="reference-researcher" else 300
+    if now-state["fallback_since"]>=limit:
         return f"no_durable_progress_with_invisible_stream={int(now-state['fallback_since'])}s"
     return ""
 
@@ -2223,6 +2231,24 @@ def api_poll_loop():
                         log(
                             f"REFERENCE_GATE_ABORT session={sid} "
                             f"attempts={ref_gate.get('attempts')}"
+                        )
+                        continue
+
+                if agent=="implementation-planner" and parent:
+                    ref_gate=sync_reference_gate()
+                    if ref_gate.get("state") not in {
+                        "ready", "not-required", "not-applicable"
+                    }:
+                        abort_session(
+                            sid,
+                            f"reference_gate_{ref_gate.get('state')} "
+                            f"attempts={ref_gate.get('attempts',0)}",
+                            agent,
+                        )
+                        log(
+                            f"REFERENCE_GATE_PLANNER_ABORT session={sid} "
+                            f"state={ref_gate.get('state')} "
+                            f"attempts={ref_gate.get('attempts',0)}"
                         )
                         continue
 
