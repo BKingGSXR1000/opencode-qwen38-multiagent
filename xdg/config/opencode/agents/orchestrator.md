@@ -68,17 +68,24 @@ After it returns or is interrupted:
 REFERENCE STAGE
 Read Reference policy from ACCEPTANCE.md.
 - `internal` or `none`: skip external reference research.
-- `external-required`: this is a HARD pre-planning gate:
-  1. Launch `reference-researcher`.
-  2. Require BOTH `.opencode-v2/REFERENCE_FOUNDATION.md` and
-     `.opencode-v2/acceptance/reference-evidence.json`.
-  3. Read `reference-evidence.json`; its top-level `"result"` must be `"READY"`.
-  4. If either artifact is missing or result is `PARTIAL`, launch ONE fresh
-     `reference-researcher` repair session with the short prompt:
-     `Complete the external reference foundation for this project. Read ACCEPTANCE.md and existing reference evidence. Resolve only the remaining external-reference gaps and persist the required artifacts.`
-  5. If the second session still does not produce result `READY`, stop with
-     exact `IMPLEMENTATION_BLOCKED REFERENCE`.
-  6. NEVER launch implementation-planner while this gate is incomplete.
+- `external-required`: this is a HARD durable pre-planning gate.
+  1. Run `.opencode-v2/bin/control-status`, then direct-read
+     `.opencode-v2/reference-gate.json`.
+  2. If gate state is `ready`, proceed to implementation planning.
+  3. If gate state is `blocked`, launch NO researcher and return exactly
+     `IMPLEMENTATION_BLOCKED REFERENCE`.
+  4. If gate state is `pending`, launch exactly ONE `reference-researcher`
+     with the short prompt:
+     `Complete the external reference foundation for this project. Read ACCEPTANCE.md and existing reference evidence. Resolve only the remaining external-reference gaps. Persist progress under .opencode-v2/acceptance/, including reference-fixtures.json when numeric fixtures are required, and write REFERENCE_FOUNDATION.md.`
+  5. After that child returns or is interrupted, run control-status again and
+     direct-read `reference-gate.json`. Repeat only while its durable state is
+     `pending`. The supervisor owns the GLOBAL attempt count; a root rollover
+     NEVER resets it.
+  6. Require BOTH `.opencode-v2/REFERENCE_FOUNDATION.md` and
+     `.opencode-v2/acceptance/reference-evidence.json` with top-level
+     `"result": "READY"` before launching implementation-planner.
+  7. NEVER infer the reference attempt count from conversation history and
+     NEVER launch a researcher after the gate says `blocked`.
 
 PHASE 0.5 — IMPLEMENTATION PLAN
 Before launching ANY implementation-planner (initial, continuation, or repair),

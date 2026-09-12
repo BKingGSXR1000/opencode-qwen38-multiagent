@@ -1,8 +1,8 @@
 ---
 description: Obtains independent authoritative reference evidence for acceptance checks. Research only; cannot modify product code.
 mode: subagent
-model: syv/qwen38-reference-nothink
-steps: 20
+model: syv/qwen38-reasoning-48k
+steps: 36
 permission:
   read:
     "*": deny
@@ -11,12 +11,8 @@ permission:
     "*": deny
     ".opencode-v2/acceptance/**": allow
     ".opencode-v2/REFERENCE_FOUNDATION.md": allow
-  glob:
-    "*": deny
-    ".opencode-v2/**": allow
-  grep:
-    "*": deny
-    ".opencode-v2/**": allow
+  glob: deny
+  grep: deny
   list: deny
   bash: deny
   task: deny
@@ -133,16 +129,17 @@ or null evidence is incomplete.
 <!-- V2.6.7 EARLY-REFERENCE END -->
 
 <!-- V2.6.7c DOTDIR IO BEGIN -->
-## `.opencode-v2` filesystem rule
+## Known-path-only filesystem rule
 
-OpenCode `glob` may omit dot-directories even for explicit `.opencode-v2/*`
-patterns.
+Do not use `glob`, `grep`, `list`, directory reads, or filesystem discovery.
+The only project paths you need are known in advance:
+- `.opencode-v2/ACCEPTANCE.md`
+- `.opencode-v2/acceptance/reference-evidence.json`
+- `.opencode-v2/acceptance/reference-fixtures.json`
+- `.opencode-v2/REFERENCE_FOUNDATION.md`
 
-- NEVER use `glob` to decide whether a known `.opencode-v2` file exists.
-- For a known control path, use direct `read`.
-- To discover files inside `.opencode-v2`, use `list`.
-- If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
-  and do not spend more tool calls investigating the discrepancy.
+Direct-read known files. A missing evidence/foundation file is normal on the
+first attempt; create/update it instead of searching the filesystem.
 <!-- V2.6.7c DOTDIR IO END -->
 
 <!-- V2.6.9 REFERENCE DURABILITY GATE BEGIN -->
@@ -163,3 +160,33 @@ acceptance policy is `external-required`.
   remains unresolved after bounded research, persist PARTIAL honestly and
   return `REFERENCE_PARTIAL` with the unresolved Axxx IDs.
 <!-- V2.6.9 REFERENCE DURABILITY GATE END -->
+
+<!-- V2.6.9 GAMETESTNEW7 RESEARCH EXECUTION BEGIN -->
+## Research execution discipline
+
+This role uses MEDIUM reasoning because external-reference work can require
+careful source/API interpretation. Spend that reasoning on choosing the next
+high-value source call, not on filesystem archaeology.
+
+Required sequence:
+1. First meaningful tool call: read `.opencode-v2/ACCEPTANCE.md`.
+2. Then direct-read existing `reference-evidence.json` and
+   `REFERENCE_FOUNDATION.md` if present.
+3. By the THIRD meaningful tool turn at the latest, WRITE/UPDATE
+   `.opencode-v2/acceptance/reference-evidence.json`. Use `PARTIAL` while any
+   required truth is unresolved.
+4. After at most six additional web calls, persist newly verified facts and an
+   explicit `missing`/remaining-work list before continuing.
+5. When numerical fixtures are required, store them at
+   `.opencode-v2/acceptance/reference-fixtures.json`; do not attempt to write
+   product/application files.
+6. Keep `REFERENCE_FOUNDATION.md` useful even while PARTIAL: record verified
+   conventions, authoritative identifiers, units/frames, sources, and
+   remaining gaps so a fresh researcher can continue without rediscovering them.
+7. Finish with `REFERENCE_READY` only when evidence result is `READY`.
+   Otherwise persist PARTIAL honestly and return `REFERENCE_PARTIAL` plus the
+   unresolved acceptance IDs.
+
+Do not spend tool calls probing unavailable shell/Python capabilities. This
+role has `read`, `edit/write`, `webfetch`, and `websearch`; use those directly.
+<!-- V2.6.9 GAMETESTNEW7 RESEARCH EXECUTION END -->

@@ -17,6 +17,7 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
+MAX_REFERENCE_SESSIONS=4
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
 # file-existence deadline (150.4-150.5s) without a first write.  The successful
@@ -1857,6 +1858,106 @@ def record_root_restart(sid,phase):
     os.replace(temp,path)
 
 
+# V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
+def reference_gate_snapshot():
+    if not PROJECT:
+        return {
+            "state":"not-applicable",
+            "attempts":0,
+            "max_attempts":MAX_REFERENCE_SESSIONS,
+        }
+
+    ctrl=Path(PROJECT)/".opencode-v2"
+    acceptance=ctrl/"ACCEPTANCE.md"
+    text=acceptance.read_text(errors="replace") if acceptance.exists() else ""
+    external=("Reference policy: external-required" in text)
+
+    if not external:
+        return {
+            "state":"not-required",
+            "attempts":0,
+            "max_attempts":MAX_REFERENCE_SESSIONS,
+        }
+
+    evidence_path=ctrl/"acceptance"/"reference-evidence.json"
+    foundation=ctrl/"REFERENCE_FOUNDATION.md"
+
+    result=""
+    if evidence_path.exists():
+        try:
+            obj=json.loads(evidence_path.read_text(errors="replace"))
+            result=str(obj.get("result") or "").upper()
+        except Exception:
+            result="MALFORMED"
+
+    attempts=0
+    session_ids=[]
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT id FROM session_v2 "
+            "WHERE agent='reference-researcher' AND directory=? "
+            "ORDER BY time_created",
+            (PROJECT,),
+        ).fetchall()
+        con.close()
+        session_ids=[r[0] for r in rows]
+        attempts=len(session_ids)
+    except Exception as e:
+        log(f"REFERENCE_GATE_DB_ERROR {e!r}")
+
+    ready=(result=="READY" and foundation.exists())
+    state=(
+        "ready"
+        if ready
+        else "blocked"
+        if attempts>=MAX_REFERENCE_SESSIONS
+        else "pending"
+    )
+
+    return {
+        "state":state,
+        "attempts":attempts,
+        "max_attempts":MAX_REFERENCE_SESSIONS,
+        "evidence_result":result or "MISSING",
+        "foundation_present":foundation.exists(),
+        "session_ids":session_ids[-MAX_REFERENCE_SESSIONS:],
+    }
+
+
+def sync_reference_gate():
+    data=reference_gate_snapshot()
+
+    if not PROJECT or data.get("state") in {
+        "not-applicable",
+        "not-required",
+    }:
+        return data
+
+    ctrl=Path(PROJECT)/".opencode-v2"
+    (ctrl/"acceptance").mkdir(parents=True,exist_ok=True)
+
+    path=ctrl/"reference-gate.json"
+    payload={"owner":"supervisor",**data}
+    rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
+
+    try:
+        if not path.exists() or path.read_text(errors="replace")!=rendered:
+            tmp=path.with_suffix(".tmp")
+            tmp.write_text(rendered)
+            os.replace(tmp,path)
+            log(
+                f"REFERENCE_GATE state={data['state']} "
+                f"attempts={data['attempts']} "
+                f"evidence={data['evidence_result']} "
+                f"foundation={str(data['foundation_present']).lower()}"
+            )
+    except Exception as e:
+        log(f"REFERENCE_GATE_WRITE_ERROR {e!r}")
+
+    return data
+# V2.6.9 GAMETESTNEW7 REFERENCE GATE END
+
 def maybe_nudge_idle_root(active_sids,child_active):
     """Resume an idle completed root while durable work is still pending."""
     global root_same_session_idle_since
@@ -1872,6 +1973,15 @@ def maybe_nudge_idle_root(active_sids,child_active):
 
     # Preserve the original user task before any automatic continuation.
     if not ensure_original_task(root):
+        root_same_session_idle_since=None
+        return False
+
+    ref_gate=sync_reference_gate()
+    if ref_gate.get("state")=="blocked":
+        log(
+            f"ROOT_SAME_SESSION_BLOCKED reference "
+            f"attempts={ref_gate.get('attempts')}"
+        )
         root_same_session_idle_since=None
         return False
 
@@ -1953,6 +2063,15 @@ def maybe_continue_root(active_sids,child_active):
         )
         root_idle_since=None
         return False
+    ref_gate=sync_reference_gate()
+    if ref_gate.get("state")=="blocked":
+        log(
+            f"ROOT_CONTINUATION_BLOCKED reference "
+            f"attempts={ref_gate.get('attempts')}"
+        )
+        root_idle_since=None
+        return False
+
     state=state_snapshot(PROJECT); phase=state.get("resume_phase")
     if phase=="complete": return False
     if phase in {"implementation-blocked","execution-blocked"}:
@@ -2092,6 +2211,21 @@ def api_poll_loop():
 
                 agent=shape["agent"]
                 parent=shape["parent"]
+
+                if agent=="reference-researcher" and parent:
+                    ref_gate=reference_gate_snapshot()
+                    if ref_gate.get("attempts",0)>MAX_REFERENCE_SESSIONS:
+                        abort_session(
+                            sid,
+                            f"reference_attempt_limit={MAX_REFERENCE_SESSIONS}",
+                            agent,
+                        )
+                        log(
+                            f"REFERENCE_GATE_ABORT session={sid} "
+                            f"attempts={ref_gate.get('attempts')}"
+                        )
+                        continue
+
                 child_active=child_active or (
                     bool(parent)
                     and (
@@ -2222,6 +2356,7 @@ def api_poll_loop():
                 sid,context_input=root_context_candidate
                 abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
             stop_inactive_event_watches(active)
+            sync_reference_gate()
             nudged=maybe_nudge_idle_root(active,child_active)
             if not nudged:
                 maybe_continue_root(active,child_active)
