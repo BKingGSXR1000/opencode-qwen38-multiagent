@@ -72,3 +72,19 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- 20260911 ORIGINAL TASK SOURCE BEGIN -->
+## Authoritative original-task source
+
+Before deriving product requirements, planning implementation, or validating
+the requested product:
+
+1. If `.opencode-v2/ORIGINAL_TASK.md` exists, READ IT FIRST.
+2. Treat its complete contents as the authoritative original user request.
+3. A later message such as `Continue orchestration for this project` is a
+   control-plane continuation instruction, NOT a replacement user goal.
+4. Never write such a continuation instruction into `ACCEPTANCE.md` as the
+   Original Goal.
+5. If the caller's wording conflicts with `ORIGINAL_TASK.md`, the durable
+   original-task file wins.
+<!-- 20260911 ORIGINAL TASK SOURCE END -->

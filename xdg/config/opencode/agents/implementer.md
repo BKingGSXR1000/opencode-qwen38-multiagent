@@ -2,7 +2,7 @@
 description: Disposable worker for ONE concrete existing-project change.
 mode: subagent
 model: syv/qwen38-worker-nothink
-steps: 9
+steps: 24
 permission:
   read: allow
   edit:
@@ -163,3 +163,19 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- V2.6.9 EARLY ARTIFACT RULE BEGIN -->
+## Early artifact rule
+
+The step budget exists to finish the deliverable, not to maximize investigation.
+
+- By tool turn 4 at the latest, create or update at least one primary owned
+  artifact unless the required owned artifact already exists and is correct.
+- Prefer creating a minimal valid scaffold first, then refine it.
+- Network/dependency research, optional vendoring, and exploratory probes must
+  not consume the budget before core owned files exist.
+- If the deliverable owns several files, create the minimum complete set early
+  and iterate. Do not spend most of the session proving optional details.
+- Reserve enough tool turns for verification and the final
+  `.opencode-v2/bin/leaf-complete Dxxx` call.
+<!-- V2.6.9 EARLY ARTIFACT RULE END -->

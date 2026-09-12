@@ -2,7 +2,7 @@
 description: Opt-in medium-reasoning worker for ONE genuinely hard algorithmic or mathematical derivation.
 mode: subagent
 model: syv/qwen38-reasoning-48k
-steps: 8
+steps: 16
 permission:
   read: allow
   edit:

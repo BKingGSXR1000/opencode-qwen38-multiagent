@@ -44,8 +44,9 @@ valid_overrides=all(isinstance(x,dict) and x.get("source")=="operator-cli" and
                     for x in overrides)
 infra=ent.get("infrastructure_failures",[])
 if not isinstance(infra,list): raise SystemExit(f"ERROR: invalid infrastructure failures for {did}")
+allowed_infra_kinds={"opencode-compaction-template","supervisor-compaction-retire","runtime-cancel"}
 valid_infra=all(isinstance(x,dict) and x.get("source")=="supervisor" and
-                x.get("kind")=="opencode-compaction-template" and x.get("timestamp") and
+                x.get("kind") in allowed_infra_kinds and x.get("timestamp") and
                 isinstance(x.get("session"),str) and x.get("session") and
                 x.get("evidence")=="no-owned-artifact-or-progress" and x.get("grant")==1
                 for x in infra)

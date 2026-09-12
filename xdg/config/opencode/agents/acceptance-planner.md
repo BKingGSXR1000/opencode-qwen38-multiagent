@@ -39,19 +39,24 @@ Required structure:
 - Evidence Strategy explaining how MUSTs can be verified
 
 REFERENCE POLICY IS STRICT:
-- Choose `external-required` ONLY if the ORIGINAL USER REQUEST explicitly asks
-  to compare/validate against a named or external authority/reference source,
-  or explicitly requires an externally grounded truth set.
-- Words such as "correct", "accurate", "real", "scientific", "real life", or
-  "as seen from Earth" by themselves DO NOT require NASA/JPL/Horizons or other
-  external reference research.
-- Use `internal` for ordinary correctness checked with local independent tests,
-  calculations, invariants, fixtures, or implementation-independent test code.
-- Under `internal`, Evidence Strategy must stay local and self-contained. Do
-  not require Skyfield, Astropy, JPL/NASA/NAIF/Horizons, BSP kernels, downloads,
-  or named external astronomical truth merely because the request says correct,
-  real, or as seen from Earth. Use frozen local fixtures or a separate local
-  reference calculation instead.
+- Choose `external-required` if the ORIGINAL USER REQUEST explicitly asks for
+  an external authority/reference OR if the core requested result claims
+  correspondence to objective real-world state that cannot be established by
+  self-consistency alone. Examples include date-specific astronomical positions,
+  eclipses/transits/shadows/occultations, geodetic truth, or measured physical
+  reference values.
+- Words such as "correct" or "accurate" alone do not force an external policy
+  for ordinary deterministic software. But "correct positions as seen from
+  Earth at an arbitrary real date/time" is externally grounded astronomical
+  truth and therefore DOES require an independent authoritative truth set.
+- `external-required` applies to validation/evidence; it does NOT imply a cloud
+  or network dependency at application runtime. A local/offline application may
+  be implemented analytically and validated during development against frozen
+  externally grounded fixtures.
+- Use `internal` only when correctness can genuinely be established from local
+  invariants, independent calculations, or fixtures without claiming agreement
+  with an objective external real-world state.
+- Under `internal`, Evidence Strategy must stay local and self-contained.
 - Use `none` only when no meaningful correctness/reference testing applies.
 - Do not invent external-reference requirements.
 
@@ -77,3 +82,19 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- 20260911 ORIGINAL TASK SOURCE BEGIN -->
+## Authoritative original-task source
+
+Before deriving product requirements, planning implementation, or validating
+the requested product:
+
+1. If `.opencode-v2/ORIGINAL_TASK.md` exists, READ IT FIRST.
+2. Treat its complete contents as the authoritative original user request.
+3. A later message such as `Continue orchestration for this project` is a
+   control-plane continuation instruction, NOT a replacement user goal.
+4. Never write such a continuation instruction into `ACCEPTANCE.md` as the
+   Original Goal.
+5. If the caller's wording conflicts with `ORIGINAL_TASK.md`, the durable
+   original-task file wins.
+<!-- 20260911 ORIGINAL TASK SOURCE END -->

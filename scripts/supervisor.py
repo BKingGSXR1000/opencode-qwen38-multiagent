@@ -40,16 +40,39 @@ event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
-Read .opencode-v2/CONTROL_CONTRACT.md.
-Read .opencode-v2/ACCEPTANCE.md.
-Read .opencode-v2/IMPLEMENTATION_PLAN.md if present.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md.
+That file is the immutable authoritative ORIGINAL USER REQUEST.
+Never treat this continuation message as the original user goal.
+
+Then read:
+- .opencode-v2/CONTROL_CONTRACT.md
+- .opencode-v2/ACCEPTANCE.md if present
+- .opencode-v2/IMPLEMENTATION_PLAN.md if present
+
+If ORIGINAL_TASK.md is missing or empty:
+ORIGINAL_TASK_MISSING
+STOP.
+
+If an existing acceptance/plan clearly describes this continuation protocol
+instead of the task in ORIGINAL_TASK.md:
+ORIGINAL_TASK_STATE_MISMATCH
+STOP.
+
 Derive authoritative current state using .opencode-v2/bin/control-status.
-Continue from durable state only."""
+Continue the ORIGINAL task from durable state only."""
 
 PLANNER_CONTINUATION_PROMPT="""Continue implementation planning for this project.
-Read .opencode-v2/ACCEPTANCE.md.
-Read .opencode-v2/CONTROL_CONTRACT.md.
-Read .opencode-v2/IMPLEMENTATION_PLAN.md.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md.
+It is the immutable authoritative original user request.
+Never substitute this continuation message for the original task.
+
+Then read:
+- .opencode-v2/ACCEPTANCE.md
+- .opencode-v2/CONTROL_CONTRACT.md
+- .opencode-v2/IMPLEMENTATION_PLAN.md
+
 Continue from durable file state using your progressive planner protocol."""
 
 def log(msg):
@@ -72,6 +95,27 @@ def first_user_text_db(sid):
         if not row: return ""
         d=json.loads(row[0]); return d.get("text","") if isinstance(d,dict) else ""
     except Exception: return ""
+
+def last_assistant_text_db(sid):
+    """Return concatenated text parts from the latest assistant message."""
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq DESC",
+            (sid,),
+        ).fetchall()
+        con.close()
+        for (raw,) in rows:
+            try: d=json.loads(raw)
+            except Exception: continue
+            parts=d.get("content") if isinstance(d,dict) else None
+            if not isinstance(parts,list): continue
+            texts=[p.get("text","") for p in parts if isinstance(p,dict) and p.get("type")=="text" and isinstance(p.get("text"),str)]
+            text="\n".join(x for x in texts if x).strip()
+            if text: return text
+    except Exception:
+        pass
+    return ""
 
 def parse_deliverable(text):
     if not text: return ""
@@ -109,29 +153,13 @@ def strip_subagent_prefix(text):
     return re.sub(r"\AYou are a subagent spawned by another session\.\s*", "", text or "", count=1)
 
 def normalize_implementation_prompt(text):
-    """Normalize the two deterministic beta forms before strict validation.
+    """Strip only OpenCode's deterministic subagent wrapper.
 
-    The V2 hook sees raw task arguments (no wrapper), while persisted child
-    messages add the beta wrapper.  gametest2x also showed the beta/root can
-    emit its literal Dxxx placeholder in the *second canonical line*.  It has
-    already bound the real Dxxx in line one, so replacing only that exact
-    placeholder is semantic normalization, not a model-handoff exemption.
-    Every other byte/line remains subject to the exact five-line comparison.
+    The worker must receive its exact canonical deliverable ID in every line.
+    Literal Dxxx placeholders are no longer normalized/accepted because they
+    can make a child lose task identity after reading a multi-Dxxx plan.
     """
-    text=strip_subagent_prefix(text).strip()
-    did=parse_deliverable(text)
-    if not did:
-        return text
-    placeholder=(
-        "Read your Dxxx section in .opencode-v2/IMPLEMENTATION_PLAN.md."
-    )
-    canonical=f"Read your {did} section in .opencode-v2/IMPLEMENTATION_PLAN.md."
-    lines=text.splitlines()
-    if len(lines)==5 and lines[1]==placeholder:
-        lines[1]=canonical
-        return "\n".join(lines)
-    return text
-
+    return strip_subagent_prefix(text).strip()
 def implementation_prompt_violation(text):
     """Return a dispatch-protocol violation for an implementation prompt."""
     if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
@@ -211,7 +239,8 @@ def split_request(did):
         "parent_scope":leaf.get("name",""),"ownership":leaf.get("owned_artifacts",""),
         "verification":leaf.get("verify_command",""),"durable_progress":{"path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),"contents":progress_text},
         "existing_artifacts":_artifact_items(leaf.get("owned_artifacts","")),
-        "failed_attempts":compact,"expected_children":expected_children(did),
+        "ownership_items":_artifact_items(leaf.get("owned_artifacts","")),
+        "failed_attempts":compact,
         "generation":1,
     }
     tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2)+"\n"); os.replace(tmp,path)
@@ -239,6 +268,8 @@ def validate_split_proposal(parent, proposals):
             raise ValueError("child ownership must be disjoint and inside parent ownership")
         seen |= owned
         sibling=proposal.get("depends_on_sibling", "")
+        if index == 1 and sibling == expected[0]:
+            sibling = "first"
         if sibling not in ("", "first") or (sibling == "first" and index != 1):
             raise ValueError("only second child may depend on first child")
         child=dict(leaf)
@@ -328,15 +359,55 @@ def claim_splitter(parent, dispatch_token):
     log(f"SPLITTER_CLAIM parent={parent} generation=1 token={dispatch_token}")
     return True,"claimed"
 
-def complete_splitter(parent, session=""):
-    """Completion callback: process proposal now, not on a later root cycle."""
-    return process_split_proposal(parent,session,require_proposal=True)
+def parse_splitter_final_json(text):
+    text=(text or "").strip()
+    if text.startswith("```"):
+        text=re.sub(r"^```(?:json)?\s*","",text,flags=re.I)
+        text=re.sub(r"\s*```$","",text)
+    try:
+        obj=json.loads(text)
+        return obj if isinstance(obj,dict) else None
+    except Exception:
+        pass
+    a=text.find("{"); b=text.rfind("}")
+    if a>=0 and b>a:
+        try:
+            obj=json.loads(text[a:b+1])
+            return obj if isinstance(obj,dict) else None
+        except Exception:
+            pass
+    return None
 
+def complete_splitter(parent, session=""):
+    """Completion callback: supervisor persists validated final JSON.
+
+    Preferred protocol: splitter reads the request once and returns one JSON
+    object in its final assistant text. Legacy split-proposal files remain
+    accepted for crash/backward compatibility.
+    """
+    if split_proposal_path(parent).exists():
+        return process_split_proposal(parent,session,require_proposal=True)
+    if not split_request_path(parent).exists():
+        return False,"split-request-missing"
+    payload=parse_splitter_final_json(last_assistant_text_db(session)) if session else None
+    if not isinstance(payload,dict):
+        save_split_status(parent,"splitter-failed",session=session,
+                          reason="splitter-completed-without-json-proposal")
+        return False,"splitter-completed-without-json-proposal"
+    path=split_proposal_path(parent)
+    tmp=path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload,indent=2)+"\n")
+    os.replace(tmp,path)
+    log(f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} session={session}")
+    return process_split_proposal(parent,session,require_proposal=True)
 def reconcile_split_proposals():
     """Crash-recovery reconciliation for proposal files already on disk."""
     if not PROJECT: return
     for request in (Path(PROJECT)/".opencode-v2"/"work").glob("D*.split-request.json"):
         did=request.name.removesuffix(".split-request.json")
+        status=load_split_status(did)
+        if status.get("state") in {"split-validation-failed","splitter-failed"}:
+            continue
         if split_proposal_path(did).exists(): process_split_proposal(did)
 
 def record_leaf_failure(did, reason, classification="genuine"):
@@ -454,20 +525,70 @@ def planner_retirement_reason(sid,elapsed,plan_path=None):
     return planner_progress_reason(sid,elapsed,plan_path)
 
 def owned_artifact_paths(leaf):
+    """Return every path-like ownership item without swallowing later entries.
+
+    Ownership fields are planner prose, commonly like:
+      `package.json`, `server.js`, `public/sample.txt` (description)
+    or:
+      `.opencode-v2/work/D001.md`; scratch under `/tmp/opencode/d001/` only.
+
+    The old V2.6.9 parser used a start-of-string "bullet" match and, once it
+    found that first item, discarded all later backtick spans.  That made
+    sibling/concurrency ownership and recursive split validation incorrect.
+    """
     raw=leaf.get("owned_artifacts","") if isinstance(leaf,dict) else ""
     if not isinstance(raw,str): return []
-    # Guard JSON retains the planner's human-readable field.  Prefer exact
-    # Markdown code spans so trailing sentence punctuation and prose such as
-    # "update of" never become fictional filesystem paths.
-    code_spans=re.findall(r"`([^`]+)`",raw)
-    values=code_spans if code_spans else raw.split(",")
+
+    def normalize(value):
+        original=value.strip().strip("`").rstrip(".,;:")
+        if not original or original.lower() in {"-","—","none","n/a"}: return ""
+        # Backticked command fragments such as `node server.js` are not paths.
+        if any(ch.isspace() for ch in original): return ""
+        if any(char in original for char in "*?[]{}|<>"): return ""
+        # A ./foo token inside a descriptive parenthetical is normally an
+        # import specifier, not a separately owned artifact.  Planner-owned
+        # project files are canonicalized without leading ./.
+        if original.startswith("./"): return ""
+        value=original
+        # Accept absolute paths, relative paths/directories, and ordinary
+        # filenames with an extension.  Reject labels like `start` / `test`.
+        pathlike=(value.startswith("/") or "/" in value or
+                  re.search(r"\.[A-Za-z0-9]{1,12}$", value) is not None)
+        return value if pathlike else ""
+
+    candidates=[]
+    # All backtick spans matter; never switch to a first-match-only mode.
+    for value in re.findall(r"`([^`]+)`", raw):
+        p=normalize(value)
+        if p: candidates.append(p)
+
+    # Splitter proposals may be plain strings rather than Markdown.  Add path
+    # tokens from those strings as a compatibility fallback.
+    if not candidates:
+        for piece in raw.split(","):
+            p=normalize(piece)
+            if p:
+                candidates.append(p)
+                continue
+            # Pull explicit absolute/relative path tokens out of explanatory
+            # prose, e.g. "/tmp/x/probe.js (all scratch under /tmp/x/)".
+            for token in re.findall(r"(?:/[^\s,;()]+|(?:[A-Za-z0-9_.@+~-]+/)+[A-Za-z0-9_.@+~-]+/?)", piece):
+                p=normalize(token)
+                if p: candidates.append(p)
+
+    # Preserve order and remove duplicates.
     result=[]
-    for value in values:
-        value=value.strip().strip("`").rstrip(".,;:")
-        if not value or value.lower() in {"-","—","none","n/a"}: continue
-        if any(char in value for char in "*?[]{}"): return []
-        result.append(value)
-    return result
+    for p in candidates:
+        if p not in result: result.append(p)
+
+    # If a directory and one of its descendants are both named, the directory
+    # already represents that ownership.  Collapse the redundant child path.
+    collapsed=[]
+    for p in result:
+        if any(q.endswith("/") and p.startswith(q) and p != q for q in result):
+            continue
+        collapsed.append(p)
+    return collapsed
 
 def ownership_baseline_path(did):
     return Path(PROJECT)/".opencode-v2/work"/f"{did}.ownership-baseline.json"
@@ -495,11 +616,87 @@ def write_ownership_baseline(did):
                                "files":project_fingerprints()},sort_keys=True)+"\n")
     os.replace(tmp,path)
 
-def ownership_violations(did):
-    """Return files changed by this serial leaf outside its declared ownership.
+def session_window(sid):
+    try:
+        con=db_connect()
+        row=con.execute("SELECT time_created,time_idle FROM session_v2 WHERE id=?",(sid,)).fetchone()
+        con.close()
+        if not row: return None
+        start=int(row[0] or 0); end=int(row[1] or int(time.time()*1000))
+        return start,end
+    except Exception:
+        return None
 
-    The baseline is created synchronously by preclaim. Old/manual projects
-    without one remain readable; normal dispatched workers are always checked.
+def session_tool_inputs(sid):
+    """Return only tool INPUTS issued by this session, never tool outputs."""
+    out=[]
+    try:
+        con=db_connect()
+        rows=con.execute("SELECT data FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq",(sid,)).fetchall()
+        con.close()
+        for (raw,) in rows:
+            try: d=json.loads(raw)
+            except Exception: continue
+            for part in d.get("content",[]) if isinstance(d,dict) else []:
+                if not isinstance(part,dict) or part.get("type")!="tool": continue
+                state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                out.append((str(part.get("name") or ""),inp))
+    except Exception:
+        pass
+    return out
+
+def session_explicitly_touched_path(sid,path):
+    """Best-effort proof that THIS worker targeted path in edit/shell input."""
+    if not sid: return False
+    rel=path.lstrip("./")
+    absolute=str(Path(PROJECT)/rel)
+    for name,inp in session_tool_inputs(sid):
+        if name in {"edit","write","apply_patch"}:
+            for key in ("path","file","filePath","filename"):
+                value=inp.get(key)
+                if isinstance(value,str):
+                    value=value.replace("\\","/")
+                    if value==rel or value.endswith("/"+rel) or value==absolute:
+                        return True
+        if name in {"shell","bash"}:
+            command=inp.get("command")
+            if isinstance(command,str) and (rel in command or absolute in command):
+                return True
+    return False
+
+def overlapping_other_owned_paths(sid,did):
+    """Owned paths of implementation sessions whose lifetime overlapped sid."""
+    win=session_window(sid)
+    if not win or not PROJECT: return set()
+    start,end=win; result=set()
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT id,time_created,time_idle FROM session_v2 WHERE parent_id IS NOT NULL AND directory=? AND time_created>=? AND id<>?",
+            (PROJECT,START_MS,sid),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return result
+    leaves=(load_manifest().get("leaves") or {})
+    for other,created,idle in rows:
+        ostart=int(created or 0); oend=int(idle or int(time.time()*1000))
+        if ostart>end or oend<start: continue
+        odid=parse_deliverable(strip_subagent_prefix(first_user_text_db(other)))
+        if not odid or odid==did: continue
+        leaf=leaves.get(odid)
+        if not isinstance(leaf,dict): continue
+        result.update(owned_artifact_paths(leaf))
+    return result
+
+def ownership_violations(did,sid=""):
+    """Return changes attributable to this leaf outside declared ownership.
+
+    Whole-project snapshots are retained, but files owned by a genuinely
+    overlapping sibling are not blamed on this worker unless this worker's own
+    tool INPUT explicitly targeted that path. This preserves parallel waves
+    without the gametestNew4 cross-agent false-positive failure mode.
     """
     try:
         baseline=json.loads(ownership_baseline_path(did).read_text())
@@ -513,10 +710,18 @@ def ownership_violations(did):
     allowed=owned_artifact_paths(leaf)+[f".opencode-v2/work/{did}.progress.md"]
     after=project_fingerprints(); changed=set(before)^set(after)
     changed.update(path for path in set(before)&set(after) if before[path]!=after[path])
-    def owned(path):
-        return any(path==item or path.startswith(item.rstrip("/")+"/") for item in allowed)
-    return sorted(path for path in changed if not owned(path))
-
+    sibling_owned=overlapping_other_owned_paths(sid,did) if sid else set()
+    def inside(path,items):
+        return any(path==item or path.startswith(item.rstrip("/")+"/") for item in items)
+    violations=[]
+    for path in sorted(changed):
+        if inside(path,allowed):
+            continue
+        if sibling_owned and inside(path,sibling_owned) and not session_explicitly_touched_path(sid,path):
+            log(f"OWNERSHIP_CONCURRENT_EXEMPT session={sid} deliverable={did} path={path}")
+            continue
+        violations.append(path)
+    return violations
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
     """Stop probe read/research loops before their finite OpenCode step budget."""
     if agent!="probe-builder" or not did: return ""
@@ -533,7 +738,7 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
                 f"tool_turns={state['turns']} limit={PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS}")
     return ""
 
-def post_session_finalize(did,runner=subprocess.run):
+def post_session_finalize(did,sid="",runner=subprocess.run):
     """Verify actual owned files, then let the canonical leaf guard create ready."""
     leaf=(load_manifest().get("leaves") or {}).get(did)
     if not leaf or ready_info(did): return False,"not-applicable"
@@ -543,7 +748,7 @@ def post_session_finalize(did,runner=subprocess.run):
         if progress.exists() and progress.stat().st_size:
             return False,"durable-progress-incomplete"
         return False,"owned-artifacts-missing"
-    violations=ownership_violations(did)
+    violations=ownership_violations(did,sid)
     if violations:
         return False,"ownership-violation:"+",".join(violations[:4])
     command=(leaf.get("verify_command") or "").strip()
@@ -1186,6 +1391,25 @@ class OpenCodeHTTP:
         except Exception as e:
             return False,repr(e)
 
+    def steer_session(self,sid,text):
+        """Send another turn to an existing V2 session."""
+        if not self.ensure():
+            return False,"http-not-connected"
+        try:
+            qsid=urllib.parse.quote(sid)
+            self.request(
+                "POST",f"/api/session/{qsid}/prompt",
+                payload={"text":text,"delivery":"steer"},
+                timeout=12,
+            )
+            return True,sid
+        except urllib.error.HTTPError as e:
+            try: detail=e.read().decode("utf-8","replace")[:1000]
+            except Exception: detail=""
+            return False,f"HTTP {e.code}: {detail}"
+        except Exception as e:
+            return False,repr(e)
+
     def start_lessons_session(self,text):
         """Launch lessons outside the verdict-critical root session."""
         return self.start_agent_session("lessons-learner",text)
@@ -1430,6 +1654,131 @@ def enforce_assignment(sid,agent,first_user):
     log(f"DISPATCH_ALLOW session={sid} agent={agent} deliverable={did} attempt={n}")
     csv("DISPATCH_ALLOW",sid,agent,f"{did} attempt={n}")
 
+
+# 20260911 ORIGINAL_TASK_DURABILITY_FIX
+
+ORIGINAL_TASK_BEGIN = "=== ORIGINAL_USER_TASK_BEGIN ==="
+ORIGINAL_TASK_END = "=== ORIGINAL_USER_TASK_END ==="
+
+
+def original_task_path():
+    return Path(PROJECT) / ".opencode-v2" / "ORIGINAL_TASK.md"
+
+
+def extract_original_task(text):
+    """Extract only the real $ARGUMENTS payload from /oneshot-v2."""
+    if not text:
+        return ""
+
+    text = str(text)
+
+    a = text.find(ORIGINAL_TASK_BEGIN)
+    if a >= 0:
+        a += len(ORIGINAL_TASK_BEGIN)
+        b = text.find(ORIGINAL_TASK_END, a)
+
+        if b >= 0:
+            return text[a:b].strip()
+
+    # Backward-compatible fallback for a root started before this patch.
+    # Never persist one of our own continuation prompts as the user's task.
+    stripped = text.strip()
+
+    bad = (
+        "Continue orchestration for this project.",
+        "Continue implementation planning for this project.",
+    )
+
+    if any(stripped.startswith(x) for x in bad):
+        return ""
+
+    return stripped
+
+
+def ensure_original_task(sid):
+    """
+    Persist the original task exactly once.
+
+    Once ORIGINAL_TASK.md contains a non-empty task it is immutable for this
+    run. Root rollover sessions may read it but never replace it.
+    """
+    if not PROJECT or not sid:
+        return False
+
+    path = original_task_path()
+
+    try:
+        if path.exists() and path.read_text(errors="replace").strip():
+            return True
+    except Exception:
+        pass
+
+    raw = first_user_text_db(sid)
+    task = extract_original_task(raw)
+
+    if not task:
+        log(
+            f"ORIGINAL_TASK_CAPTURE_MISSING session={sid} "
+            f"project={PROJECT}"
+        )
+        csv(
+            "ORIGINAL_TASK_CAPTURE_MISSING",
+            sid,
+            "orchestrator",
+            PROJECT,
+        )
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(task.rstrip() + "\n")
+    os.replace(tmp, path)
+
+    log(
+        f"ORIGINAL_TASK_CAPTURED session={sid} "
+        f"chars={len(task)} path={path}"
+    )
+    csv(
+        "ORIGINAL_TASK_CAPTURED",
+        sid,
+        "orchestrator",
+        f"chars={len(task)} path={path}",
+    )
+
+    return True
+
+
+
+# V2.6.9 SAME_ROOT_AUTOCONTINUE
+ROOT_SAME_SESSION_CONTINUATION_PROMPT="""Continue the canonical V2 pipeline from the current durable state.
+
+Read .opencode-v2/ORIGINAL_TASK.md for the durable original goal. Do not treat
+this continuation message as a new project task.
+
+Do not regenerate ACCEPTANCE.md or IMPLEMENTATION_PLAN.md if their current
+ready/guard state is already valid.
+
+Use .opencode-v2/bin/control-status and supervisor-owned durable artifacts as
+authoritative scheduler state. Child prose such as NOT READY, suggested retry,
+or suggested splitting is advisory only.
+
+Never invoke task-splitter unless authoritative durable state requires a
+recursive split for that exact Dxxx AND
+.opencode-v2/work/Dxxx.split-request.json exists.
+
+If a splitter claim is denied with split-request-missing, the orchestration
+decision was stale: re-read control-status and continue the action selected by
+durable state. Do not stop merely because a child returned, a dispatch was
+denied, compaction happened, or a tool call was refused.
+
+Continue automatically until exact ACCEPTANCE_PASS or a genuine terminal
+blocked phase.
+"""
+
+root_nudged_messages=set()
+root_same_session_idle_since=None
+ROOT_SAME_SESSION_IDLE_GRACE=3.0
+
 def root_orchestrator_id():
     if not PROJECT: return ""
     try:
@@ -1449,12 +1798,103 @@ def record_root_restart(sid,phase):
     temp.write_text(json.dumps({"owner":"supervisor","count":count,"latest_session":sid,"phase":phase},indent=2)+"\n")
     os.replace(temp,path)
 
+
+def maybe_nudge_idle_root(active_sids,child_active):
+    """Resume an idle completed root while durable work is still pending."""
+    global root_same_session_idle_since
+
+    if not PROJECT or child_active:
+        root_same_session_idle_since=None
+        return False
+
+    root=root_orchestrator_id()
+    if not root:
+        root_same_session_idle_since=None
+        return False
+
+    # Preserve the original user task before any automatic continuation.
+    if not ensure_original_task(root):
+        root_same_session_idle_since=None
+        return False
+
+    state=state_snapshot(PROJECT)
+    phase=state.get("resume_phase")
+    if phase=="complete" or phase in {"implementation-blocked","execution-blocked"}:
+        root_same_session_idle_since=None
+        return False
+
+    info=http.get_session(root)
+    shape=message_shape(http.get_messages(root),info)
+
+    # A running tool or unfinished assistant turn is not idle.
+    if shape.get("tool_running") or not shape.get("assistant_completed"):
+        root_same_session_idle_since=None
+        return False
+
+    message_id=shape.get("message_id") or ""
+    if not message_id:
+        return False
+
+    # At most one auto-continuation for each completed assistant message.
+    if message_id in root_nudged_messages:
+        return False
+
+    if root_same_session_idle_since is None:
+        root_same_session_idle_since=time.time()
+        return False
+
+    if time.time()-root_same_session_idle_since < ROOT_SAME_SESSION_IDLE_GRACE:
+        return False
+
+    ok,detail=http.steer_session(root,ROOT_SAME_SESSION_CONTINUATION_PROMPT)
+    if not ok:
+        log(f"ROOT_SAME_SESSION_NUDGE_FAILED session={root} phase={phase} detail={detail}")
+        root_same_session_idle_since=time.time()
+        return False
+
+    root_nudged_messages.add(message_id)
+    root_same_session_idle_since=None
+    log(f"ROOT_SAME_SESSION_NUDGE session={root} phase={phase} message={message_id}")
+    csv("ROOT_SAME_SESSION_NUDGE",root,"orchestrator",f"phase={phase} message={message_id}")
+    return True
+
+
 def maybe_continue_root(active_sids,child_active):
     """Replace only a terminated root; never copy its conversation or child prose."""
     global root_idle_since
-    if not PROJECT or child_active: root_idle_since=None; return False
+
+    if not PROJECT:
+        root_idle_since=None
+        return False
+
     root=root_orchestrator_id()
-    if not root or root in active_sids: root_idle_since=None; return False
+
+    # Capture the real user task as soon as we can see the root session.
+    # This happens before any rollover and even while a child is active.
+    task_ok=True
+    if root:
+        task_ok=ensure_original_task(root)
+
+    if child_active:
+        root_idle_since=None
+        return False
+
+    if not root or root in active_sids:
+        root_idle_since=None
+        return False
+
+    # Fail closed. Never launch a generic continuation root unless the real
+    # user request has already been made durable.
+    if not task_ok:
+        log(f"ROOT_CONTINUATION_BLOCKED original_task_missing root={root}")
+        csv(
+            "ROOT_CONTINUATION_BLOCKED",
+            root,
+            "orchestrator",
+            "original_task_missing",
+        )
+        root_idle_since=None
+        return False
     state=state_snapshot(PROJECT); phase=state.get("resume_phase")
     if phase=="complete": return False
     if phase in {"implementation-blocked","execution-blocked"}:
@@ -1594,7 +2034,13 @@ def api_poll_loop():
 
                 agent=shape["agent"]
                 parent=shape["parent"]
-                child_active=child_active or bool(parent)
+                child_active=child_active or (
+                    bool(parent)
+                    and (
+                        shape.get("tool_running")
+                        or not shape.get("assistant_completed")
+                    )
+                )
                 if (agent=="orchestrator" and not parent and
                     isinstance(shape.get("context_input"),(int,float)) and
                     shape["context_input"]>=ROOT_CONTEXT_INPUT_CEILING and
@@ -1718,7 +2164,9 @@ def api_poll_loop():
                 sid,context_input=root_context_candidate
                 abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
             stop_inactive_event_watches(active)
-            maybe_continue_root(active,child_active)
+            nudged=maybe_nudge_idle_root(active,child_active)
+            if not nudged:
+                maybe_continue_root(active,child_active)
             maybe_launch_lessons(active,child_active)
             merge_lesson_candidates()
 
@@ -1765,7 +2213,7 @@ def persisted_reconcile_loop():
                             if execution:
                                 consume_operator_reservation(sid,did,execution)
                         if not ready_info(did) and not (infrastructure_reason and not durable_worker_execution(did)):
-                            ok,detail=post_session_finalize(did)
+                            ok,detail=post_session_finalize(did,sid=sid)
                             log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
                             csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
                             if not ok and detail != "not-applicable":

@@ -2,7 +2,7 @@
 description: Disposable core worker for ONE source/domain artifact.
 mode: subagent
 model: syv/qwen38-worker-nothink
-steps: 10
+steps: 16
 permission:
   read: allow
   edit:

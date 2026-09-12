@@ -2,7 +2,7 @@
 description: Small write-capable dependency/API/environment probe builder that freezes verified contracts for downstream leaves.
 mode: subagent
 model: syv/qwen38-worker-nothink
-steps: 18
+steps: 24
 permission:
   read: allow
   edit:
@@ -88,3 +88,21 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- V2.6.9 PROBE DURABILITY RULE BEGIN -->
+## Probe durability rule
+
+The required probe artifact is more important than exhaustive investigation.
+
+- By tool turn 4 at the latest, WRITE/UPDATE the required primary owned probe
+  artifact with every fact known so far, even if some entries are still marked
+  unknown.
+- After the primary artifact exists, use remaining turns only for facts needed
+  by the leaf's Verify command or Done when criteria.
+- Optional dependency packaging/vendor-layout experiments come after the
+  required notes artifact exists and must not prevent completion.
+- If an optional dependency path becomes troublesome, record the verified
+  fallback decision in the owned notes artifact and proceed.
+- Reserve enough turns for Verify and the final
+  `.opencode-v2/bin/leaf-complete Dxxx` call.
+<!-- V2.6.9 PROBE DURABILITY RULE END -->

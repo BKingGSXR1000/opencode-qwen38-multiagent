@@ -220,3 +220,41 @@ patterns.
   use direct `read`; use `.opencode-v2/bin/control-status` for the derived
   project dashboard. Do not attempt unavailable tools.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- V2 SAME-ROOT DURABLE AUTHORITY BEGIN -->
+## Durable scheduler authority
+
+When executing the canonical V2 pipeline:
+
+- `.opencode-v2/bin/control-status` plus supervisor-owned durable control files
+  are authoritative for scheduler state.
+- Child prose such as `NOT READY`, "retry", or "split this" is advisory only.
+- Do not dispatch `task-splitter` unless authoritative state requires a
+  recursive split for that exact parent AND
+  `.opencode-v2/work/Dxxx.split-request.json` exists.
+- `SPLIT_DENY ... reason=split-request-missing` means the split decision was
+  stale. Re-read `control-status` and continue the canonical action it selects.
+- Do not terminate a root turn merely because a child returned NOT READY, a
+  tool/dispatch was denied, or compaction completed. Continue until exact
+  `ACCEPTANCE_PASS` or a genuine terminal blocked phase.
+- If ACCEPTANCE.md and IMPLEMENTATION_PLAN.md are already valid/finalized,
+  preserve them during continuation.
+<!-- V2 SAME-ROOT DURABLE AUTHORITY END -->
+
+<!-- V2.6.9 EXACT DELIVERABLE HANDOFF BEGIN -->
+## Exact deliverable handoff
+
+Every implementation child prompt must use the concrete canonical ID in ALL
+five lines. Never send the literal placeholder `Dxxx` to a child.
+
+For deliverable D042 the exact shape is:
+
+DELIVERABLE: D042
+Read your D042 section in .opencode-v2/IMPLEMENTATION_PLAN.md.
+Read .opencode-v2/work/D042.progress.md if present.
+Inspect your owned project artifacts as they currently exist.
+Continue from actual filesystem state and execute the deliverable.
+
+Substitute only the actual canonical ID. The supervisor rejects placeholder or
+model-derived variants before the child starts.
+<!-- V2.6.9 EXACT DELIVERABLE HANDOFF END -->

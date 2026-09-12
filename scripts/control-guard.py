@@ -41,6 +41,7 @@ WRITE_ROLES = {
 }
 
 ALIASES = {
+    "outcome": ("Outcome",),
     "owned_artifacts": ("Owned artifacts", "Owned artifacts / files", "Owned files"),
     "launch_deps": ("Launch deps", "Launch deps / depends_on", "Depends on"),
     "contract_deps": ("Contract deps",),
@@ -83,17 +84,90 @@ def role_can_write(role: str):
         return False
     return True
 
+# V2.6.9 MULTILINE_PLAN_FIELD_FIX
 def field(section: str, names):
+    """Read one plan metadata field, including indented continuation lines.
+
+    Planner Markdown frequently wraps long values such as Owned artifacts and
+    Done when. The old regex captured only the first physical line, silently
+    truncating the machine manifest and causing false ownership violations.
+    """
     if isinstance(names, str):
         names = (names,)
-    for name in names:
-        m = re.search(
-            rf"(?im)^\s*(?:-\s*)?{re.escape(name)}\s*:\s*(.+?)\s*$",
-            section,
-        )
-        if m:
-            return m.group(1).strip()
+
+    all_aliases = tuple(
+        alias
+        for aliases in ALIASES.values()
+        for alias in aliases
+    )
+    next_field_re = re.compile(
+        r"^\s*(?:-\s*)?(?:"
+        + "|".join(re.escape(alias) for alias in all_aliases)
+        + r")\s*:\s*",
+        re.I,
+    )
+
+    lines = section.splitlines()
+    for i, line in enumerate(lines):
+        for name in names:
+            m = re.match(
+                rf"^\s*(?:-\s*)?{re.escape(name)}\s*:\s*(.*)$",
+                line,
+                re.I,
+            )
+            if not m:
+                continue
+
+            parts = []
+            first = m.group(1).strip()
+            if first:
+                parts.append(first)
+
+            for cont in lines[i + 1:]:
+                if not cont.strip():
+                    break
+                if re.match(r"^\s*#{1,6}\s+", cont):
+                    break
+                if next_field_re.match(cont):
+                    break
+                if not re.match(r"^\s+\S", cont):
+                    break
+                parts.append(cont.strip())
+
+            return " ".join(parts).strip()
+
     return ""
+
+def plan_artifact_paths(raw: str):
+    """Extract actual owned paths without nested command/import code spans."""
+    if not isinstance(raw,str): return []
+    bullet_spans=re.findall(r"(?:^|\s-\s)`([^`]+)`",raw)
+    values=bullet_spans if bullet_spans else (re.findall(r"`([^`]+)`",raw) or raw.split(","))
+    out=[]
+    for value in values:
+        value=value.strip().strip("`").rstrip(".,;:")
+        if value.startswith("./"): value=value[2:]
+        if not value or any(ch.isspace() for ch in value): continue
+        if any(ch in value for ch in "*?[]{}"): continue
+        if value not in out: out.append(value)
+    return out
+
+def referenced_paths(raw: str):
+    """Project-looking file paths explicitly named in backticks."""
+    out=[]
+    for value in re.findall(r"`([^`]+)`",raw or ""):
+        value=value.strip().rstrip(".,;:")
+        if value.startswith("./"): value=value[2:]
+        if not value or any(ch.isspace() for ch in value): continue
+        if value.startswith(("http://","https://","/tmp/")): continue
+        base=value.rstrip("/").rsplit("/",1)[-1]
+        if "." not in base and not value.startswith(".opencode-v2/"):
+            continue
+        if value not in out: out.append(value)
+    return out
+
+def path_is_within(path: str, owned):
+    return any(path==x or path.startswith(x.rstrip("/")+"/") for x in owned)
 
 def parse_waves(text: str):
     # Accept normal and numbered Markdown headings, e.g.
@@ -149,6 +223,7 @@ def parse_plan(text: str):
         leaf = {
             "id": did,
             "name": name,
+            "outcome": vals["outcome"],
             "owned_artifacts": vals["owned_artifacts"],
             "launch_deps": deps(vals["launch_deps"]),
             "contract_deps": deps(vals["contract_deps"]),
@@ -240,6 +315,46 @@ def parse_plan(text: str):
             if dep in waves and waves[dep] >= waves[did]:
                 errors.append(
                     f"{did}: Launch dep {dep} wave {waves[dep]} is not earlier than wave {waves[did]}"
+                )
+
+    # plan path ownership consistency
+    owners={}
+    for owner_id, owner_leaf in leaves.items():
+        for path in plan_artifact_paths(owner_leaf.get("owned_artifacts","")):
+            owners.setdefault(path,[]).append(owner_id)
+
+    def dependency_closure(did):
+        seen=set(); stack=[]
+        for kind in ("launch_deps","contract_deps","verify_deps"):
+            stack.extend(leaves[did].get(kind,[]))
+        while stack:
+            dep=stack.pop()
+            if dep in seen or dep not in leaves: continue
+            seen.add(dep)
+            for kind in ("launch_deps","contract_deps","verify_deps"):
+                stack.extend(leaves[dep].get(kind,[]))
+        return seen
+
+    for did, leaf in leaves.items():
+        own=plan_artifact_paths(leaf.get("owned_artifacts",""))
+        depset=dependency_closure(did)
+        # Done-when is a hard completion obligation. Verify commands are also
+        # hard machine obligations. If either names another leaf's artifact,
+        # that owner must be an explicit/transitive dependency.
+        refs=[]
+        refs += [("Done when",p) for p in referenced_paths(leaf.get("done_when",""))]
+        refs += [("Verify command",p) for p in referenced_paths(leaf.get("verify_command",""))]
+        for source,path in refs:
+            if path_is_within(path,own): continue
+            matching=[]
+            for owned_path, owner_ids in owners.items():
+                if path==owned_path or path.startswith(owned_path.rstrip("/")+"/"):
+                    matching.extend(owner_ids)
+            matching=[x for x in matching if x!=did]
+            if matching and not any(x in depset for x in matching):
+                errors.append(
+                    f"{did}: {source} requires `{path}` owned by {','.join(sorted(set(matching)))}, "
+                    "but that owner is not a declared dependency"
                 )
 
     test_leaves = [
@@ -436,7 +551,32 @@ def selftest():
 """
             _, _, errors = parse_plan(valid)
             assert not errors, errors
+            # MULTILINE_PLAN_FIELD_REGRESSION
+            multiline = valid.replace(
+                "- Owned artifacts / files: app.js",
+                "- Owned artifacts / files: app.js,\n"
+                "  server/index.js,\n"
+                "  public/index.html",
+                1,
+            )
+            multi_leaves, _, multi_errors = parse_plan(multiline)
+            assert not multi_errors, multi_errors
+            multi_owned = multi_leaves["D001"]["owned_artifacts"]
+            assert "server/index.js" in multi_owned, multi_owned
+            assert "public/index.html" in multi_owned, multi_owned
             assert reference_policy("## Reference policy: internal") == "internal"
+            # PLAN_OWNERSHIP_DEP_REGRESSION
+            contradiction = valid.replace(
+                "- Done when: app exists",
+                "- Done when: app exists and serves `tests.js`",
+                1,
+            ).replace(
+                "- Owned artifacts / files: .opencode-v2/TEST_CHECKS.json",
+                "- Owned artifacts / files: .opencode-v2/TEST_CHECKS.json, `tests.js`",
+                1,
+            )
+            _, _, contradiction_errors = parse_plan(contradiction)
+            assert any("not a declared dependency" in e for e in contradiction_errors), contradiction_errors
 
             styled = valid.replace("- Wave 1: D001", "* **Wave 1**: D001")
             _, _, styled_errors = parse_plan(styled)

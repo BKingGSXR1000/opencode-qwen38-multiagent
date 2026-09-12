@@ -7,7 +7,7 @@
       "name": "SYV Qwen3.8-27B RTX3090 MTP",
       "package": "@opencode-ai/ai/providers/openai-compatible",
       "settings": {
-        "baseURL": "http://127.0.0.1:18030/v1",
+        "baseURL": "http://127.0.0.1:18033/v1",
         "apiKey": "{env:VLLM_API_KEY}"
       },
       "models": {
@@ -70,7 +70,8 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": true,
-              "preserve_thinking": false
+              "preserve_thinking": false,
+              "reasoning_effort": "medium"
             }
           },
           "settings": {
@@ -95,9 +96,11 @@
           },
           "body": {
             "chat_template_kwargs": {
+              "reasoning_effort": "low",
               "enable_thinking": true,
-              "preserve_thinking": true
-            }
+              "preserve_thinking": false
+            },
+            "reasoning_effort": "low"
           },
           "settings": {
             "reasoningEffort": "low"
@@ -121,9 +124,11 @@
           },
           "body": {
             "chat_template_kwargs": {
+              "reasoning_effort": "low",
               "enable_thinking": true,
-              "preserve_thinking": true
-            }
+              "preserve_thinking": false
+            },
+            "reasoning_effort": "low"
           },
           "settings": {
             "reasoningEffort": "low"
@@ -148,7 +153,7 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": false,
-              "preserve_thinking": true
+              "preserve_thinking": false
             }
           }
         },
@@ -171,7 +176,7 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": false,
-              "preserve_thinking": true
+              "preserve_thinking": false
             }
           }
         },
@@ -194,7 +199,8 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": true,
-              "preserve_thinking": true
+              "preserve_thinking": true,
+              "reasoning_effort": "medium"
             }
           },
           "settings": {
@@ -220,7 +226,7 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": false,
-              "preserve_thinking": true
+              "preserve_thinking": false
             }
           }
         },
@@ -243,7 +249,7 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": false,
-              "preserve_thinking": true
+              "preserve_thinking": false
             }
           }
         },
@@ -266,8 +272,10 @@
           "body": {
             "chat_template_kwargs": {
               "enable_thinking": true,
-              "preserve_thinking": true
-            }
+              "preserve_thinking": false,
+              "reasoning_effort": "medium"
+            },
+            "reasoning_effort": "medium"
           },
           "settings": {
             "reasoningEffort": "medium"
@@ -291,9 +299,14 @@
           },
           "body": {
             "chat_template_kwargs": {
-              "enable_thinking": false,
-              "preserve_thinking": false
-            }
+              "enable_thinking": true,
+              "preserve_thinking": false,
+              "reasoning_effort": "medium"
+            },
+            "reasoning_effort": "medium"
+          },
+          "settings": {
+            "reasoningEffort": "medium"
           }
         }
       }
