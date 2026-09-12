@@ -40,7 +40,7 @@ ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
-event_watch={}; event_threads={}; planner_checkpoints={}; post_finalize_seen=set(); worker_progress={}
+event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
@@ -2528,6 +2528,31 @@ def persisted_reconcile_loop():
                 prompt=first_user_text_db(sid)
                 if (agent in IMPLEMENTATION_AGENTS or parse_deliverable(strip_subagent_prefix(prompt))) and sid not in dispatch_seen:
                     enforce_assignment(sid,agent,prompt)
+                if agent=="implementation-planner" and time_idle and sid not in planner_completion_seen:
+                    planner_completion_seen.add(sid)
+                    if not plan_ready():
+                        current_plan=planner_plan_state(
+                            Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
+                        )
+                        # Only count an ordinarily-completed planner as an
+                        # unsuccessful restart when the durable plan still has
+                        # zero Dxxx structure. A productive partial plan is a
+                        # valid progressive handoff and is not penalized here.
+                        if not current_plan.get("meaningful_signature"):
+                            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                                record_planner_restart(
+                                    sid,
+                                    "planner_completed_without_meaningful_plan_progress",
+                                )
+                            log(
+                                f"PLANNER_COMPLETED_NO_PROGRESS session={sid} "
+                                f"restart_count={planner_restart_count()}"
+                            )
+                            csv(
+                                "PLANNER_COMPLETED_NO_PROGRESS",sid,agent,
+                                f"restart_count={planner_restart_count()}",
+                            )
+
                 if agent in IMPLEMENTATION_AGENTS and time_idle and sid not in post_finalize_seen:
                     post_finalize_seen.add(sid)
                     did=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))[0]

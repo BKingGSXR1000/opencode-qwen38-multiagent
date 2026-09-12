@@ -31,14 +31,27 @@ Read:
 - `.opencode-v2/LESSONS_LEARNED.md` when present
 - `.opencode-v2/REFERENCE_FOUNDATION.md` only when Reference policy is external-required
 
-EXTERNAL-REFERENCE HARD GATE:
+EXTERNAL-REFERENCE FOUNDATION GATE:
 Before making ANY edit to `IMPLEMENTATION_PLAN.md`, inspect Reference policy in
 `ACCEPTANCE.md`. If it is `external-required`:
+- direct-read `.opencode-v2/reference-gate.json`;
 - direct-read `.opencode-v2/REFERENCE_FOUNDATION.md`;
 - direct-read `.opencode-v2/acceptance/reference-evidence.json`;
-- require top-level `"result": "READY"`.
-If either file is missing, malformed, `PARTIAL`, or otherwise not READY, return
-exactly `REFERENCE_NOT_READY` and STOP without changing the plan.
+- require `reference-gate.json` phase=`foundation` and state=`ready`;
+- require top-level `foundation_result` in `reference-evidence.json` to be
+  `READY`;
+- require `REFERENCE_FOUNDATION.md` to contain the durable
+  `REFERENCE_FOUNDATION_READY` marker.
+
+IMPORTANT TWO-PHASE RULE:
+The evidence file's top-level `result` is EXPECTED to remain `PARTIAL` during
+implementation planning. Full `result=READY` belongs to the later validation
+phase and MUST NOT block planning or implementation.
+
+If the FOUNDATION gate is not ready, return exactly `REFERENCE_NOT_READY` and
+STOP without changing the plan. If the foundation is ready, proceed immediately
+with progressive implementation planning even when validation evidence is still
+PARTIAL.
 
 Use the available `write` or `edit` tool to create or modify only:
 `.opencode-v2/IMPLEMENTATION_PLAN.md`
