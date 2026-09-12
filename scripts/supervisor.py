@@ -17,9 +17,10 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
-MAX_REFERENCE_SESSIONS=12
+MAX_REFERENCE_FOUNDATION_SESSIONS=2
+MAX_REFERENCE_VALIDATION_SESSIONS=8
 MAX_REFERENCE_STAGNANT_SESSIONS=2
-MAX_REFERENCE_COMPACTIONS=2
+MAX_REFERENCE_COMPACTIONS=1
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
 # file-existence deadline (150.4-150.5s) without a first write.  The successful
@@ -893,7 +894,8 @@ def durable_progress_signature(agent,did=""):
         ctrl=Path(PROJECT)/".opencode-v2"
         paths=[
             ctrl/"acceptance"/"reference-evidence.json",
-            ctrl/"acceptance"/"reference-fixtures.json",
+            ctrl/"acceptance"/"reference-work.json",
+            ctrl/"acceptance"/"reference-items",
             ctrl/"REFERENCE_FOUNDATION.md",
         ]
     elif did:
@@ -1869,6 +1871,28 @@ def record_root_restart(sid,phase):
 
 
 # V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
+REFERENCE_FOUNDATION_MARKER="<!-- REFERENCE_FOUNDATION_READY -->"
+
+
+def reference_session_mode(sid):
+    # Return foundation|validation for a reference-researcher session.
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1",
+            (sid,),
+        ).fetchone()
+        con.close()
+        data=json.loads(row[0]) if row else {}
+        text=str(data.get("text") or "")
+    except Exception:
+        text=""
+    if "REFERENCE_MODE: VALIDATION" in text:
+        return "validation"
+    return "foundation"
+
+
 def reference_session_made_progress(sid):
     # Did this completed reference slice persist authoritative durable state?
     try:
@@ -1909,45 +1933,22 @@ def reference_session_made_progress(sid):
     return False
 
 
-def reference_gate_snapshot():
-    if not PROJECT:
-        return {
-            "state":"not-applicable",
-            "attempts":0,
-            "max_attempts":MAX_REFERENCE_SESSIONS,
-            "productive_sessions":0,
-            "stagnant_tail":0,
-        }
+def _reference_evidence():
+    path=Path(PROJECT)/".opencode-v2/acceptance/reference-evidence.json"
+    if not path.exists():
+        return {}, "MISSING"
+    try:
+        obj=json.loads(path.read_text(errors="replace"))
+        return (obj if isinstance(obj,dict) else {}), "OK"
+    except Exception:
+        return {}, "MALFORMED"
 
-    ctrl=Path(PROJECT)/".opencode-v2"
-    acceptance=ctrl/"ACCEPTANCE.md"
-    text=acceptance.read_text(errors="replace") if acceptance.exists() else ""
-    external=("Reference policy: external-required" in text)
 
-    if not external:
-        return {
-            "state":"not-required",
-            "attempts":0,
-            "max_attempts":MAX_REFERENCE_SESSIONS,
-            "productive_sessions":0,
-            "stagnant_tail":0,
-        }
-
-    evidence_path=ctrl/"acceptance"/"reference-evidence.json"
-    foundation=ctrl/"REFERENCE_FOUNDATION.md"
-
-    result=""
-    if evidence_path.exists():
-        try:
-            obj=json.loads(evidence_path.read_text(errors="replace"))
-            result=str(obj.get("result") or "").upper()
-        except Exception:
-            result="MALFORMED"
-
-    session_rows=[]
+def _reference_sessions(mode):
+    rows=[]
     try:
         con=db_connect()
-        session_rows=con.execute(
+        rows=con.execute(
             "SELECT id,time_idle FROM session_v2 "
             "WHERE agent='reference-researcher' AND directory=? "
             "ORDER BY time_created",
@@ -1956,83 +1957,128 @@ def reference_gate_snapshot():
         con.close()
     except Exception as e:
         log(f"REFERENCE_GATE_DB_ERROR {e!r}")
+    return [r for r in rows if reference_session_mode(r[0])==mode]
 
-    # Active researchers must get a chance to work. Only completed sessions
-    # count against the durable project-wide limits.
-    completed_ids=[sid for sid,time_idle in session_rows if time_idle]
-    active_ids=[sid for sid,time_idle in session_rows if not time_idle]
-    progress_flags=[
-        (sid,reference_session_made_progress(sid))
-        for sid in completed_ids
-    ]
 
-    productive=sum(1 for _,made_progress in progress_flags if made_progress)
-    stagnant_tail=0
-    for _,made_progress in reversed(progress_flags):
-        if made_progress:
+def _reference_progress_stats(mode):
+    rows=_reference_sessions(mode)
+    completed=[sid for sid,time_idle in rows if time_idle]
+    active=[sid for sid,time_idle in rows if not time_idle]
+    flags=[(sid,reference_session_made_progress(sid)) for sid in completed]
+    productive=sum(1 for _,ok in flags if ok)
+    stagnant=0
+    for _,ok in reversed(flags):
+        if ok:
             break
-        stagnant_tail+=1
+        stagnant+=1
+    return completed,active,productive,stagnant
 
-    attempts=len(completed_ids)
-    hard_exhausted=(attempts>=MAX_REFERENCE_SESSIONS)
-    stalled=(stagnant_tail>=MAX_REFERENCE_STAGNANT_SESSIONS)
 
-    ready=(result=="READY" and foundation.exists())
-    state=(
-        "ready"
-        if ready
-        else "blocked"
-        if hard_exhausted or stalled
-        else "pending"
+def reference_gate_snapshot():
+    # PRE-PLANNING gate: only the compact external foundation must be ready.
+    if not PROJECT:
+        return {"state":"not-applicable","attempts":0,
+                "max_attempts":MAX_REFERENCE_FOUNDATION_SESSIONS}
+
+    ctrl=Path(PROJECT)/".opencode-v2"
+    acceptance=ctrl/"ACCEPTANCE.md"
+    text=acceptance.read_text(errors="replace") if acceptance.exists() else ""
+    if "Reference policy: external-required" not in text:
+        return {"state":"not-required","attempts":0,
+                "max_attempts":MAX_REFERENCE_FOUNDATION_SESSIONS}
+
+    evidence,parse_state=_reference_evidence()
+    foundation=ctrl/"REFERENCE_FOUNDATION.md"
+    foundation_text=foundation.read_text(errors="replace") if foundation.exists() else ""
+    foundation_result=str(evidence.get("foundation_result") or "").upper()
+
+    completed,active,productive,stagnant=_reference_progress_stats("foundation")
+    ready=(
+        foundation.exists()
+        and REFERENCE_FOUNDATION_MARKER in foundation_text
+        and foundation_result=="READY"
     )
-
+    hard=len(completed)>=MAX_REFERENCE_FOUNDATION_SESSIONS
+    stalled=stagnant>=MAX_REFERENCE_STAGNANT_SESSIONS
+    state="ready" if ready else "blocked" if (hard or stalled) else "pending"
     return {
+        "phase":"foundation",
         "state":state,
-        "attempts":attempts,
-        "max_attempts":MAX_REFERENCE_SESSIONS,
+        "attempts":len(completed),
+        "max_attempts":MAX_REFERENCE_FOUNDATION_SESSIONS,
         "productive_sessions":productive,
-        "stagnant_tail":stagnant_tail,
-        "max_stagnant_sessions":MAX_REFERENCE_STAGNANT_SESSIONS,
-        "active_sessions":active_ids,
-        "evidence_result":result or "MISSING",
+        "stagnant_tail":stagnant,
+        "active_sessions":active,
+        "foundation_result":foundation_result or parse_state,
         "foundation_present":foundation.exists(),
-        "session_ids":completed_ids[-MAX_REFERENCE_SESSIONS:],
+        "session_ids":completed[-MAX_REFERENCE_FOUNDATION_SESSIONS:],
     }
 
 
-def sync_reference_gate():
-    data=reference_gate_snapshot()
-
-    if not PROJECT or data.get("state") in {
-        "not-applicable",
-        "not-required",
-    }:
-        return data
+def reference_validation_gate_snapshot():
+    # FINAL gate: full independent evidence must be READY before acceptance.
+    if not PROJECT:
+        return {"state":"not-applicable","attempts":0,
+                "max_attempts":MAX_REFERENCE_VALIDATION_SESSIONS}
 
     ctrl=Path(PROJECT)/".opencode-v2"
-    (ctrl/"acceptance").mkdir(parents=True,exist_ok=True)
+    acceptance=ctrl/"ACCEPTANCE.md"
+    text=acceptance.read_text(errors="replace") if acceptance.exists() else ""
+    if "Reference policy: external-required" not in text:
+        return {"state":"not-required","attempts":0,
+                "max_attempts":MAX_REFERENCE_VALIDATION_SESSIONS}
 
-    path=ctrl/"reference-gate.json"
+    evidence,parse_state=_reference_evidence()
+    result=str(evidence.get("result") or "").upper()
+    completed,active,productive,stagnant=_reference_progress_stats("validation")
+    ready=(result=="READY")
+    hard=len(completed)>=MAX_REFERENCE_VALIDATION_SESSIONS
+    stalled=stagnant>=MAX_REFERENCE_STAGNANT_SESSIONS
+    state="ready" if ready else "blocked" if (hard or stalled) else "pending"
+    return {
+        "phase":"validation",
+        "state":state,
+        "attempts":len(completed),
+        "max_attempts":MAX_REFERENCE_VALIDATION_SESSIONS,
+        "productive_sessions":productive,
+        "stagnant_tail":stagnant,
+        "active_sessions":active,
+        "evidence_result":result or parse_state,
+        "session_ids":completed[-MAX_REFERENCE_VALIDATION_SESSIONS:],
+    }
+
+
+def _sync_reference_gate(path,data):
+    if not PROJECT or data.get("state") in {"not-applicable","not-required"}:
+        return data
+    path.parent.mkdir(parents=True,exist_ok=True)
     payload={"owner":"supervisor",**data}
     rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
-
     try:
         if not path.exists() or path.read_text(errors="replace")!=rendered:
             tmp=path.with_suffix(".tmp")
             tmp.write_text(rendered)
             os.replace(tmp,path)
             log(
-                f"REFERENCE_GATE state={data['state']} "
-                f"attempts={data['attempts']} "
-                f"productive={data.get('productive_sessions',0)} "
-                f"stagnant_tail={data.get('stagnant_tail',0)} "
-                f"evidence={data['evidence_result']} "
-                f"foundation={str(data['foundation_present']).lower()}"
+                f"REFERENCE_GATE phase={data.get('phase')} state={data.get('state')} "
+                f"attempts={data.get('attempts',0)} productive={data.get('productive_sessions',0)} "
+                f"stagnant={data.get('stagnant_tail',0)}"
             )
     except Exception as e:
         log(f"REFERENCE_GATE_WRITE_ERROR {e!r}")
-
     return data
+
+
+def sync_reference_gate():
+    data=reference_gate_snapshot()
+    path=Path(PROJECT)/".opencode-v2/reference-gate.json" if PROJECT else Path("/tmp/none")
+    return _sync_reference_gate(path,data)
+
+
+def sync_reference_validation_gate():
+    data=reference_validation_gate_snapshot()
+    path=Path(PROJECT)/".opencode-v2/reference-validation-gate.json" if PROJECT else Path("/tmp/none")
+    return _sync_reference_gate(path,data)
 # V2.6.9 GAMETESTNEW7 REFERENCE GATE END
 
 def maybe_nudge_idle_root(active_sids,child_active):
@@ -2290,19 +2336,23 @@ def api_poll_loop():
                 parent=shape["parent"]
 
                 if agent=="reference-researcher" and parent:
-                    ref_gate=reference_gate_snapshot()
+                    ref_mode=reference_session_mode(sid)
+                    ref_gate=(
+                        reference_validation_gate_snapshot()
+                        if ref_mode=="validation"
+                        else reference_gate_snapshot()
+                    )
                     if ref_gate.get("state")=="blocked":
                         abort_session(
                             sid,
-                            "reference_gate_blocked "
+                            f"reference_{ref_mode}_gate_blocked "
                             f"attempts={ref_gate.get('attempts',0)} "
                             f"stagnant_tail={ref_gate.get('stagnant_tail',0)}",
                             agent,
                         )
                         log(
-                            f"REFERENCE_GATE_ABORT session={sid} "
-                            f"attempts={ref_gate.get('attempts',0)} "
-                            f"stagnant_tail={ref_gate.get('stagnant_tail',0)}"
+                            f"REFERENCE_GATE_ABORT session={sid} mode={ref_mode} "
+                            f"attempts={ref_gate.get('attempts',0)}"
                         )
                         continue
 
@@ -2455,6 +2505,7 @@ def api_poll_loop():
                 abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
             stop_inactive_event_watches(active)
             sync_reference_gate()
+            sync_reference_validation_gate()
             nudged=maybe_nudge_idle_root(active,child_active)
             if not nudged:
                 maybe_continue_root(active,child_active)

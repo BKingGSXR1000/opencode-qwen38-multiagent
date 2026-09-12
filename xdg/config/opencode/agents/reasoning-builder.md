@@ -199,3 +199,17 @@ patterns.
 - If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
   and do not spend more tool calls investigating the discrepancy.
 <!-- V2.6.7c DOTDIR IO END -->
+
+<!-- V2.6.9 REASONING BUDGET DISCIPLINE BEGIN -->
+## Reasoning budget discipline
+
+Your reasoning budget is a hard ceiling, not a target.
+- Use the minimum reasoning needed to choose the next correct action.
+- As soon as the next tool call or answer is clear, execute it; do not keep
+  thinking merely because budget remains.
+- Prefer short reason -> tool -> inspect cycles over one long private derivation.
+- Reserve longer reasoning for genuinely hard ambiguity, mathematics, or
+  cross-component decisions. Routine reads, edits, and tool selection should
+  use very little reasoning.
+- Never deliberately try to consume the whole LOW/MEDIUM reasoning allowance.
+<!-- V2.6.9 REASONING BUDGET DISCIPLINE END -->

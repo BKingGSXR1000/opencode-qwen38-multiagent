@@ -65,37 +65,30 @@ After it returns or is interrupted:
 - wait for the deterministic control guard to create the real sentinel
 - NEVER proceed merely because ACCEPTANCE.md has its marker or the model says ready
 
-REFERENCE STAGE
+REFERENCE STAGE — FOUNDATION ONLY
 Read Reference policy from ACCEPTANCE.md.
 - `internal` or `none`: skip external reference research.
-- `external-required`: this is a HARD durable pre-planning gate.
+- `external-required`: implementation planning waits only for the COMPACT
+  external foundation, not the complete validation fixture library.
   1. Run `.opencode-v2/bin/control-status`, then direct-read
      `.opencode-v2/reference-gate.json`.
-  2. If gate state is `ready`, proceed to implementation planning.
-  3. If gate state is `blocked`, STOP THE CURRENT TURN IMMEDIATELY.
-     Launch NO researcher, NO implementation-planner, and NO repair planner.
-     Do not inspect planner state. Return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
-  4. If gate state is `pending`, launch exactly ONE `reference-researcher`
-     with the short prompt:
-     `Complete the external reference foundation for this project. Read ACCEPTANCE.md and existing reference evidence. Resolve only the remaining external-reference gaps. Persist progress under .opencode-v2/acceptance/, including reference-fixtures.json when numeric fixtures are required, and write REFERENCE_FOUNDATION.md.`
-  5. After that child returns or is interrupted, run control-status again and
-     direct-read `reference-gate.json`. Repeat only while its durable state is
-     `pending`. The supervisor owns the GLOBAL project-wide research gate; a
-     root rollover NEVER resets it. Productive PARTIAL slices are expected and
-     may continue; the supervisor blocks only after its hard completed-session
-     ceiling or repeated completed sessions with no durable reference progress.
-  6. Require BOTH `.opencode-v2/REFERENCE_FOUNDATION.md` and
-     `.opencode-v2/acceptance/reference-evidence.json` with top-level
-     `"result": "READY"` before launching implementation-planner.
-  7. NEVER infer the reference attempt count from conversation history and
-     NEVER launch a researcher after the gate says `blocked`.
+  2. If state is `ready`, immediately proceed to implementation planning.
+  3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
+  4. If state is `pending`, launch exactly ONE `reference-researcher` with:
+     `REFERENCE_MODE: FOUNDATION`
+     `Build/resume only the compact external reference foundation. Do not build validation fixtures. Read reference-work.json if present and resume exactly its in-progress item.`
+  5. After it ends, re-read `reference-gate.json`. Repeat only while `pending`.
+     The supervisor permits at most two completed FOUNDATION sessions total.
+  6. Never require top-level reference evidence `result=READY` before planning;
+     that belongs to final validation. Require only foundation gate `ready`.
 
 PHASE 0.5 — IMPLEMENTATION PLAN
 HARD PRECONDITION: if ACCEPTANCE.md says `Reference policy: external-required`,
 direct-read `.opencode-v2/reference-gate.json` immediately before EVERY
-implementation-planner launch. Its state must be exactly `ready`. If it is
-`pending` or `blocked`, launch no planner and return exactly
-`IMPLEMENTATION_BLOCKED REFERENCE`.
+implementation-planner launch. This is the FOUNDATION gate only. Its state must
+be exactly `ready`; full validation evidence is intentionally completed later.
+If foundation state is `pending` or `blocked`, launch no planner and return
+exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
 
 Before launching ANY implementation-planner (initial, continuation, or repair),
 read `.opencode-v2/work/planner-restarts.json` when present and derive current
@@ -221,6 +214,21 @@ redispatch a ready Dxxx.
 WORKER COMPLETION
 Workers finish through:
 `.opencode-v2/bin/leaf-complete Dxxx`
+
+REFERENCE VALIDATION COMPLETION
+After `.opencode-v2/TEST_REPORT.json` exists with status=pass and before the
+final acceptance-validator:
+
+If ACCEPTANCE.md uses `Reference policy: external-required`:
+1. Direct-read `.opencode-v2/reference-validation-gate.json`.
+2. If state is `ready`, continue to the acceptance-validator.
+3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE_VALIDATION`.
+4. If state is `pending`, launch exactly ONE `reference-researcher` with:
+   `REFERENCE_MODE: VALIDATION`
+   `Resolve exactly one durable validation item. Resume reference-work.json if an item is in progress; otherwise resolve only the first missing external-reference item. Persist it under reference-items/, update compact reference-evidence.json, then return.`
+5. Re-read the validation gate and repeat only while `pending`.
+6. Never ask one researcher to finish the entire remaining truth set. One small
+   item per session makes interruption recovery deterministic.
 
 FINAL
 Require `.opencode-v2/TEST_REPORT.json` with:

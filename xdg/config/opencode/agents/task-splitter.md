@@ -65,3 +65,17 @@ For the second proposal, `depends_on_sibling` may only be the literal string
 `"first"` (or `""` if independent). NEVER emit a derived ID such as D001-A;
 the supervisor alone derives child IDs.
 <!-- V2.6.9 NEW5 SPLITTER STRICTNESS END -->
+
+<!-- V2.6.9 REASONING BUDGET DISCIPLINE BEGIN -->
+## Reasoning budget discipline
+
+Your reasoning budget is a hard ceiling, not a target.
+- Use the minimum reasoning needed to choose the next correct action.
+- As soon as the next tool call or answer is clear, execute it; do not keep
+  thinking merely because budget remains.
+- Prefer short reason -> tool -> inspect cycles over one long private derivation.
+- Reserve longer reasoning for genuinely hard ambiguity, mathematics, or
+  cross-component decisions. Routine reads, edits, and tool selection should
+  use very little reasoning.
+- Never deliberately try to consume the whole LOW/MEDIUM reasoning allowance.
+<!-- V2.6.9 REASONING BUDGET DISCIPLINE END -->
