@@ -208,3 +208,37 @@ creates `Dxxx.ready` only if ownership and verification both pass. This runtime
 policy supersedes the legacy project-contract line telling workers to call
 leaf-complete directly.
 <!-- V2.6.9 SUPERVISOR-OWNED LEAF FINALIZATION END -->
+
+<!-- V2.6.9 EXTERNAL INTERFACE FRESHNESS BEGIN -->
+## External-interface freshness policy
+
+Do **not** rely on model memory as authoritative for an externally maintained
+interface when its exact current contract affects correctness. This applies to
+HTTP/REST/GraphQL APIs, SDK/library APIs, CLI flags, configuration schemas,
+browser/provider interfaces, package-manager commands, and similar contracts.
+
+Before the first correctness-critical use of such an interface in this task:
+1. Locate a current authoritative source: official documentation, official
+   machine-readable schema/OpenAPI, installed `--help`, official type
+   declarations, or official source/docs shipped with the installed version.
+2. Read only the section needed for the intended operation.
+3. Establish the exact endpoint/command, parameter names, value formats,
+   version semantics, and expected response.
+4. Perform the smallest practical documented smoke test before scaling up.
+
+Model memory MAY help locate documentation or form a hypothesis. It MUST NOT be
+the sole evidence for the current interface contract.
+
+Error recovery:
+- On the **first** schema/argument/4xx/unknown-flag contract error, inspect the
+  error and authoritative documentation before altering the request.
+- Do not perform speculative parameter-name, quoting, encoding, endpoint,
+  method, or flag variations unsupported by documentation.
+- If a corrected documented request still fails, investigate the documented
+  contract/environment rather than guessing.
+- After **two contract-related failures**, stop speculative retries, preserve
+  the evidence, and report/record the interface as unresolved or blocking.
+
+Once the exact contract has been verified during the current task, reuse that
+verified contract without rereading the documentation before every call.
+<!-- V2.6.9 EXTERNAL INTERFACE FRESHNESS END -->

@@ -39,6 +39,7 @@ MAX_PLANNER_RESTARTS=3
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
+MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -498,6 +499,20 @@ def normalized_state_snapshot(project):
         return data
 
     leaves=data.get("leaves") if isinstance(data.get("leaves"),dict) else {}
+    active=active_implementation_deliverables()
+    active_ids=set(active)
+    active_count=len(active)
+    data["scheduler"]={
+        "max_concurrent_workers":MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
+        "active_workers":active_count,
+        "available_worker_slots":max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active_count),
+        "active_deliverables":sorted(active_ids),
+    }
+    for did in active_ids:
+        if isinstance(leaves.get(did),dict):
+            leaves[did]["running"]=True
+            leaves[did]["eligible"]=False
+
     clean=[]
     for item in data.get("execution_blockers",[]) if isinstance(data.get("execution_blockers"),list) else []:
         if not isinstance(item,dict):
@@ -506,6 +521,12 @@ def normalized_state_snapshot(project):
         leaf=leaves.get(did) if isinstance(leaves.get(did),dict) else {}
         # New13 regression: control_state emitted attempt_limit_reached for
         # leaves whose own canonical flag was false (often attempts=0).
+        if did in active_ids:
+            log(
+                f"STATE_BLOCKER_EXEMPT_ACTIVE deliverable={did} "
+                f"reason={item.get('reason','')}"
+            )
+            continue
         if item.get("reason")=="attempt_limit_reached" and not leaf.get("attempt_limit_reached",False):
             log(
                 f"STATE_BLOCKER_EXEMPT deliverable={did} reason=attempt_limit_reached "
@@ -518,7 +539,7 @@ def normalized_state_snapshot(project):
     # If the only reason for execution-blocked was the contradictory blocker
     # list and at least one leaf is legally eligible, execution can continue.
     if data.get("resume_phase")=="execution-blocked" and not clean:
-        if any(isinstance(v,dict) and v.get("eligible") for v in leaves.values()):
+        if active_ids or any(isinstance(v,dict) and v.get("eligible") for v in leaves.values()):
             data["resume_phase"]="execution"
     return data
 # V2.6.9 NORMALIZED SCHEDULER STATE END
@@ -1012,19 +1033,19 @@ def reconcile_split_parent_completions():
 # V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION END
 
 def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
-    """Record one bounded non-implementation dispatch without rewriting history.
+    """Record one bounded infrastructure recovery without rewriting history.
 
-    A runtime abort is not automatically free: it receives one recovery credit
-    only when the child has no owned artifact or durable progress.  The raw
-    dispatch/session count remains truthful; the additional slot prevents this
-    non-implementation event from consuming a genuine autonomous attempt.
+    A supervisor/runtime cancellation is infrastructure even when useful
+    partial state already exists. Preserve that state and resume from it.
     """
     if not did or ready_info(did): return False,"already-complete-or-unknown"
     leaf=(load_manifest().get("leaves") or {}).get(did)
     paths=owned_artifact_paths(leaf)
     progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
-    if not paths or any((Path(PROJECT)/path).exists() for path in paths) or progress.exists():
-        return False,"durable-worker-state-present"
+    durable_present=bool(
+        (paths and any((Path(PROJECT)/path).exists() for path in paths))
+        or progress.exists()
+    )
     with dispatch_lock:
         with attempt_lock():
             data=load_attempts()
@@ -1044,7 +1065,8 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
                 "source":"supervisor",
                 "kind":kind,
                 "session":sid,
-                "evidence":"no-owned-artifact-or-progress",
+                "evidence":("durable-partial-state-preserved" if durable_present
+                            else "no-owned-artifact-or-progress"),
                 "reason":reason,
             })
             entry["infrastructure_retry_grants"]=state["infrastructure_retry_grants"]+1
@@ -1123,7 +1145,7 @@ def fallback_no_progress_reason(sid,agent,did,observable,now=None):
     if signature!=state.get("fallback_signature"):
         state["fallback_signature"]=signature; state["fallback_since"]=now; return ""
     state.setdefault("fallback_since",now)
-    limit=600 if agent=="reference-researcher" else 300
+    limit=600 if (agent=="reference-researcher" or agent in IMPLEMENTATION_AGENTS) else 300
     if now-state["fallback_since"]>=limit:
         return f"no_durable_progress_with_invisible_stream={int(now-state['fallback_since'])}s"
     return ""
@@ -1181,10 +1203,41 @@ def validate_dispatch(agent,text):
     if ready_info(did): return did,"already_complete"
     return did,""
 
+# V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER BEGIN
+def active_implementation_sessions():
+    """Return live implementation child sessions for this project."""
+    if not PROJECT:
+        return []
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT id,coalesce(agent,'') FROM session_v2 "
+            "WHERE parent_id IS NOT NULL AND directory=? AND time_idle IS NULL",
+            (PROJECT,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return []
+    return [(sid,agent) for sid,agent in rows if agent in IMPLEMENTATION_AGENTS]
+
+def active_implementation_deliverables():
+    result={}
+    for sid,agent in active_implementation_sessions():
+        did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+        if did:
+            result[did]={"session":sid,"agent":agent}
+    return result
+
+def available_implementation_slots():
+    return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-len(active_implementation_sessions()))
+# V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER END
+
 def preclaim_attempt(agent,text,dispatch_token):
     """Reserve a canonical attempt before OpenCode creates its child session."""
     did,violation=validate_dispatch(agent,text)
     if violation: return "denied",did,violation,0
+    if agent in IMPLEMENTATION_AGENTS and available_implementation_slots() <= 0:
+        return "denied",did,"worker_slots_full",0
     claim,n=claim_attempt(f"dispatch:{dispatch_token}",did)
     if claim in {"claimed","existing"}:
         if claim=="claimed":
@@ -2774,33 +2827,36 @@ def persisted_reconcile_loop():
                         # compaction/runaway retirement has no durable owned
                         # work. It is infrastructure, not a genuine failure,
                         # even if the model made read-only tool calls first.
-                        if (infrastructure_reason and not ready_info(did) and
-                                not durable_worker_execution(did)):
-                            kind=("supervisor-compaction-retire" if "child_compaction" in infrastructure_reason
-                                  else "runtime-cancel")
-                            granted,_=record_infrastructure_abort(sid,did,infrastructure_reason,kind)
-                            record_leaf_failure(did,infrastructure_reason,"infrastructure")
-                            release_operator_reservation(sid,did,infrastructure_reason)
-                            log(f"LEAF_INFRASTRUCTURE_ABORT session={sid} deliverable={did} granted={str(granted).lower()} reason={infrastructure_reason}")
+                        if infrastructure_reason and not ready_info(did):
+                            finalized=False
+                            detail="not-attempted"
+                            if durable_worker_execution(did):
+                                finalized,detail=post_session_finalize(did,sid=sid)
+                                log(f"POST_SESSION_VERIFY_AFTER_INFRA session={sid} deliverable={did} result={detail}")
+                                csv("POST_SESSION_VERIFY_AFTER_INFRA",sid,agent,f"{did} {detail}")
+                            if not finalized and not ready_info(did):
+                                kind=("supervisor-compaction-retire" if "child_compaction" in infrastructure_reason
+                                      else "runtime-cancel")
+                                granted,_=record_infrastructure_abort(sid,did,infrastructure_reason,kind)
+                                record_leaf_failure(did,infrastructure_reason,"infrastructure")
+                                release_operator_reservation(sid,did,infrastructure_reason)
+                                log(f"LEAF_INFRASTRUCTURE_ABORT session={sid} deliverable={did} granted={str(granted).lower()} reason={infrastructure_reason}")
                         else:
                             execution=meaningful_worker_execution(sid,did)
                             if execution:
                                 consume_operator_reservation(sid,did,execution)
-                        if not ready_info(did) and not (infrastructure_reason and not durable_worker_execution(did)):
-                            ok,detail=post_session_finalize(did,sid=sid)
-                            log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
-                            csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
-                            if not ok and detail != "not-applicable":
-                                # Missing guard metadata is a plan defect; all
-                                # other post-work verification outcomes are a
-                                # genuine unfinished implementation attempt.
-                                classification=("bad-plan" if detail in {
-                                    "verify-command-missing", "owned-artifacts-missing"
-                                } and not meaningful_worker_execution(sid,did) else "genuine")
-                                recorded,outcome=record_leaf_failure(did,detail,classification)
-                                if recorded:
-                                    log(f"LEAF_FAILURE session={sid} deliverable={did} classification={classification} outcome={outcome}")
-                                    csv("LEAF_FAILURE",sid,agent,f"{did} classification={classification} outcome={outcome}")
+                            if not ready_info(did):
+                                ok,detail=post_session_finalize(did,sid=sid)
+                                log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
+                                csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
+                                if not ok and detail != "not-applicable":
+                                    classification=("bad-plan" if detail in {
+                                        "verify-command-missing", "owned-artifacts-missing"
+                                    } and not meaningful_worker_execution(sid,did) else "genuine")
+                                    recorded,outcome=record_leaf_failure(did,detail,classification)
+                                    if recorded:
+                                        log(f"LEAF_FAILURE session={sid} deliverable={did} classification={classification} outcome={outcome}")
+                                        csv("LEAF_FAILURE",sid,agent,f"{did} classification={classification} outcome={outcome}")
                 prev=compaction_seen.get(sid,0)
                 if comps<=prev: continue
                 compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
