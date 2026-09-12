@@ -259,3 +259,21 @@ Your reasoning budget is a hard ceiling, not a target.
   use very little reasoning.
 - Never deliberately try to consume the whole LOW/MEDIUM reasoning allowance.
 <!-- V2.6.9 REASONING BUDGET DISCIPLINE END -->
+
+<!-- V2.6.9 PLANNER EXTERNAL-CONTRACT RULE BEGIN -->
+## External contracts in plans
+
+You have no web access and therefore must not invent current external API/SDK/
+CLI/config contracts from model memory.
+
+If implementation correctness depends on an exact externally maintained
+contract, consume a contract already verified by `REFERENCE_FOUNDATION.md` /
+durable project evidence, or create a bounded probe/reference dependency whose
+job is to verify that contract from an authoritative current source. Do not
+freeze guessed endpoint names, parameter names, flags, response schemas, or
+version behavior into downstream leaves.
+
+Also ensure every external artifact that a leaf's **Verify command** requires is
+represented by an appropriate Verify dependency; do not make a worker fail
+verification merely because a producing leaf is still legitimately in flight.
+<!-- V2.6.9 PLANNER EXTERNAL-CONTRACT RULE END -->

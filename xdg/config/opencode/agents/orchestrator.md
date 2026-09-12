@@ -176,6 +176,32 @@ status rather than trusting their prose.
 
 Use planned parallel-safe leaves to obtain useful C2 when possible.
 
+<!-- V2.6.9 THREE-SLOT EXECUTION POLICY BEGIN -->
+## Three-slot implementation scheduler
+
+Implementation concurrency is capped at **3 active implementation children**.
+
+`control-status.json.scheduler` is authoritative and exposes:
+- `max_concurrent_workers`
+- `active_workers`
+- `available_worker_slots`
+- `active_deliverables`
+
+Execution rules:
+1. Never have more than 3 implementation children active.
+2. Never batch several `task` launches in one assistant response.
+3. Launch **one** eligible child, wait for that task-tool receipt, then immediately
+   re-read `.opencode-v2/control-status.json` before deciding whether another
+   child may be launched.
+4. Dispatch another eligible leaf only when `available_worker_slots > 0`.
+5. If eligible leaves remain but `available_worker_slots == 0`, WAIT. They are
+   queued work, not blocked/failed work.
+6. If no leaf is currently eligible but `active_workers > 0`, WAIT for a child
+   transition; do not output `IMPLEMENTATION_BLOCKED`.
+7. A preclaim denial `worker_slots_full` means WAIT/refresh status. It consumes
+   no retry and is not a leaf failure.
+<!-- V2.6.9 THREE-SLOT EXECUTION POLICY END -->
+
 For recursively created children, the same canonical five-line worker prompt
 applies with the persisted child ID. Their manifest scope is authoritative;
 stay inside it. A split parent becomes ready only after both required children
