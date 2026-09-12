@@ -205,6 +205,32 @@ kernels, downloads, or external scientific truth unless the original request
 explicitly names that authority. “Correct”, “real”, and “as seen from Earth”
 alone do not authorize such a probe.
 
+<!-- V2.6.10 PROBE SCOPE DISCIPLINE BEGIN -->
+## Probe scope discipline
+
+A `probe-builder` leaf is a **single-question feasibility/contract probe**, not
+an external-research or data-acquisition bundle.
+
+A probe may establish one narrow unknown contract/runtime behavior and perform
+the minimum smoke test needed to freeze that result. Do NOT put any of the
+following into one probe leaf:
+- broad documentation/reference research plus implementation-facing data collection;
+- collection of final domain/reference data for several independent entities;
+- repeated large remote responses whose contents are themselves the deliverable;
+- production dataset/constants assembly plus provenance plus verifier construction;
+- several independently useful results that could be consumed separately downstream.
+
+If more than one independently useful result is required, split it into separate
+S leaves with explicit dependencies. When `Reference policy: external-required`,
+consume the verified `REFERENCE_FOUNDATION.md` for authoritative external
+conventions/contracts instead of making a probe repeat reference research. A
+probe may still perform one small operational smoke test of that already-founded
+contract when runtime behavior remains unknown.
+
+Prefer a fresh leaf/context over planning a probe that is expected to need
+conversation compaction to finish. The durable artifact is the handoff.
+<!-- V2.6.10 PROBE SCOPE DISCIPLINE END -->
+
 Probe leaves are feasibility checks, not architecture or scientific research.
 For each probe, name only the few fields required by its owned artifact and
 Verify command. A probe may not own or create a later implementation leaf's

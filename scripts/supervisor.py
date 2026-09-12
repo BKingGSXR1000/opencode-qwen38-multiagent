@@ -21,6 +21,7 @@ MAX_REFERENCE_FOUNDATION_SESSIONS=3
 MAX_REFERENCE_VALIDATION_SESSIONS=8
 MAX_REFERENCE_STAGNANT_SESSIONS=2
 MAX_REFERENCE_COMPACTIONS=1
+MAX_IMPLEMENTATION_COMPACTIONS=3
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
 # file-existence deadline (150.4-150.5s) without a first write.  The successful
@@ -2875,6 +2876,8 @@ def persisted_reconcile_loop():
                 compaction_limit=(
                     MAX_REFERENCE_COMPACTIONS
                     if agent=="reference-researcher"
+                    else MAX_IMPLEMENTATION_COMPACTIONS
+                    if agent in IMPLEMENTATION_AGENTS
                     else 1
                 )
                 if comps<=compaction_limit:
@@ -2932,6 +2935,6 @@ def main():
         ok,detail=complete_splitter(args.complete_splitter,args.prompt or "")
         print(f"SPLIT_{'ACCEPTED' if ok else 'FAILED'} parent={args.complete_splitter} result={detail}")
         return
-    ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} first_compaction=allow second_compaction=retire")
+    ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} implementation_compactions=3 fourth_compaction=retire")
     threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()
 if __name__=="__main__": main()

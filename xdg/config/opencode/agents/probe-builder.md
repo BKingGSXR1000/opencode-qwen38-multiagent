@@ -38,6 +38,27 @@ finite: complete the artifact, do not use the budget to become a domain expert.
 Your purpose is to replace API assumptions with measured facts before downstream
 implementation begins.
 
+<!-- V2.6.10 PROBE RESPONSE-SIZE DISCIPLINE BEGIN -->
+## Probe response-size discipline
+
+Keep remote/tool observations compact. A probe normally needs a contract shape
+or a few measured fields, not the complete raw response in conversation history.
+
+- When a remote/API response may be large, prefer a bounded shell request saved
+  to `/tmp`, then extract only the required fields with Python/jq/grep before
+  reading results back into model context.
+- Do not repeatedly inject tens of kilobytes of nearly identical raw responses
+  into the session merely to extract a few values.
+- If one web/tool call unexpectedly returns a large payload, switch subsequent
+  calls to filtered/local extraction rather than repeating the full payload.
+- Persist verified facts to the owned probe artifact early so compaction or a
+  recycled worker can resume from disk.
+- Do not broaden one probe into multi-entity reference harvesting. If the plan
+  requires that, complete only the bounded assigned contract where possible and
+  record the scope problem clearly in progress rather than doing exploratory
+  extra work.
+<!-- V2.6.10 PROBE RESPONSE-SIZE DISCIPLINE END -->
+
 - First read your Dxxx plan section and existing Dxxx.progress.md. Then make
   only the minimum probes required by that leaf's Verify command and Done when.
 - After at most a handful of probe tool turns, WRITE/UPDATE the owned probe
