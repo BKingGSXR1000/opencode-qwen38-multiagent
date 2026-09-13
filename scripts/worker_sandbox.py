@@ -164,6 +164,31 @@ def resolve_worker(project: Path, session: str="", call_id: str="", agent: str="
     if not session:
         return {"worker":False,"session":"","did":"","agent":agent,"reason":"session-unresolved"}
 
+    # The mutation hook runs for every OpenCode session, not only implementation
+    # workers. Phase planners/validators legitimately write control artifacts
+    # before the implementation manifest and attempt ledger exist. Classify a
+    # known non-implementation role before touching implementation-only state.
+    role_hint=agent or _session_agent(session)
+    if role_hint and role_hint not in IMPLEMENTATION_AGENTS:
+        return {
+            "worker":False,"session":session,"did":"","agent":role_hint,
+            "reason":"non-implementation-role",
+        }
+
+    manifest_path=project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json"
+    attempts_path=project/".opencode-v2/work/attempts.json"
+    if not manifest_path.exists() and not attempts_path.exists():
+        # Before Phase 0.5 has produced executable implementation state there
+        # cannot be a legitimate implementation worker: dispatch preclaim itself
+        # depends on that state. Let ordinary OpenCode permissions govern control
+        # sessions such as acceptance-planner / implementation-planner.
+        return {
+            "worker":False,"session":session,"did":"","agent":role_hint,
+            "reason":"pre-implementation-control-phase",
+        }
+
+    # Once implementation state exists, missing/corrupt canonical state must
+    # remain fail-closed. This preserves the Batch-2 durability invariant.
     attempts=_attempts(project)
     did=""
     attempt=0
@@ -183,15 +208,13 @@ def resolve_worker(project: Path, session: str="", call_id: str="", agent: str="
         did=_parse_did(_first_user_text(session))
 
     if not did:
-        role_hint=agent or _session_agent(session)
         if role_hint in IMPLEMENTATION_AGENTS:
             raise SandboxError(
                 f"implementation session {session} has no resolved deliverable yet"
             )
-        return {
-            "worker":False,"session":session,"did":"","agent":role_hint,
-            "reason":"not-implementation-session",
-        }
+        raise SandboxError(
+            f"WORKER_FIREWALL_CONTEXT_UNKNOWN cannot classify mutation session {session}"
+        )
 
     manifest=_manifest(project)
     leaf=(manifest.get("leaves") or {}).get(did)
@@ -682,6 +705,30 @@ def selftest(require_bwrap=False):
     with tempfile.TemporaryDirectory(prefix="v2-sandbox-selftest-",dir=selftest_root) as td:
         project=Path(td)/"project"
         (project/".opencode-v2/work").mkdir(parents=True)
+
+        # Regression: Phase-0/Phase-0.5 control sessions run before attempts.json
+        # and the implementation guard manifest exist. The implementation
+        # firewall must not block their writes.
+        ctx0=resolve_worker(project,"ses_acceptance","","acceptance-planner")
+        assert not ctx0["worker"] and ctx0["reason"]=="non-implementation-role", ctx0
+        ctx0_unknown=resolve_worker(project,"ses_control_unknown","","")
+        assert (
+            not ctx0_unknown["worker"]
+            and ctx0_unknown["reason"]=="pre-implementation-control-phase"
+        ), ctx0_unknown
+
+        # Conversely, once implementation state begins, a missing canonical
+        # ledger must still fail closed for an implementation role.
+        _atomic_json(project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json",{
+            "leaves":{"D001":{"role":"implementer","owned_artifact_paths":["src/owned.txt"]}}
+        })
+        try:
+            resolve_worker(project,"ses_impl_missing_ledger","","implementer")
+            raise AssertionError("implementation mutation passed without attempts ledger")
+        except SandboxError as exc:
+            assert "attempt ledger missing" in str(exc), exc
+        (project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json").unlink()
+
         (project/"src").mkdir()
         (project/"src/owned.txt").write_text("old\n")
         (project/"other.txt").write_text("safe\n")

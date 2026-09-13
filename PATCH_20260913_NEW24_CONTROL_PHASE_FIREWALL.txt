@@ -1,0 +1,12 @@
+Applied: 2026-09-13T22:04:40+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/new24-control-phase-firewall-20260913-220440
+
+New24 regression fix:
+- the OpenCode mutation hook runs for all sessions, but worker_sandbox previously loaded
+  the implementation attempt ledger before classifying the session role;
+- Phase-0 acceptance-planner writes were therefore denied because attempts.json correctly
+  does not exist before implementation;
+- known non-implementation roles now bypass implementation-only state before any ledger read;
+- sessions before implementation control state exists also bypass the implementation firewall;
+- once implementation state exists, unknown/implementation mutation contexts remain fail-closed;
+- regression selftests cover Phase-0 pass-through and implementation missing-ledger denial.
