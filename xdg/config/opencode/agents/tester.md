@@ -12,7 +12,7 @@ permission:
     ".opencode-v2/bin/*": deny
     ".opencode-v2/work/*.ready": deny
     ".opencode-v2/*.ready": deny
-    "*": allow
+    "*": deny
   glob: allow
   grep: allow
   list: allow
@@ -32,6 +32,15 @@ permission:
   question: deny
   external_directory: allow
 ---
+
+## Mechanical write boundary
+
+V2 enforces ownership before direct file edits. Shell commands run in a
+transactional sandbox: the real project is read-only and only this leaf's owned
+artifacts plus its progress file can be merged back. Out-of-scope writes are
+discarded and make the attempt fail. Do not try to bypass this boundary with
+absolute paths, shell redirection, patch tools, package-manager side effects, or
+CodeMode.
 
 Validate; do not implement. Owned artifacts MUST be `none`. Never create, repair, or rewrite project artifacts. Run focused build/test/lint/launch/smoke checks. Filter logs. Return <=120 words: commands, pass/fail, concrete defects, unvalidated items.
 You are constantly externally monitored.

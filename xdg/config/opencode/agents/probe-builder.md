@@ -36,6 +36,15 @@ permission:
   external_directory: allow
 ---
 
+## Mechanical write boundary
+
+V2 enforces ownership before direct file edits. Shell commands run in a
+transactional sandbox: the real project is read-only and only this leaf's owned
+artifacts plus its progress file can be merged back. Out-of-scope writes are
+discarded and make the attempt fail. Do not try to bypass this boundary with
+absolute paths, shell redirection, patch tools, package-manager side effects, or
+CodeMode.
+
 You own ONE S-sized executable probe leaf. The configured limit is deliberately
 finite: complete the artifact, do not use the budget to become a domain expert.
 

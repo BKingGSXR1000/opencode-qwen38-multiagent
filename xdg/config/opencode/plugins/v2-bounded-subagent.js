@@ -5,6 +5,81 @@ import { join } from "node:path";
 export const HARD_MAX_CHILD_RESULT_CHARS = 2500;
 export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 
+const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/worker_sandbox.py";
+const MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "multiedit", "bash", "shell", "execute"]);
+
+function hookArgs(event, output) {
+  if (output?.args && typeof output.args === "object") return output.args;
+  if (event?.input && typeof event.input === "object") return event.input;
+  if (event?.args && typeof event.args === "object") return event.args;
+  return {};
+}
+
+function hookSessionID(event) {
+  return String(
+    event?.sessionID ||
+    event?.sessionId ||
+    event?.context?.sessionID ||
+    event?.ctx?.sessionID ||
+    ""
+  );
+}
+
+function hookCallID(event) {
+  return String(event?.callID || event?.callId || event?.id || "");
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
+}
+
+function guardWorkerMutation(directory, event, output) {
+  const tool = String(event?.tool || "");
+  if (!MUTATION_TOOLS.has(tool)) return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  const sessionID = hookSessionID(event);
+  const callID = hookCallID(event);
+  let raw;
+  try {
+    raw = execFileSync("python3", [
+      WORKER_SANDBOX,
+      "hook",
+      "--project", directory,
+      "--session", sessionID,
+      "--call-id", callID,
+      "--tool", tool,
+      "--args-b64", payload,
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    throw new Error(detail || `WORKER_FIREWALL_DENY ${tool}`);
+  }
+  let decision;
+  try {
+    decision = JSON.parse(raw);
+  } catch {
+    throw new Error(`WORKER_FIREWALL_DENY invalid guard response for ${tool}`);
+  }
+  if (decision?.action === "replace-bash") {
+    if (typeof decision.command !== "string" || !decision.command) {
+      throw new Error("WORKER_FIREWALL_DENY missing sandbox command");
+    }
+    args.command = decision.command;
+  }
+}
+
+function cleanupWorkerSandbox(sessionID) {
+  if (!sessionID) return;
+  try {
+    execFileSync("python3", [
+      WORKER_SANDBOX, "cleanup", "--session", String(sessionID),
+    ], { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
+  } catch {
+    // Cleanup is best-effort; correctness does not depend on scratch deletion.
+  }
+}
+
 function exactDeliverable(args) {
   const prompt = typeof args?.prompt === "string" ? args.prompt : "";
   return prompt.match(/^DELIVERABLE:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/m)?.[1] || "unknown";
@@ -125,11 +200,12 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
 }
 
 export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
-  const before = await api.tool.hook("execute.before", async (event) => {
+  const before = await api.tool.hook("execute.before", async (event, output) => {
+    guardWorkerMutation(directory, event, output);
     if (event.tool !== "subagent" && event.tool !== "task") return;
-    // This beta supplies decoded task arguments through the V2 hook event's
-    // mutable input object before execution.
-    const args = event.input || {};
+    // Support both the beta combined event shape and the newer split
+    // input/output hook shape.
+    const args = hookArgs(event, output);
     const agent = args.agent;
     const prompt = args.prompt;
     if (agent === "task-splitter") {
@@ -137,7 +213,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       if (!parent) throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
       // This durable preclaim prevents a restarted root from launching another
       // splitter for the same generation. It has no attempt/operator authority.
-      supervisor(directory, ["--agent", "task-splitter", "--prompt", prompt, "--claim-splitter", event.id]);
+      supervisor(directory, ["--agent", "task-splitter", "--prompt", prompt, "--claim-splitter", hookCallID(event)]);
       return;
     }
     if (agent === "general") {
@@ -148,18 +224,20 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     if (!implementationAgents.has(agent) && !hasDeliverable) return;
     // This deterministic supervisor claim occurs before OpenCode materializes
     // the child session or sends a provider request.
-    supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", event.id]);
+    supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", hookCallID(event)]);
   });
-  const after = await api.tool.hook("execute.after", async (event) => {
-    if ((event.tool !== "subagent" && event.tool !== "task") || !event.result) return;
-    const splitterParent = event.input?.agent === "task-splitter" ? splitParent(event.input) : "";
+  const after = await api.tool.hook("execute.after", async (event, output) => {
+    const result = event?.result || output;
+    if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
+    const args = hookArgs(event, output);
+    const splitterParent = args?.agent === "task-splitter" ? splitParent(args) : "";
     if (splitterParent) {
       // The completion event is the deterministic validation trigger. The
       // supervisor reads only the splitter's durable proposal and records an
       // explicit failure if it is absent or invalid; no root cycle is needed.
-      const session = String(event.result.metadata?.sessionID || "");
+      const session = String(result.metadata?.sessionID || "");
       try {
-        materializeSplitterProposal(directory, splitterParent, event.result.output || "");
+        materializeSplitterProposal(directory, splitterParent, result.output || "");
         supervisor(directory, ["--complete-splitter", splitterParent, "--prompt", session]);
       } catch {
         // The supervisor has the durable preclaim/status and will surface a
@@ -168,21 +246,22 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     }
     const receipt = boundedChildResult({
       directory,
-      args: event.input || {},
-      metadata: event.result.metadata,
-      original: event.result.output || "",
+      args,
+      metadata: result.metadata,
+      original: result.output || "",
     });
     // The beta constructs the parent-visible tool response from `content`.
     // Updating `output` alone only changed hook metadata, not the text the root
     // receives, so replace both representations with the same bounded receipt.
-    event.result.output = receipt;
-    event.result.content = [{ type: "text", text: receipt }];
-    event.result.metadata = {
-      ...event.result.metadata,
+    result.output = receipt;
+    result.content = [{ type: "text", text: receipt }];
+    result.metadata = {
+      ...result.metadata,
       parentResultBounded: true,
       parentResultChars: receipt.length,
       fullOutputStorage: "session_history",
     };
+    cleanupWorkerSandbox(String(result.metadata?.sessionID || ""));
   });
   return () => {
     before.dispose();

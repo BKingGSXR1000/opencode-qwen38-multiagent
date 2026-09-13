@@ -19,6 +19,7 @@ from state_io import (
     StateCorruptionError, load_json_object, atomic_write_json, atomic_write_text,
     exclusive_file_lock,
 )
+from worker_sandbox import violation_path as worker_sandbox_violation_path
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -1500,6 +1501,11 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
     if not leaf or ready_info(did):
         clear_verify_wait(did)
         return False,"not-applicable"
+    if sid:
+        sandbox_violation=worker_sandbox_violation_path(Path(PROJECT),did,sid)
+        if sandbox_violation.exists() and sandbox_violation.stat().st_size:
+            clear_verify_wait(did)
+            return False,"sandbox-ownership-violation"
     paths=owned_artifact_paths(leaf)
     read_only_no_artifacts=(
         leaf.get("role") in READ_ONLY_SPLIT_ROLES and not paths

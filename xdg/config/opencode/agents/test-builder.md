@@ -33,6 +33,15 @@ permission:
   external_directory: allow
 ---
 
+## Mechanical write boundary
+
+V2 enforces ownership before direct file edits. Shell commands run in a
+transactional sandbox: the real project is read-only and only this leaf's owned
+artifacts plus its progress file can be merged back. Out-of-scope writes are
+discarded and make the attempt fail. Do not try to bypass this boundary with
+absolute paths, shell redirection, patch tools, package-manager side effects, or
+CodeMode.
+
 Create ONE bounded test artifact/harness for already-defined behavior. Do not redesign production architecture. Inspect only what is needed, write tests promptly, run them, and report compactly. Do not dump long logs. Final handoff <=120 words.
 
 V2.2 lifecycle: your old reasoning is intentionally not durable state.

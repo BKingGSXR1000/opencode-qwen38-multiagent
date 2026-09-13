@@ -2,7 +2,7 @@
 import json,subprocess,sys,tempfile,unittest
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
-import control_state,leaf_contract,supervisor,state_io
+import control_state,leaf_contract,supervisor,state_io,worker_sandbox
 
 def ready_text(did,attempt=1,owner="supervisor",protocol=None):
     protocol=protocol or control_state.LEAF_READY_PROTOCOL
@@ -586,6 +586,48 @@ class SplitStateMachineTests(unittest.TestCase):
             "acceptance_validation":{"complete":False},
         }
         self.assertEqual(control_state.resume_phase(state),"execution-blocked")
+
+
+
+class WorkerSandboxTrustBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        leaf={
+            "id":"D001","name":"owned file",
+            "owned_artifacts":"`owned.txt`",
+            "owned_artifact_paths":["owned.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":"test -s owned.txt",
+            "role":"implementer","done_when":"owned exists",
+            "acceptance_ids":["A001"],"parallel":"none","split_children":[],
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":leaf},
+        }))
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{"D001":{"count":1,"sessions":["s1"],"automatic_limit":2}},
+        }))
+    def tearDown(self):
+        supervisor.PROJECT=self.old
+        self.tmp.cleanup()
+
+    def test_finalize_rejects_recorded_sandbox_violation(self):
+        ctx=worker_sandbox.resolve_worker(self.project,"s1","","implementer")
+        worker_sandbox.record_violation(
+            self.project,ctx,"direct-tool-outside-ownership",
+            {"tool":"edit","path":"other.txt"},
+        )
+        ok,detail=supervisor.post_session_finalize("D001","s1")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"sandbox-ownership-violation")
 
 
 if __name__=="__main__": unittest.main()

@@ -1,0 +1,13 @@
+Applied: 2026-09-13T20:13:40+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch5-worker-isolation-v3-20260913-201339
+
+Audit Batch 5 - worker write containment v3:
+- direct edit/write/apply_patch calls are ownership-authorized before execution;
+- worker shell commands use Bubblewrap with host root/project lower read-only;
+- /tmp is mounted before project overlays so the project bind cannot be hidden;
+- integration selftest project lives under the persistent sandbox root, matching production layout;
+- only declared owned artifacts are merged back;
+- out-of-scope writes are discarded and recorded as violations;
+- tester direct edits and CodeMode/execute are denied;
+- owned partial progress survives failed commands; unrelated contamination does not;
+- state-machine, firewall, plugin syntax, and real Bubblewrap integration tests pass.
