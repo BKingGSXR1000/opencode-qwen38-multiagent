@@ -314,12 +314,13 @@ def parse_plan(text: str):
         if node in done:
             return
         if node in visiting:
-            errors.append("launch-dependency cycle: " + " -> ".join(stack + [node]))
+            errors.append("dependency cycle: " + " -> ".join(stack + [node]))
             return
         visiting.add(node)
-        for dep in leaves[node]["launch_deps"]:
-            if dep in leaves:
-                visit(dep, stack + [node])
+        for kind in ("launch_deps","contract_deps","verify_deps"):
+            for dep in leaves[node][kind]:
+                if dep in leaves:
+                    visit(dep, stack + [node])
         visiting.remove(node)
         done.add(node)
 
@@ -329,11 +330,13 @@ def parse_plan(text: str):
     for did, leaf in leaves.items():
         if did not in waves:
             continue
-        for dep in leaf["launch_deps"]:
-            if dep in waves and waves[dep] >= waves[did]:
-                errors.append(
-                    f"{did}: Launch dep {dep} wave {waves[dep]} is not earlier than wave {waves[did]}"
-                )
+        for dep_kind in ("launch_deps","contract_deps"):
+            label="Launch" if dep_kind=="launch_deps" else "Contract"
+            for dep in leaf[dep_kind]:
+                if dep in waves and waves[dep] >= waves[did]:
+                    errors.append(
+                        f"{did}: {label} dep {dep} wave {waves[dep]} is not earlier than wave {waves[did]}"
+                    )
 
     # plan path ownership consistency
     owners={}
@@ -698,6 +701,38 @@ Status: COMPLETE
                 "`.opencode-v2/work/D001.ready`"
             )
             assert not reserved_paths and "supervisor-reserved" in reserved_error, reserved_error
+
+            masked = valid.replace(
+                "`test -s app.js`",
+                "`test -s app.js || true`",
+                1,
+            )
+            _, _, masked_errors = parse_plan(masked)
+            assert any("can mask a failed check" in e for e in masked_errors), masked_errors
+
+            dependency_cycle = valid.replace(
+                "- Verify deps: (none)",
+                "- Verify deps: [D002]",
+                1,
+            )
+            _, _, cycle_errors = parse_plan(dependency_cycle)
+            assert any("dependency cycle" in e for e in cycle_errors), cycle_errors
+
+            contract_wave = valid.replace(
+                "- Launch deps / depends_on: [D001]",
+                "- Launch deps / depends_on: (none)",
+                1,
+            ).replace(
+                "- Contract deps: (none)",
+                "- Contract deps: [D001]",
+                2,
+            ).replace(
+                "- Wave 2: D002",
+                "- Wave 1: D002",
+                1,
+            )
+            _, _, contract_wave_errors = parse_plan(contract_wave)
+            assert any("Contract dep D001" in e for e in contract_wave_errors), contract_wave_errors
         finally:
             AGENTS = old
     print("control-guard selftest: OK")

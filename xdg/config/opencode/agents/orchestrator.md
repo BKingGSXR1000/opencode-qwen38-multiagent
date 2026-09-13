@@ -163,8 +163,11 @@ a second genuine failed attempt triggers this path; depth 2 never splits and
 retains its three genuine automatic attempts. Infrastructure/runtime failures
 and bad-plan outcomes do not trigger splitting.
 
-Dispatch only exact planned Dxxx leaves whose Launch deps are complete, using
-the exact `Role:` recorded for that Dxxx in `IMPLEMENTATION_PLAN.guard.json`.
+Dispatch only exact planned Dxxx leaves whose `eligible` field is true in
+`.opencode-v2/control-status.json`. Eligibility requires both Launch deps and
+Contract deps to be READY; Verify deps are allowed to remain pending until the
+supervisor performs final verification. Use the exact `Role:` recorded for
+that Dxxx in `IMPLEMENTATION_PLAN.guard.json`.
 Never substitute `general` (or any other role) for a planned worker role. The
 supervisor preclaims the attempt before a canonical child starts; if it denies
 or the required specialized role cannot launch, do no salvage work and output

@@ -7,13 +7,13 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
                            MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
                            RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
-                           LEAF_READY_PROTOCOL,
+                           LEAF_READY_PROTOCOL, VERIFY_WAIT_PROTOCOL,
                            split_depth, valid_deliverable_id)
 from leaf_contract import (
     IMPLEMENTATION_ROLES, READ_ONLY_ROLES,
     strict_owned_artifact_paths as shared_strict_owned_artifact_paths,
     canonical_owned_artifacts as shared_canonical_owned_artifacts,
-    validate_leaf_contract,
+    validate_leaf_contract, validate_verify_command,
 )
 from state_io import (
     StateCorruptionError, load_json_object, atomic_write_json, atomic_write_text,
@@ -61,6 +61,7 @@ SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
+verify_wait_log_state={}
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
 
@@ -969,7 +970,11 @@ def normalized_state_snapshot(project):
         entry=attempt_entries.get(did)
         if not retryable_unmaterialized_dispatch_entry(entry):
             continue
-        if leaf.get("complete") or leaf.get("split_required") or leaf.get("launch_deps_missing"):
+        if (
+            leaf.get("complete") or leaf.get("split_required")
+            or leaf.get("verification_pending")
+            or leaf.get("launch_deps_missing") or leaf.get("contract_deps_missing")
+        ):
             continue
         leaf["attempt_limit_reached"]=False
         leaf["eligible"]=True
@@ -1171,6 +1176,97 @@ def owned_artifact_paths(leaf):
         return checked if not error else []
     checked,error=_strict_owned_artifact_text(leaf.get("owned_artifacts",""))
     return checked if not error else []
+
+
+def verify_wait_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.verify-wait.json"
+
+
+def missing_verify_dependencies(did):
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict):
+        return []
+    deps=leaf.get("verify_deps") or []
+    if not isinstance(deps,list):
+        return []
+    return [dep for dep in deps if not ready_info(dep)]
+
+
+def persist_verify_wait(did,sid,missing):
+    existing={}
+    try:
+        existing=load_verify_wait(did)
+    except StateCorruptionError:
+        raise
+    normalized=list(missing)
+    if (
+        existing
+        and existing.get("session","")== (sid or "")
+        and existing.get("missing_verify_deps")==normalized
+    ):
+        return existing
+    payload={
+        "owner":"supervisor",
+        "protocol":VERIFY_WAIT_PROTOCOL,
+        "deliverable":did,
+        "session":sid or "",
+        "missing_verify_deps":normalized,
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    }
+    atomic_write_json(verify_wait_path(did),payload)
+    return payload
+
+
+def clear_verify_wait(did):
+    verify_wait_path(did).unlink(missing_ok=True)
+    verify_wait_log_state.pop(did,None)
+
+
+def load_verify_wait(did):
+    path=verify_wait_path(did)
+    if not path.exists():
+        return {}
+    data=load_json_object(path,label=f"verify wait {did}")
+    if data.get("owner")!="supervisor" or data.get("protocol")!=VERIFY_WAIT_PROTOCOL or data.get("deliverable")!=did:
+        raise StateCorruptionError(f"verify wait {did} is invalid")
+    return data
+
+
+def note_verify_wait_once(did,sid,agent,detail):
+    key=(sid,detail)
+    if verify_wait_log_state.get(did)==key:
+        return
+    verify_wait_log_state[did]=key
+    log(f"VERIFY_DEFERRED session={sid} agent={agent} deliverable={did} result={detail}")
+    csv("VERIFY_DEFERRED",sid,agent,f"{did} {detail}")
+
+
+def _paths_changed(before,after):
+    changed=set(before)^set(after)
+    changed.update(path for path in set(before)&set(after) if before[path]!=after[path])
+    return changed
+
+
+def _inside_any(path,items):
+    return any(path==item or path.startswith(item.rstrip("/")+"/") for item in items)
+
+
+def run_verify_fail_closed(command,runner=subprocess.run):
+    """Run leaf verification under fail-fast shell semantics."""
+    errors=validate_verify_command(command)
+    if errors:
+        return None,"verify-command-unsafe:"+errors[0]
+    try:
+        checked=runner(
+            ["/bin/bash","-euo","pipefail","-c",command],
+            cwd=PROJECT,timeout=240,
+        )
+    except TypeError:
+        # Small test doubles may only accept the historical signature.
+        checked=runner(command,cwd=PROJECT,shell=True,executable="/bin/bash",timeout=240)
+    if checked.returncode!=0:
+        return checked,f"verify-failed-{checked.returncode}"
+    return checked,"verified"
 
 
 def ownership_baseline_path(did):
@@ -1399,9 +1495,11 @@ def supervisor_finalize_ready(did):
         return False,f"ready-write-error-{type(exc).__name__}"
 
 def post_session_finalize(did,sid="",runner=subprocess.run):
-    """Verify actual owned files, then let the canonical leaf guard create ready."""
+    """Fail-closed finalization after artifacts, ownership, deps, and Verify pass."""
     leaf=(load_manifest().get("leaves") or {}).get(did)
-    if not leaf or ready_info(did): return False,"not-applicable"
+    if not leaf or ready_info(did):
+        clear_verify_wait(did)
+        return False,"not-applicable"
     paths=owned_artifact_paths(leaf)
     read_only_no_artifacts=(
         leaf.get("role") in READ_ONLY_SPLIT_ROLES and not paths
@@ -1413,17 +1511,49 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
         if progress.exists() and progress.stat().st_size:
             return False,"durable-progress-incomplete"
         return False,"owned-artifacts-missing"
+
     violations=ownership_violations(did,sid)
     if violations:
+        clear_verify_wait(did)
         return False,"ownership-violation:"+",".join(violations[:4])
+
+    missing=missing_verify_dependencies(did)
+    if missing:
+        persist_verify_wait(did,sid,missing)
+        return False,"verify-deps-pending:"+",".join(missing)
+
     command=(leaf.get("verify_command") or "").strip()
-    if not command: return False,"verify-command-missing"
+    command_errors=validate_verify_command(command)
+    if command_errors:
+        clear_verify_wait(did)
+        return False,"verify-command-unsafe:"+command_errors[0]
+
+    before_verify=project_fingerprints()
     try:
-        checked=runner(command,cwd=PROJECT,shell=True,executable="/bin/bash",timeout=240)
-        if checked.returncode!=0: return False,f"verify-failed-{checked.returncode}"
-        return supervisor_finalize_ready(did)
+        checked,detail=run_verify_fail_closed(command,runner=runner)
     except (OSError,subprocess.TimeoutExpired) as e:
+        clear_verify_wait(did)
         return False,f"verification-error-{type(e).__name__}"
+    if detail!="verified":
+        clear_verify_wait(did)
+        return False,detail
+
+    after_verify=project_fingerprints()
+    changed=_paths_changed(before_verify,after_verify)
+    owned_changed=sorted(path for path in changed if _inside_any(path,paths))
+    if owned_changed:
+        clear_verify_wait(did)
+        return False,"verify-mutated-owned-artifacts:"+",".join(owned_changed[:4])
+
+    violations=ownership_violations(did,sid)
+    if violations:
+        clear_verify_wait(did)
+        return False,"ownership-violation-after-verify:"+",".join(violations[:4])
+
+    ok,detail=supervisor_finalize_ready(did)
+    if ok:
+        clear_verify_wait(did)
+    return ok,detail
 
 # V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION BEGIN
 _split_parent_finalize_next = {}
@@ -1455,6 +1585,14 @@ def reconcile_split_parent_completions():
             continue
         if now < _split_parent_finalize_next.get(did,0):
             continue
+
+        missing=missing_verify_dependencies(did)
+        if missing:
+            detail="verify-deps-pending:"+",".join(missing)
+            note_verify_wait_once(did,"","supervisor",detail)
+            _split_parent_finalize_next[did]=time.monotonic()+2.0
+            continue
+        verify_wait_log_state.pop(did,None)
 
         ok,detail=post_session_finalize(did)
         log(
@@ -1657,6 +1795,10 @@ def validate_dispatch(agent,text):
     if agent!=expected: return did,f"role_mismatch expected={expected} actual={agent}"
     missing=[d for d in leaf.get("launch_deps",[]) if not ready_info(d)]
     if missing: return did,f"unmet_launch_deps={','.join(missing)}"
+    contract_missing=[d for d in leaf.get("contract_deps",[]) if not ready_info(d)]
+    if contract_missing: return did,f"unmet_contract_deps={','.join(contract_missing)}"
+    if verify_wait_path(did).exists():
+        return did,"verification_pending"
     if ready_info(did): return did,"already_complete"
     return did,""
 
@@ -3436,6 +3578,10 @@ def reconcile_idle_implementation_session(sid,agent):
         detail="not-attempted"
         if durable_worker_execution(did):
             finalized,detail=post_session_finalize(did,sid=sid)
+            if detail.startswith("verify-deps-pending:"):
+                note_verify_wait_once(did,sid,agent,detail)
+                return
+            verify_wait_log_state.pop(did,None)
             log(
                 f"POST_SESSION_VERIFY_AFTER_INFRA session={sid} "
                 f"deliverable={did} result={detail}"
@@ -3473,6 +3619,10 @@ def reconcile_idle_implementation_session(sid,agent):
             consume_operator_reservation(sid,did,execution)
         if not ready_info(did):
             ok,detail=post_session_finalize(did,sid=sid)
+            if detail.startswith("verify-deps-pending:"):
+                note_verify_wait_once(did,sid,agent,detail)
+                return
+            verify_wait_log_state.pop(did,None)
             log(
                 f"POST_SESSION_VERIFY session={sid} "
                 f"deliverable={did} result={detail}"
@@ -3481,9 +3631,11 @@ def reconcile_idle_implementation_session(sid,agent):
             if not ok and detail != "not-applicable":
                 classification=(
                     "bad-plan"
-                    if detail in {
-                        "verify-command-missing","owned-artifacts-missing"
-                    } and not meaningful_worker_execution(sid,did)
+                    if detail.startswith("verify-command-unsafe:")
+                    or (
+                        detail in {"verify-command-missing","owned-artifacts-missing"}
+                        and not meaningful_worker_execution(sid,did)
+                    )
                     else "genuine"
                 )
                 recorded,outcome=record_leaf_failure(

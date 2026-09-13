@@ -251,6 +251,134 @@ class AbortIntentTests(unittest.TestCase):
                 supervisor.session_terminal_aborted=old_terminal
 
 
+
+class VerificationSemanticsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=self.tmp.name
+        supervisor.verify_wait_log_state.clear()
+        self.leaves={
+            "D001":{
+                "id":"D001","name":"consumer",
+                "owned_artifacts":"`a.txt`","owned_artifact_paths":["a.txt"],
+                "launch_deps":[],"contract_deps":[],"verify_deps":[],
+                "verify_command":"test -f a.txt","role":"implementer",
+                "done_when":"a is valid","acceptance_ids":["A001"],
+                "parallel":"none","split_children":[],
+            },
+            "D002":{
+                "id":"D002","name":"dependency",
+                "owned_artifacts":"`b.txt`","owned_artifact_paths":["b.txt"],
+                "launch_deps":[],"contract_deps":[],"verify_deps":[],
+                "verify_command":"test -f b.txt","role":"implementer",
+                "done_when":"b is valid","acceptance_ids":["A001"],
+                "parallel":"none","split_children":[],
+            },
+        }
+        self._write_manifest()
+        self.ledger={
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{"count":1,"sessions":["s1"],"automatic_limit":3},
+                "D002":{"count":1,"sessions":["s2"],"automatic_limit":3},
+            },
+        }
+        self._write_ledger()
+        (self.project/"a.txt").write_text("a\n")
+        (self.project/"b.txt").write_text("b\n")
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        supervisor.verify_wait_log_state.clear()
+        self.tmp.cleanup()
+    def _write_manifest(self):
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":self.leaves,
+        }))
+    def _write_ledger(self):
+        (self.work/"attempts.json").write_text(json.dumps(self.ledger))
+    def _ready(self,did,attempt=1):
+        (self.work/f"{did}.ready").write_text(ready_text(did,attempt))
+
+    def test_contract_dep_is_hard_dispatch_barrier_until_ready(self):
+        self.leaves["D001"]["contract_deps"]=["D002"]
+        self._write_manifest()
+        state=control_state.snapshot(self.project)
+        self.assertEqual(state["leaves"]["D001"]["contract_deps_missing"],["D002"])
+        self.assertFalse(state["leaves"]["D001"]["eligible"])
+        self._ready("D002")
+        state=control_state.snapshot(self.project)
+        self.assertEqual(state["leaves"]["D001"]["contract_deps_missing"],[])
+        self.assertTrue(state["leaves"]["D001"]["eligible"])
+
+    def test_verify_dep_defers_without_consuming_or_redispatching(self):
+        self.leaves["D001"]["verify_deps"]=["D002"]
+        self._write_manifest()
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"verify-deps-pending:D002")
+        self.assertTrue((self.work/"D001.verify-wait.json").exists())
+        state=control_state.snapshot(self.project)
+        leaf=state["leaves"]["D001"]
+        self.assertTrue(leaf["verification_pending"])
+        self.assertEqual(leaf["verify_deps_missing"],["D002"])
+        self.assertFalse(leaf["eligible"])
+        self.assertEqual(self.ledger["deliverables"]["D001"]["count"],1)
+        self._ready("D002")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertTrue(ok,detail)
+        self.assertTrue(control_state.ready_info(self.project,"D001"))
+        self.assertFalse((self.work/"D001.verify-wait.json").exists())
+
+    def test_pipefail_semantics_reject_hidden_pipeline_failure(self):
+        self.leaves["D001"]["verify_command"]="false | true"
+        self._write_manifest()
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"verify-failed-1")
+        self.assertFalse(control_state.ready_info(self.project,"D001"))
+
+    def test_masking_verify_command_is_rejected_before_execution(self):
+        errors=leaf_contract.validate_verify_command("test -f missing || true")
+        self.assertTrue(any("can mask a failed check" in e for e in errors),errors)
+        self.leaves["D001"]["verify_command"]="test -f missing || true"
+        self._write_manifest()
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertTrue(detail.startswith("verify-command-unsafe:"),detail)
+
+    def test_verify_cannot_repair_its_owned_artifact(self):
+        self.leaves["D001"]["verify_command"]="printf changed > a.txt"
+        self._write_manifest()
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertTrue(detail.startswith("verify-mutated-owned-artifacts:a.txt"),detail)
+        self.assertFalse(control_state.ready_info(self.project,"D001"))
+
+    def test_verify_side_effect_outside_ownership_fails_post_check(self):
+        self.leaves["D001"]["verify_command"]="touch evil.txt"
+        self._write_manifest()
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertTrue(detail.startswith("ownership-violation-after-verify:evil.txt"),detail)
+        self.assertFalse(control_state.ready_info(self.project,"D001"))
+
+    def test_corrupt_verify_wait_fails_closed(self):
+        (self.work/"D001.verify-wait.json").write_text("{broken")
+        with self.assertRaises(state_io.StateCorruptionError):
+            control_state.snapshot(self.project)
+
+
 class SplitStateMachineTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
@@ -427,6 +555,7 @@ class SplitStateMachineTests(unittest.TestCase):
 
     def test_parent_finalize_failure_becomes_finite_blocker(self):
         manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        manifest["leaves"]["D001"]["verify_deps"]=[]
         manifest["leaves"]["D001"]["split_children"]=["D001-A","D001-B"]
         manifest["leaves"]["D001-A"]=dict(self.parent,id="D001-A",parent="D001",split_children=[])
         manifest["leaves"]["D001-B"]=dict(self.parent,id="D001-B",parent="D001",split_children=[])

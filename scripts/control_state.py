@@ -21,6 +21,7 @@ MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
 SPLIT_STATUS_SUFFIX = ".split-status.json"
 LEAF_READY_PROTOCOL = "v2-leaf-ready-v1"
+VERIFY_WAIT_PROTOCOL = "v2-verify-wait-v1"
 SPLIT_PROGRESS_STATES = frozenset({"split-required","splitter-active","split-retryable"})
 SPLIT_TERMINAL_STATES = frozenset({
     "split-validation-failed","splitter-failed",
@@ -449,6 +450,20 @@ def test_state(project):
     return {"complete": passed, "status": data.get("status"), "checks_run": data.get("checks_run", 0)}
 
 
+def verify_wait_info(project,did):
+    path=Path(project)/".opencode-v2"/"work"/f"{did}.verify-wait.json"
+    if not path.exists():
+        return {}
+    data=load_json_object(path,label=f"verify wait {did}")
+    if (
+        data.get("owner")!="supervisor"
+        or data.get("protocol")!=VERIFY_WAIT_PROTOCOL
+        or data.get("deliverable")!=did
+    ):
+        raise StateCorruptionError(f"verify wait {did} is invalid")
+    return data
+
+
 def snapshot(project):
     """Return one derived state snapshot suitable for humans, scripts, or UI mirrors."""
     project = Path(project).resolve()
@@ -461,9 +476,17 @@ def snapshot(project):
         entry = attempts.get(did) if isinstance(attempts.get(did), dict) else {}
         attempt = attempt_state(entry)
         count = attempt["count"]
-        deps = leaf.get("launch_deps") if isinstance(leaf, dict) else []
-        deps = deps if isinstance(deps, list) else []
-        missing = [dep for dep in deps if not ready_info(project, dep)]
+        launch_deps = leaf.get("launch_deps") if isinstance(leaf, dict) else []
+        launch_deps = launch_deps if isinstance(launch_deps, list) else []
+        contract_deps = leaf.get("contract_deps") if isinstance(leaf, dict) else []
+        contract_deps = contract_deps if isinstance(contract_deps, list) else []
+        verify_deps = leaf.get("verify_deps") if isinstance(leaf, dict) else []
+        verify_deps = verify_deps if isinstance(verify_deps, list) else []
+        launch_missing = [dep for dep in launch_deps if not ready_info(project, dep)]
+        contract_missing = [dep for dep in contract_deps if not ready_info(project, dep)]
+        verify_missing = [dep for dep in verify_deps if not ready_info(project, dep)]
+        verify_wait = verify_wait_info(project,did)
+        verification_pending = bool(verify_wait)
         children = leaf.get("split_children", []) if isinstance(leaf, dict) else []
         children = children if isinstance(children, list) else []
         history = entry.get("failure_history", []) if isinstance(entry, dict) else []
@@ -504,14 +527,23 @@ def snapshot(project):
             "attempt_ledger_valid": attempt["valid"],
             "allowed_attempts": attempt["allowed_attempts"],
             "attempt_limit_reached": not complete and (not attempt["valid"] or count >= attempt["allowed_attempts"]),
-            "launch_deps_missing": missing,
+            "launch_deps_missing": launch_missing,
+            "contract_deps_missing": contract_missing,
+            "verify_deps_missing": verify_missing,
+            "verification_pending": verification_pending,
+            "verification_wait_session": verify_wait.get("session","") if verification_pending else "",
             "split_depth": split_depth(did),
             "split_children": children,
             "genuine_failures": genuine_failures,
             "split_required": split_required,
             "split_state": split_state,
             "split_generation": pending_split.get("generation", (split_marker or {}).get("generation",1)) if split_required else 0,
-            "eligible": not complete and not children and not split_required and attempt["valid"] and count < attempt["allowed_attempts"] and not missing,
+            "eligible": (
+                not complete and not children and not split_required
+                and not verification_pending
+                and attempt["valid"] and count < attempt["allowed_attempts"]
+                and not launch_missing and not contract_missing
+            ),
         }
     acceptance_complete = phase_ready(
         project, "ACCEPTANCE.ready", "ACCEPTANCE.md", "ACCEPTANCE_COMPLETE"

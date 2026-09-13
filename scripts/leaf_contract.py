@@ -9,6 +9,12 @@ IMPLEMENTATION_ROLES = frozenset({
 READ_ONLY_ROLES = frozenset({"tester"})
 WRITE_ROLES = frozenset(IMPLEMENTATION_ROLES - READ_ONLY_ROLES)
 NON_VERIFYING_COMMANDS = frozenset({"true", ":", "echo ok", "echo pass"})
+VERIFY_MASKING_PATTERNS = (
+    (re.compile(r"\|\|"), "Verify command uses ||, which can mask a failed check"),
+    (re.compile(r";\s*(?:true|:)\s*$"), "Verify command masks failure with trailing ; true/:"),
+    (re.compile(r"\bset\s+\+e\b"), "Verify command disables fail-fast shell behavior"),
+    (re.compile(r"\bexit\s+0\b"), "Verify command forces a successful exit"),
+)
 SUPERVISOR_RESERVED_PREFIXES = (".opencode-v2/work/", ".opencode-v2/bin/")
 SUPERVISOR_RESERVED_EXACT = frozenset({
     ".opencode-v2/control-status.json",
@@ -53,8 +59,22 @@ def strict_owned_artifact_paths(raw: str):
 def canonical_owned_artifacts(paths):
     return "none" if not paths else ", ".join(f"`{path}`" for path in paths)
 
+def validate_verify_command(verify_command: str):
+    command=(verify_command or "").strip()
+    errors=[]
+    if not command:
+        errors.append("missing Verify command")
+        return errors
+    if command in NON_VERIFYING_COMMANDS:
+        errors.append("Verify command is non-verifying")
+    for pattern,message in VERIFY_MASKING_PATTERNS:
+        if pattern.search(command):
+            errors.append(message)
+    return errors
+
+
 def validate_leaf_contract(role: str, owned_paths, verify_command: str):
-    errors=[]; role=(role or "").strip(); paths=list(owned_paths or []); command=(verify_command or "").strip()
+    errors=[]; role=(role or "").strip(); paths=list(owned_paths or [])
     if role not in IMPLEMENTATION_ROLES:
         errors.append(f"unknown implementation Role '{role or 'missing'}'")
     elif role in READ_ONLY_ROLES:
@@ -62,8 +82,7 @@ def validate_leaf_contract(role: str, owned_paths, verify_command: str):
             errors.append(f"read-only Role '{role}' must use Owned artifacts: none; use test-builder when the leaf must create or modify a test artifact")
     elif not paths:
         errors.append(f"write-capable Role '{role}' must own at least one durable artifact")
-    if not command: errors.append("missing Verify command")
-    elif command in NON_VERIFYING_COMMANDS: errors.append("Verify command is non-verifying")
+    errors.extend(validate_verify_command(verify_command))
     return errors
 
 def _split_ancestor(leaves,ancestor,descendant):

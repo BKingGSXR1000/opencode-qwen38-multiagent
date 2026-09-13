@@ -1,0 +1,15 @@
+Applied: 2026-09-13T19:46:33+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch4-verification-semantics-20260913-194632
+
+Audit Batch 4 - verification semantics:
+- Contract deps are deterministic hard pre-launch barriers until a future explicit contract-ready state exists;
+- Verify deps do not block implementation, but supervisor finalization waits durably without consuming an attempt or redispatching the leaf;
+- verify-wait state is supervisor-owned and fail-closed on corruption;
+- Verify runs under bash -euo pipefail semantics;
+- Verify commands using ||, set +e, forced exit 0, or trailing ; true/: are rejected;
+- mixed Launch/Contract/Verify dependency cycles are rejected;
+- execution waves enforce both Launch and Contract barriers;
+- supervisor checks ownership before and after Verify;
+- Verify is forbidden from repairing/mutating its own owned artifacts;
+- split-parent verification waits for Verify deps without consuming the parent failure budget;
+- 34 state-machine invariant/fault-injection tests pass.

@@ -205,11 +205,16 @@ The deterministic guard rejects the entire plan if this field is not canonical.
 Done-when condition. Never use `true`, `:`, or cosmetic echo commands.
 
 Dependency semantics:
-- Launch deps: hard scheduler barrier before spawning
-- Contract deps: implementation may proceed against an already-frozen interface
-- Verify deps: required before final Done-when verification
+- Launch deps: hard scheduler barrier before spawning.
+- Contract deps: currently also a hard scheduler barrier before spawning. V2 has
+  no separate mechanically-proven "contract frozen" state yet, so treating a
+  Contract dep as satisfiable before its producer is READY would be unsafe.
+  A future contract-first experiment may introduce an explicit contract-ready
+  sentinel and relax this barrier.
+- Verify deps: implementation may run before these are READY, but final
+  supervisor verification MUST wait until every Verify dep is READY.
 
-Execution waves MUST obey Launch deps.
+Execution waves MUST obey both Launch deps and Contract deps.
 
 Use this canonical line syntax for every wave assignment (ordinary Markdown
 bullets are fine; do not add prose to these lines):
