@@ -15,6 +15,10 @@ from leaf_contract import (
     canonical_owned_artifacts as shared_canonical_owned_artifacts,
     validate_leaf_contract,
 )
+from state_io import (
+    StateCorruptionError, load_json_object, atomic_write_json, atomic_write_text,
+    exclusive_file_lock,
+)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -51,7 +55,7 @@ READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS=MAX_INFRASTRUCTURE_RETRY_GRANTS
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
-event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}
+event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
@@ -197,25 +201,24 @@ def split_leaf_overlay_path():
     return Path(PROJECT)/".opencode-v2"/"work"/"split-leaves.json"
 
 def load_split_leaf_overlay():
+    default={"owner":"supervisor","protocol":"v2-split-leaf-overlay-v1","parents":{}}
     if not PROJECT:
-        return {"owner":"supervisor","protocol":"v2-split-leaf-overlay-v1","parents":{}}
-    try:
-        data=json.loads(split_leaf_overlay_path().read_text())
-        if not isinstance(data,dict):
-            raise ValueError("overlay is not an object")
-        data.setdefault("owner","supervisor")
-        data.setdefault("protocol","v2-split-leaf-overlay-v1")
-        data.setdefault("parents",{})
-        return data
-    except Exception:
-        return {"owner":"supervisor","protocol":"v2-split-leaf-overlay-v1","parents":{}}
+        return default
+    data=load_json_object(
+        split_leaf_overlay_path(),default_missing=default,label="split leaf overlay"
+    )
+    if data.get("owner") not in (None,"supervisor"):
+        raise StateCorruptionError("split leaf overlay owner is invalid")
+    parents=data.get("parents",{})
+    if not isinstance(parents,dict):
+        raise StateCorruptionError("split leaf overlay parents must be an object")
+    data.setdefault("owner","supervisor")
+    data.setdefault("protocol","v2-split-leaf-overlay-v1")
+    data["parents"]=parents
+    return data
 
 def save_split_leaf_overlay(data):
-    path=split_leaf_overlay_path()
-    path.parent.mkdir(parents=True,exist_ok=True)
-    tmp=path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data,indent=2)+"\n")
-    os.replace(tmp,path)
+    atomic_write_json(split_leaf_overlay_path(),data)
 
 def apply_split_leaf_overlay(manifest):
     if not isinstance(manifest,dict):
@@ -239,17 +242,17 @@ def apply_split_leaf_overlay(manifest):
 def load_manifest():
     if not PROJECT:
         return {}
-    try:
-        manifest=json.loads((Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json").read_text())
-    except Exception:
-        manifest={}
+    manifest=load_json_object(
+        Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json",
+        default_missing={},
+        label="implementation manifest",
+    )
     return apply_split_leaf_overlay(manifest)
 
 def save_manifest(manifest):
-    path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
-    tmp=path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(manifest,indent=2)+"\n")
-    os.replace(tmp,path)
+    atomic_write_json(
+        Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json",manifest
+    )
 
 def split_request_path(did):
     return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-request.json"
@@ -261,18 +264,15 @@ def split_status_path(did):
     return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-status.json"
 
 def load_split_status(did):
-    try:
-        data=json.loads(split_status_path(did).read_text())
-        return data if isinstance(data,dict) else {}
-    except Exception:
-        return {}
+    return load_json_object(
+        split_status_path(did),default_missing={},label=f"split status {did}"
+    )
 
 def save_split_status(did, state, **detail):
     """Persist a finite supervisor-owned split transition."""
-    path=split_status_path(did); path.parent.mkdir(parents=True,exist_ok=True)
     payload={"owner":"supervisor","parent_id":did,"state":state,
              "generation":1,"timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),**detail}
-    tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2)+"\n"); os.replace(tmp,path)
+    atomic_write_json(split_status_path(did),payload)
     return payload
 
 def split_history_path():
@@ -412,11 +412,18 @@ def persist_split(parent, proposals):
             save_split_leaf_overlay(overlay)
 
             path=split_history_path(); path.parent.mkdir(parents=True,exist_ok=True)
-            try: history=json.loads(path.read_text())
-            except Exception: history={"owner":"supervisor","protocol":SPLIT_PROPOSAL_PROTOCOL,"splits":[]}
-            history.setdefault("splits",[]).append({"parent":parent,"children":expected,
+            history=load_json_object(
+                path,
+                default_missing={"owner":"supervisor","protocol":SPLIT_PROPOSAL_PROTOCOL,"splits":[]},
+                label="split history",
+            )
+            splits=history.get("splits",[])
+            if not isinstance(splits,list):
+                raise StateCorruptionError("split history splits must be an array")
+            splits.append({"parent":parent,"children":expected,
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
-            tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(history,indent=2)+"\n"); os.replace(tmp,path)
+            history["splits"]=splits
+            atomic_write_json(path,history)
             split_request_path(parent).unlink(missing_ok=True)
             save_split_status(parent,"accepted",children=expected)
     sync_control_status_snapshot()
@@ -645,26 +652,45 @@ def normalized_state_snapshot(project):
 # V2.6.9 NORMALIZED SCHEDULER STATE END
 
 # V2.6.9 DURABLE CONTROL STATUS SNAPSHOT BEGIN
+def control_state_error_payload(exc):
+    return {
+        "owner":"supervisor",
+        "protocol":"v2-control-status-error-v1",
+        "state_error":True,
+        "state_error_type":type(exc).__name__,
+        "state_error_message":str(exc)[:1000],
+        "resume_phase":"execution-blocked",
+        "execution_blockers":[{
+            "deliverable":"",
+            "reason":"control_state_error",
+            "detail":str(exc)[:1000],
+        }],
+        "generated_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    }
+
+
 def sync_control_status_snapshot():
     # Persist the authoritative derived scheduler state for the root model.
     if not PROJECT:
         return {}
+    path=Path(PROJECT)/".opencode-v2"/"control-status.json"
     try:
         data=normalized_state_snapshot(PROJECT)
         if not isinstance(data,dict):
-            return {}
-        payload={"owner":"supervisor",**data}
-        path=Path(PROJECT)/".opencode-v2"/"control-status.json"
-        path.parent.mkdir(parents=True,exist_ok=True)
+            raise StateCorruptionError("normalized scheduler snapshot is not an object")
+        payload={"owner":"supervisor","state_error":False,**data}
         rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
         if not path.exists() or path.read_text(errors="replace")!=rendered:
-            tmp=path.with_suffix(".tmp")
-            tmp.write_text(rendered)
-            os.replace(tmp,path)
+            atomic_write_text(path,rendered)
         return payload
     except Exception as exc:
+        payload=control_state_error_payload(exc)
+        try:
+            atomic_write_json(path,payload)
+        except Exception as write_exc:
+            log(f"CONTROL_STATUS_ERROR_WRITE_FAILED source={exc!r} write={write_exc!r}")
         log(f"CONTROL_STATUS_SNAPSHOT_ERROR {exc!r}")
-        return {}
+        return payload
 # V2.6.9 DURABLE CONTROL STATUS SNAPSHOT END
 
 def ready_info(did):
@@ -748,13 +774,20 @@ def planner_progress_reason(sid,elapsed,plan_path=None):
 def planner_restart_path(): return Path(PROJECT)/".opencode-v2/work/planner-restarts.json"
 
 def planner_restart_count():
-    try: return int(json.loads(planner_restart_path().read_text()).get("count") or 0)
-    except Exception: return 0
+    data=load_json_object(
+        planner_restart_path(),default_missing={"count":0},label="planner restart ledger"
+    )
+    try:
+        count=int(data.get("count") or 0)
+    except (ValueError,TypeError) as exc:
+        raise StateCorruptionError("planner restart ledger count is invalid") from exc
+    if count < 0:
+        raise StateCorruptionError("planner restart ledger count is negative")
+    return count
 
 def record_planner_restart(sid,reason):
-    path=planner_restart_path(); path.parent.mkdir(parents=True,exist_ok=True)
     data={"owner":"supervisor","count":planner_restart_count()+1,"retired_session":sid,"reason":reason}
-    temp=path.with_suffix(".tmp"); temp.write_text(json.dumps(data,indent=2)+"\n"); os.replace(temp,path)
+    atomic_write_json(planner_restart_path(),data)
 
 def planner_retirement_reason(sid,elapsed,plan_path=None):
     """One shared planner invariant for fresh and replacement sessions."""
@@ -1226,25 +1259,20 @@ def effective_fallback_reason(sid,agent,did,observable,now=None):
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
-    try: return json.loads(attempts_path().read_text())
-    except Exception: return {"protocol":ATTEMPT_LEDGER_PROTOCOL,"deliverables":{}}
+    return load_json_object(
+        attempts_path(),
+        default_missing={"protocol":ATTEMPT_LEDGER_PROTOCOL,"deliverables":{}},
+        label="attempt ledger",
+    )
 def save_attempts(data):
-    p=attempts_path(); p.parent.mkdir(parents=True,exist_ok=True); t=p.with_suffix(".tmp"); t.write_text(json.dumps(data,indent=2)+"\n"); os.replace(t,p)
+    atomic_write_json(attempts_path(),data)
 
 @contextlib.contextmanager
 def attempt_lock():
-    """One cross-process lock shared with the pre-dispatch OpenCode plugin."""
+    """Cross-process kernel lock; stale lock files cannot deadlock recovery."""
     path=attempts_path().with_name("attempts.json.lock")
-    path.parent.mkdir(parents=True,exist_ok=True)
-    for _ in range(250):
-        try:
-            fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY); os.close(fd); break
-        except FileExistsError: time.sleep(.02)
-    else: raise RuntimeError("attempt_ledger_lock_timeout")
-    try: yield
-    finally:
-        try: path.unlink()
-        except FileNotFoundError: pass
+    with exclusive_file_lock(path,timeout=5.0):
+        yield
 
 def validate_dispatch(agent,text):
     """Validate a planned Dxxx dispatch before the child model can start."""
@@ -1831,13 +1859,108 @@ class OpenCodeHTTP:
 
 http=OpenCodeHTTP()
 
+ABORT_INTENT_PROTOCOL="v2-abort-intents-v1"
+
+def abort_intents_path():
+    return Path(PROJECT)/".opencode-v2"/"work"/"abort-intents.json"
+
+def load_abort_intents():
+    data=load_json_object(
+        abort_intents_path(),
+        default_missing={"owner":"supervisor","protocol":ABORT_INTENT_PROTOCOL,"sessions":{}},
+        label="abort intent ledger",
+    )
+    if data.get("owner") not in (None,"supervisor"):
+        raise StateCorruptionError("abort intent ledger owner is invalid")
+    sessions=data.get("sessions",{})
+    if not isinstance(sessions,dict):
+        raise StateCorruptionError("abort intent ledger sessions must be an object")
+    data.setdefault("owner","supervisor")
+    data.setdefault("protocol",ABORT_INTENT_PROTOCOL)
+    data["sessions"]=sessions
+    return data
+
+def save_abort_intents(data):
+    atomic_write_json(abort_intents_path(),data)
+
+def set_abort_intent(sid,reason,agent,state):
+    if not PROJECT or not sid:
+        return
+    with abort_intent_lock:
+        data=load_abort_intents()
+        entry=data["sessions"].setdefault(sid,{})
+        entry.update({
+            "session":sid,
+            "reason":reason,
+            "agent":agent,
+            "state":state,
+            "updated_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        })
+        save_abort_intents(data)
+
+def session_terminal_aborted(sid):
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq DESC",
+            (sid,),
+        ).fetchall()
+        con.close()
+        for (raw,) in rows:
+            data=json.loads(raw) if raw else {}
+            if not isinstance(data,dict):
+                continue
+            err=data.get("error") if isinstance(data.get("error"),dict) else {}
+            if data.get("finish")=="error" and err.get("type")=="aborted":
+                return True
+            # The newest assistant row is authoritative once parseable.
+            return False
+    except Exception:
+        return False
+    return False
+
+def persisted_abort_reason(sid):
+    if not PROJECT or not sid:
+        return ""
+    data=load_abort_intents()
+    entry=(data.get("sessions") or {}).get(sid)
+    if not isinstance(entry,dict):
+        return ""
+    state=entry.get("state")
+    if state=="confirmed":
+        return str(entry.get("reason") or "")
+    if state=="requested" and session_terminal_aborted(sid):
+        return str(entry.get("reason") or "")
+    return ""
+
+def resolve_abort_intent(sid,outcome):
+    if not PROJECT or not sid:
+        return
+    with abort_intent_lock:
+        data=load_abort_intents()
+        entry=(data.get("sessions") or {}).get(sid)
+        if not isinstance(entry,dict):
+            return
+        if entry.get("state") in {"resolved","failed"}:
+            return
+        entry.update({
+            "state":"resolved",
+            "outcome":outcome,
+            "resolved_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        })
+        save_abort_intents(data)
+
 def abort_session(sid,reason,agent=""):
+    # Persist intent *before* the external side effect.  If the process dies
+    # after the interrupt but before confirmation, restart reconciliation can
+    # recover the reason when the session DB shows a terminal aborted message.
+    set_abort_intent(sid,reason,agent,"requested")
     ok=http.interrupt(sid)
     if ok:
-        # The persisted reconciler can distinguish a supervisor-imposed abort
-        # from a worker that completed unsuccessfully.  This is deliberately
-        # not inferred from an ambiguous UI "cancelled" label.
+        set_abort_intent(sid,reason,agent,"confirmed")
         supervisor_abort_reasons[sid]=reason
+    else:
+        set_abort_intent(sid,reason,agent,"failed")
     kind="INTERRUPT" if ok else "INTERRUPT_FAILED"; log(f"{kind} session={sid} agent={agent} reason={reason}"); csv(kind,sid,agent,reason); return ok
 
 def watchdog_age(sid,key,can_watch,now=None):
@@ -2050,22 +2173,22 @@ def enforce_assignment(sid,agent,first_user):
 
     did,violation=validate_dispatch(agent,text)
     if violation:
-        dispatch_seen.add(sid)
-        abort_session(sid,f"dispatch_protocol_violation {violation}",agent)
+        if abort_session(sid,f"dispatch_protocol_violation {violation}",agent):
+            dispatch_seen.add(sid)
         log(f"DISPATCH_DENY session={sid} agent={agent} {violation}")
         csv("DISPATCH_DENY",sid,agent,violation)
         return
 
-    # Consume dispatch_seen only after the prompt protocol is validated.
-    dispatch_seen.add(sid)
-
     claim,n=claim_attempt(sid,did)
     if claim in {"limit","invalid"}:
         reason="attempt_limit" if claim=="limit" else "attempt_ledger_invalid"
-        abort_session(sid,f"dispatch_guard {reason} deliverable={did} count={n}",agent)
+        if abort_session(sid,f"dispatch_guard {reason} deliverable={did} count={n}",agent):
+            dispatch_seen.add(sid)
         csv("DISPATCH_DENY",sid,agent,f"{did} {reason}={n}")
         return
 
+    # Mark processed only after the durable attempt claim/binding succeeded.
+    dispatch_seen.add(sid)
     log(f"DISPATCH_ALLOW session={sid} agent={agent} deliverable={did} attempt={n}")
     csv("DISPATCH_ALLOW",sid,agent,f"{did} attempt={n}")
 
@@ -2203,15 +2326,23 @@ def root_orchestrator_id():
 def root_rollover_path(): return Path(PROJECT)/".opencode-v2"/"root-rollovers.json"
 
 def root_restart_count():
-    try: return int(json.loads(root_rollover_path().read_text()).get("count") or 0)
-    except Exception: return 0
+    data=load_json_object(
+        root_rollover_path(),default_missing={"count":0},label="root rollover ledger"
+    )
+    try:
+        count=int(data.get("count") or 0)
+    except (ValueError,TypeError) as exc:
+        raise StateCorruptionError("root rollover count is invalid") from exc
+    if count < 0:
+        raise StateCorruptionError("root rollover count is negative")
+    return count
 
 def record_root_restart(sid,phase):
-    path=root_rollover_path(); path.parent.mkdir(parents=True,exist_ok=True)
     count=root_restart_count()+1
-    temp=path.with_suffix(".tmp")
-    temp.write_text(json.dumps({"owner":"supervisor","count":count,"latest_session":sid,"phase":phase},indent=2)+"\n")
-    os.replace(temp,path)
+    atomic_write_json(
+        root_rollover_path(),
+        {"owner":"supervisor","count":count,"latest_session":sid,"phase":phase},
+    )
 
 
 # V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
@@ -2862,6 +2993,237 @@ def api_poll_loop():
 
         time.sleep(POLL)
 
+def pending_ledger_session_ids():
+    """Current unclassified materialized attempts survive supervisor restart."""
+    pending=set()
+    data=load_attempts()
+    entries=data.get("deliverables",{})
+    if not isinstance(entries,dict):
+        raise StateCorruptionError("attempt ledger deliverables must be an object")
+    for did,entry in entries.items():
+        if not isinstance(entry,dict) or ready_info(did):
+            continue
+        try:
+            count=int(entry.get("count") or 0)
+        except (TypeError,ValueError):
+            continue
+        sessions=entry.get("sessions",[])
+        if count < 1 or not isinstance(sessions,list) or not sessions:
+            continue
+        sid=sessions[-1]
+        if not isinstance(sid,str) or not sid or sid.startswith("dispatch:"):
+            continue
+        history=entry.get("failure_history",[])
+        classified=any(
+            isinstance(item,dict) and item.get("attempt")==count
+            for item in history if isinstance(history,list)
+        )
+        if not classified:
+            pending.add(sid)
+    return pending
+
+
+def reconcile_planner_completion(sid):
+    if sid in planner_completion_seen:
+        return
+    if not plan_ready():
+        current_plan=planner_plan_state(
+            Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
+        )
+        if not current_plan.get("meaningful_signature"):
+            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                record_planner_restart(
+                    sid,
+                    "planner_completed_without_meaningful_plan_progress",
+                )
+            log(
+                f"PLANNER_COMPLETED_NO_PROGRESS session={sid} "
+                f"restart_count={planner_restart_count()}"
+            )
+            csv(
+                "PLANNER_COMPLETED_NO_PROGRESS",sid,"implementation-planner",
+                f"restart_count={planner_restart_count()}",
+            )
+    # Mark only after all durable processing above succeeded.
+    planner_completion_seen.add(sid)
+
+
+def reconcile_idle_implementation_session(sid,agent):
+    if sid in post_finalize_seen:
+        return
+    did=session_task.get(
+        sid,(parse_deliverable(first_user_text_db(sid)),0)
+    )[0]
+    if not did:
+        post_finalize_seen.add(sid)
+        return
+
+    abort_reason=immediate_runtime_abort(sid)
+    cached_abort=supervisor_abort_reasons.get(sid,"")
+    durable_abort=persisted_abort_reason(sid)
+    supervisor_abort=cached_abort or durable_abort
+    infrastructure_reason=abort_reason or supervisor_abort
+
+    if infrastructure_reason and not ready_info(did):
+        finalized=False
+        detail="not-attempted"
+        if durable_worker_execution(did):
+            finalized,detail=post_session_finalize(did,sid=sid)
+            log(
+                f"POST_SESSION_VERIFY_AFTER_INFRA session={sid} "
+                f"deliverable={did} result={detail}"
+            )
+            csv(
+                "POST_SESSION_VERIFY_AFTER_INFRA",sid,agent,
+                f"{did} {detail}"
+            )
+        if not finalized and not ready_info(did):
+            kind=(
+                "supervisor-compaction-retire"
+                if "child_compaction" in infrastructure_reason
+                else "runtime-cancel"
+            )
+            granted,grant_detail=record_infrastructure_abort(
+                sid,did,infrastructure_reason,kind
+            )
+            # Crash/replay safe: if the grant was already persisted, the
+            # failure-history classification may still need to be completed.
+            if granted or grant_detail=="already-recorded":
+                record_leaf_failure(
+                    did,infrastructure_reason,"infrastructure"
+                )
+            release_operator_reservation(
+                sid,did,infrastructure_reason
+            )
+            log(
+                f"LEAF_INFRASTRUCTURE_ABORT session={sid} "
+                f"deliverable={did} granted={str(granted).lower()} "
+                f"reason={infrastructure_reason}"
+            )
+    else:
+        execution=meaningful_worker_execution(sid,did)
+        if execution:
+            consume_operator_reservation(sid,did,execution)
+        if not ready_info(did):
+            ok,detail=post_session_finalize(did,sid=sid)
+            log(
+                f"POST_SESSION_VERIFY session={sid} "
+                f"deliverable={did} result={detail}"
+            )
+            csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
+            if not ok and detail != "not-applicable":
+                classification=(
+                    "bad-plan"
+                    if detail in {
+                        "verify-command-missing","owned-artifacts-missing"
+                    } and not meaningful_worker_execution(sid,did)
+                    else "genuine"
+                )
+                recorded,outcome=record_leaf_failure(
+                    did,detail,classification
+                )
+                if recorded:
+                    log(
+                        f"LEAF_FAILURE session={sid} deliverable={did} "
+                        f"classification={classification} outcome={outcome}"
+                    )
+                    csv(
+                        "LEAF_FAILURE",sid,agent,
+                        f"{did} classification={classification} "
+                        f"outcome={outcome}"
+                    )
+
+    if cached_abort:
+        supervisor_abort_reasons.pop(sid,None)
+    if durable_abort:
+        resolve_abort_intent(
+            sid,
+            "infrastructure-classified"
+            if infrastructure_reason else
+            "completed-without-observed-abort"
+        )
+    else:
+        # Close a requested intent that never produced an aborted terminal
+        # session (e.g. crash before the external interrupt happened).
+        resolve_abort_intent(sid,"completed-without-observed-abort")
+    post_finalize_seen.add(sid)
+
+
+def reconcile_compaction_event(sid,agent,comps):
+    prev=compaction_seen.get(sid,0)
+    if comps<=prev:
+        return
+    did,_=session_task.get(
+        sid,(parse_deliverable(first_user_text_db(sid)),0)
+    )
+    if did and ready_info(did):
+        log(
+            f"COMPACTION_AFTER_DONE session={sid} agent={agent} "
+            f"deliverable={did} compactions={comps}"
+        )
+        compaction_seen[sid]=comps
+        return
+    if agent=="implementation-planner" and plan_ready():
+        log(
+            f"COMPACTION_AFTER_DONE session={sid} agent={agent} control_ready=1"
+        )
+        compaction_seen[sid]=comps
+        return
+    failed=compaction_failure(sid)
+    if failed:
+        granted,detail=(False,"not-implementation-child")
+        if failed=="compaction.failed" and did and agent in IMPLEMENTATION_AGENTS:
+            granted,detail=record_compaction_infrastructure_failure(sid,did)
+            if granted or detail=="already-recorded":
+                record_leaf_failure(
+                    did,"opencode-compaction-template","infrastructure"
+                )
+        log(
+            f"COMPACTION_FAILED session={sid} agent={agent} "
+            f"deliverable={did or 'unknown'} type={failed} "
+            f"infrastructure_credit={str(granted).lower()} detail={detail}"
+        )
+        csv(
+            "COMPACTION_FAILED",sid,agent,
+            f"{did or 'unknown'} type={failed} "
+            f"infrastructure_credit={str(granted).lower()} detail={detail}"
+        )
+        compaction_seen[sid]=comps
+        return
+
+    compaction_limit=(
+        MAX_REFERENCE_COMPACTIONS
+        if agent=="reference-researcher"
+        else MAX_IMPLEMENTATION_COMPACTIONS
+        if agent in IMPLEMENTATION_AGENTS
+        else 1
+    )
+    if comps<=compaction_limit:
+        log(
+            f"COMPACTION_ALLOWED session={sid} agent={agent} "
+            f"count={comps} limit={compaction_limit}"
+        )
+        csv(
+            "COMPACTION_ALLOWED",sid,agent,
+            f"count={comps} limit={compaction_limit}"
+        )
+    else:
+        if not abort_session(
+            sid,
+            f"child_compaction count={comps}; limit={compaction_limit}",
+            agent,
+        ):
+            raise RuntimeError(
+                f"compaction interrupt failed for session {sid}"
+            )
+        log(
+            f"RETIRED_COMPACTION session={sid} agent={agent} "
+            f"compactions={comps} limit={compaction_limit}"
+        )
+    # Seen only after the durable/logical transition succeeded.
+    compaction_seen[sid]=comps
+
+
 def persisted_reconcile_loop():
     while not DB.exists(): time.sleep(0.5)
     while True:
@@ -2869,122 +3231,35 @@ def persisted_reconcile_loop():
             reconcile_split_proposals()
             reconcile_split_parent_completions()
             sync_control_status_snapshot()
-            con=db_connect(); rows=con.execute("SELECT s.id,coalesce(s.agent,''),(SELECT count(*) FROM session_message m WHERE m.session_id=s.id AND m.type='compaction'),s.time_idle FROM session_v2 s WHERE s.parent_id IS NOT NULL AND s.directory=? AND s.time_created>=?",(PROJECT,START_MS)).fetchall() if PROJECT else []; con.close()
-            for sid,agent,comps,time_idle in rows:
-                prompt=first_user_text_db(sid)
-                if (agent in IMPLEMENTATION_AGENTS or parse_deliverable(strip_subagent_prefix(prompt))) and sid not in dispatch_seen:
-                    enforce_assignment(sid,agent,prompt)
-                if agent=="implementation-planner" and time_idle and sid not in planner_completion_seen:
-                    planner_completion_seen.add(sid)
-                    if not plan_ready():
-                        current_plan=planner_plan_state(
-                            Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
-                        )
-                        # Only count an ordinarily-completed planner as an
-                        # unsuccessful restart when the durable plan still has
-                        # zero Dxxx structure. A productive partial plan is a
-                        # valid progressive handoff and is not penalized here.
-                        if not current_plan.get("meaningful_signature"):
-                            if planner_restart_count()<MAX_PLANNER_RESTARTS:
-                                record_planner_restart(
-                                    sid,
-                                    "planner_completed_without_meaningful_plan_progress",
-                                )
-                            log(
-                                f"PLANNER_COMPLETED_NO_PROGRESS session={sid} "
-                                f"restart_count={planner_restart_count()}"
-                            )
-                            csv(
-                                "PLANNER_COMPLETED_NO_PROGRESS",sid,agent,
-                                f"restart_count={planner_restart_count()}",
-                            )
-
-                if agent in IMPLEMENTATION_AGENTS and time_idle and sid not in post_finalize_seen:
-                    post_finalize_seen.add(sid)
-                    did=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))[0]
-                    if did:
-                        # A zero-token/zero-tool beta cancellation happened
-                        # before the child could consume its reserved human
-                        # authorization.  Release at most one such reservation
-                        # and let durable status automatically reopen execution.
-                        abort_reason=immediate_runtime_abort(sid)
-                        supervisor_abort=supervisor_abort_reasons.pop(sid,"")
-                        infrastructure_reason=abort_reason or supervisor_abort
-                        # A direct runtime cancellation or our bounded
-                        # compaction/runaway retirement has no durable owned
-                        # work. It is infrastructure, not a genuine failure,
-                        # even if the model made read-only tool calls first.
-                        if infrastructure_reason and not ready_info(did):
-                            finalized=False
-                            detail="not-attempted"
-                            if durable_worker_execution(did):
-                                finalized,detail=post_session_finalize(did,sid=sid)
-                                log(f"POST_SESSION_VERIFY_AFTER_INFRA session={sid} deliverable={did} result={detail}")
-                                csv("POST_SESSION_VERIFY_AFTER_INFRA",sid,agent,f"{did} {detail}")
-                            if not finalized and not ready_info(did):
-                                kind=("supervisor-compaction-retire" if "child_compaction" in infrastructure_reason
-                                      else "runtime-cancel")
-                                granted,_=record_infrastructure_abort(sid,did,infrastructure_reason,kind)
-                                record_leaf_failure(did,infrastructure_reason,"infrastructure")
-                                release_operator_reservation(sid,did,infrastructure_reason)
-                                log(f"LEAF_INFRASTRUCTURE_ABORT session={sid} deliverable={did} granted={str(granted).lower()} reason={infrastructure_reason}")
-                        else:
-                            execution=meaningful_worker_execution(sid,did)
-                            if execution:
-                                consume_operator_reservation(sid,did,execution)
-                            if not ready_info(did):
-                                ok,detail=post_session_finalize(did,sid=sid)
-                                log(f"POST_SESSION_VERIFY session={sid} deliverable={did} result={detail}")
-                                csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
-                                if not ok and detail != "not-applicable":
-                                    classification=("bad-plan" if detail in {
-                                        "verify-command-missing", "owned-artifacts-missing"
-                                    } and not meaningful_worker_execution(sid,did) else "genuine")
-                                    recorded,outcome=record_leaf_failure(did,detail,classification)
-                                    if recorded:
-                                        log(f"LEAF_FAILURE session={sid} deliverable={did} classification={classification} outcome={outcome}")
-                                        csv("LEAF_FAILURE",sid,agent,f"{did} classification={classification} outcome={outcome}")
-                prev=compaction_seen.get(sid,0)
-                if comps<=prev: continue
-                compaction_seen[sid]=comps; did,_=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))
-                if did and ready_info(did): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} deliverable={did} compactions={comps}"); continue
-                if agent=="implementation-planner" and plan_ready(): log(f"COMPACTION_AFTER_DONE session={sid} agent={agent} control_ready=1"); continue
-                failed=compaction_failure(sid)
-                if failed:
-                    granted,detail=(False,"not-implementation-child")
-                    if failed=="compaction.failed" and did and agent in IMPLEMENTATION_AGENTS:
-                        granted,detail=record_compaction_infrastructure_failure(sid,did)
-                        if granted:
-                            record_leaf_failure(did,"opencode-compaction-template","infrastructure")
-                    log(f"COMPACTION_FAILED session={sid} agent={agent} deliverable={did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
-                    csv("COMPACTION_FAILED",sid,agent,f"{did or 'unknown'} type={failed} infrastructure_credit={str(granted).lower()} detail={detail}")
+            pending_sessions=pending_ledger_session_ids()
+            con=db_connect()
+            rows=con.execute(
+                "SELECT s.id,coalesce(s.agent,''),"
+                "(SELECT count(*) FROM session_message m "
+                "WHERE m.session_id=s.id AND m.type='compaction'),"
+                "s.time_idle,s.time_created "
+                "FROM session_v2 s "
+                "WHERE s.parent_id IS NOT NULL AND s.directory=?",
+                (PROJECT,),
+            ).fetchall() if PROJECT else []
+            con.close()
+            for sid,agent,comps,time_idle,time_created in rows:
+                # Normal sessions belong to this supervisor epoch.  Additionally,
+                # reconcile the exact current unclassified ledger session even if
+                # it predates a supervisor restart.
+                if int(time_created or 0) < START_MS and sid not in pending_sessions:
                     continue
-                compaction_limit=(
-                    MAX_REFERENCE_COMPACTIONS
-                    if agent=="reference-researcher"
-                    else MAX_IMPLEMENTATION_COMPACTIONS
-                    if agent in IMPLEMENTATION_AGENTS
-                    else 1
-                )
-                if comps<=compaction_limit:
-                    log(
-                        f"COMPACTION_ALLOWED session={sid} agent={agent} "
-                        f"count={comps} limit={compaction_limit}"
-                    )
-                    csv(
-                        "COMPACTION_ALLOWED",sid,agent,
-                        f"count={comps} limit={compaction_limit}"
-                    )
-                else:
-                    abort_session(
-                        sid,
-                        f"child_compaction count={comps}; limit={compaction_limit}",
-                        agent,
-                    )
-                    log(
-                        f"RETIRED_COMPACTION session={sid} agent={agent} "
-                        f"compactions={comps} limit={compaction_limit}"
-                    )
+                prompt=first_user_text_db(sid)
+                if (
+                    agent in IMPLEMENTATION_AGENTS
+                    or parse_deliverable(strip_subagent_prefix(prompt))
+                ) and sid not in dispatch_seen:
+                    enforce_assignment(sid,agent,prompt)
+                if agent=="implementation-planner" and time_idle:
+                    reconcile_planner_completion(sid)
+                if agent in IMPLEMENTATION_AGENTS and time_idle:
+                    reconcile_idle_implementation_session(sid,agent)
+                reconcile_compaction_event(sid,agent,comps)
         except Exception as e: log(f"PERSISTED_RECONCILE_ERROR {e!r}")
         time.sleep(0.5)
 

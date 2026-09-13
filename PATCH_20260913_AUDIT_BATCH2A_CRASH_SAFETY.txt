@@ -1,0 +1,18 @@
+Applied: 2026-09-13T19:27:43+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch2a-crash-safety-20260913-192743
+
+Audit Batch 2A — durable state / crash consistency:
+- canonical JSON corruption now fails closed instead of becoming empty scheduler state;
+- attempts/manifests/split status/split overlay/split history/planner/root ledgers use crash-safe atomic writes;
+- attempt locking now uses kernel flock, so a stale lock file cannot deadlock V2 after process death;
+- control-status.json is overwritten with an explicit execution-blocked state_error projection when scheduler derivation fails;
+- supervisor abort intent is persisted before interrupt and recovered after restart when an aborted terminal session is observed;
+- dispatch/planner/finalization/compaction seen markers are committed only after their transition succeeds;
+- the persisted reconciler includes the current unclassified attempt session from attempts.json even when that session predates a supervisor restart;
+- compaction/infrastructure reconciliation is replay-safe when a grant was persisted before failure-history classification;
+- 18 state-machine invariant/fault-injection tests pass.
+
+Deferred to Batch 3:
+- atomic second-genuine-failure -> split-required transition;
+- transactional/idempotent split persistence and splitter leases/retries;
+- finite split-parent collapse failure handling.

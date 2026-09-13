@@ -6,6 +6,7 @@ It does not write readiness, attempts, or test state.
 """
 import json
 from pathlib import Path
+from state_io import StateCorruptionError, load_json_object
 
 
 AUTOMATIC_ATTEMPT_LIMIT = 3
@@ -119,33 +120,28 @@ def phase_ready(project, name, artifact, marker):
 
 
 def load_manifest(project):
-    try:
-        return json.loads(
-            (Path(project) / ".opencode-v2" / "IMPLEMENTATION_PLAN.guard.json").read_text()
-        )
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return load_json_object(
+        Path(project) / ".opencode-v2" / "IMPLEMENTATION_PLAN.guard.json",
+        default_missing={},
+        label="implementation manifest",
+    )
 
 
 def load_attempts(project):
-    try:
-        data = json.loads(
-            (Path(project) / ".opencode-v2" / "work" / "attempts.json").read_text()
-        )
-        return data if isinstance(data, dict) else {"deliverables": {}}
-    except (OSError, json.JSONDecodeError):
-        return {"deliverables": {}}
+    return load_json_object(
+        Path(project) / ".opencode-v2" / "work" / "attempts.json",
+        default_missing={"deliverables": {}},
+        label="attempt ledger",
+    )
 
 
 def split_status(project, did):
     """Return the supervisor's finite state for one pending split request."""
-    try:
-        data = json.loads(
-            (Path(project) / ".opencode-v2" / "work" / f"{did}{SPLIT_STATUS_SUFFIX}").read_text()
-        )
-        return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return load_json_object(
+        Path(project) / ".opencode-v2" / "work" / f"{did}{SPLIT_STATUS_SUFFIX}",
+        default_missing={},
+        label=f"split status {did}",
+    )
 
 
 def _attempt_state_v2612_original(entry):
@@ -424,21 +420,26 @@ def attempt_state(entry):
 
 
 def planner_restarts(project):
+    data=load_json_object(
+        Path(project) / ".opencode-v2" / "work" / "planner-restarts.json",
+        default_missing={"count":0},
+        label="planner restart ledger",
+    )
     try:
-        data = json.loads(
-            (Path(project) / ".opencode-v2" / "work" / "planner-restarts.json").read_text()
-        )
-        count = int(data.get("count") or 0)
-        return count if count >= 0 else 0
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return 0
+        count=int(data.get("count") or 0)
+    except (ValueError,TypeError) as exc:
+        raise StateCorruptionError("planner restart ledger count is invalid") from exc
+    if count < 0:
+        raise StateCorruptionError("planner restart ledger count is negative")
+    return count
 
 
 def test_state(project):
-    try:
-        data = json.loads((Path(project) / ".opencode-v2" / "TEST_REPORT.json").read_text())
-    except (OSError, json.JSONDecodeError):
-        data = {}
+    data=load_json_object(
+        Path(project) / ".opencode-v2" / "TEST_REPORT.json",
+        default_missing={},
+        label="test report",
+    )
     passed = data.get("status") == "pass" and isinstance(data.get("checks_run"), int) and data["checks_run"] > 0
     return {"complete": passed, "status": data.get("status"), "checks_run": data.get("checks_run", 0)}
 
