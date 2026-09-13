@@ -14,7 +14,7 @@ MAX_SPLIT_DEPTH = 2
 # A bounded, supervisor-recorded OpenCode failure can reserve one additional
 # *dispatch slot* without relabelling a broken beta compaction as a successful
 # implementation attempt.  It is deliberately not a general retry mechanism.
-MAX_INFRASTRUCTURE_RETRY_GRANTS = 1
+MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
 # A human authorization may survive one *proven, pre-execution* runtime abort.
 # It releases an existing reservation; it never creates a human grant.
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
@@ -134,7 +134,7 @@ def split_status(project, did):
         return {}
 
 
-def attempt_state(entry):
+def _attempt_state_v2612_original(entry):
     """Validate and project one supervisor-owned attempt ledger entry.
 
     Counts above the automatic limit are valid only when every excess attempt
@@ -299,6 +299,114 @@ def attempt_state(entry):
         "infrastructure_authorized_attempt": valid and excess > 0 and excess <= infrastructure_grants,
         "operator_authorized_attempt": valid and operator_dispatches > 0,
     }
+
+# V2.6.12 INFRASTRUCTURE LEDGER REPAIR BEGIN
+def _v2612_repair_infrastructure_attempt_state(entry, state):
+    """Repair only the proven New17 infrastructure-grant inconsistency.
+
+    The original attempt_state remains authoritative.  This helper may turn an
+    invalid result into a valid one only when every auditable invariant below
+    proves that the sole inconsistency is a supervisor-granted infrastructure
+    recovery.  Human/operator retry accounting is intentionally excluded.
+    """
+    if not isinstance(entry, dict) or not isinstance(state, dict):
+        return state
+    if state.get("valid"):
+        return state
+
+    try:
+        count = int(entry.get("count") or 0)
+        automatic_limit = int(entry.get("automatic_limit") or AUTOMATIC_ATTEMPT_LIMIT)
+        infra_grants = int(entry.get("infrastructure_retry_grants") or 0)
+    except (TypeError, ValueError):
+        return state
+
+    max_infra = int(globals().get("MAX_INFRASTRUCTURE_RETRY_GRANTS", 0) or 0)
+    if count < 1 or automatic_limit < 1 or infra_grants < 1:
+        return state
+    if max_infra and infra_grants > max_infra:
+        return state
+
+    # Never use this repair to bypass human/operator accounting.
+    if int(entry.get("operator_retry_grants") or 0) != 0:
+        return state
+    if entry.get("operator_retry_attempts") or entry.get("operator_overrides"):
+        return state
+
+    sessions = entry.get("sessions")
+    if not isinstance(sessions, list) or len(sessions) != count:
+        return state
+    if not all(isinstance(sid, str) and sid for sid in sessions):
+        return state
+    if len(set(sessions)) != len(sessions):
+        return state
+
+    infra_failures = entry.get("infrastructure_failures") or []
+    if not isinstance(infra_failures, list) or len(infra_failures) != infra_grants:
+        return state
+    granted_sessions = []
+    for item in infra_failures:
+        if not isinstance(item, dict):
+            return state
+        if int(item.get("grant") or 0) != 1 or item.get("source") != "supervisor":
+            return state
+        sid = item.get("session")
+        if not isinstance(sid, str) or sid not in sessions or sid in granted_sessions:
+            return state
+        granted_sessions.append(sid)
+
+    history = entry.get("failure_history") or []
+    if not isinstance(history, list) or len(history) > count:
+        return state
+    classifications = []
+    for item in history:
+        if not isinstance(item, dict):
+            return state
+        classification = item.get("classification")
+        if classification not in {"genuine", "infrastructure"}:
+            return state
+        classifications.append(classification)
+
+    infra_history = classifications.count("infrastructure")
+    genuine_failures = classifications.count("genuine")
+    # record_infrastructure_abort writes the grant immediately before the
+    # matching infrastructure failure-history row, so at most one grant may be
+    # temporarily ahead of failure_history.
+    if infra_history > infra_grants or infra_grants - infra_history > 1:
+        return state
+    if genuine_failures > automatic_limit:
+        return state
+
+    allowed = automatic_limit + infra_grants
+    if count > allowed:
+        return state
+
+    # At most one current dispatch may be unclassified while it is still live.
+    if count - len(history) not in (0, 1):
+        return state
+
+    repaired = dict(state)
+    repaired.update({
+        "valid": True,
+        "count": count,
+        "automatic_limit": automatic_limit,
+        "automatic_attempts_consumed": genuine_failures,
+        "infrastructure_retry_grants": infra_grants,
+        "allowed_attempts": allowed,
+        "infrastructure_grants_remaining": max(0, allowed - count),
+        "infrastructure_authorized_attempt": (
+            count >= automatic_limit and count < allowed
+        ),
+        "v2612_infrastructure_repair": True,
+    })
+    return repaired
+
+
+def attempt_state(entry):
+    state = _attempt_state_v2612_original(entry)
+    return _v2612_repair_infrastructure_attempt_state(entry, state)
+# V2.6.12 INFRASTRUCTURE LEDGER REPAIR END
+
 
 
 def planner_restarts(project):

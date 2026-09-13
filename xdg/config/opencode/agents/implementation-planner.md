@@ -340,3 +340,53 @@ Also ensure every external artifact that a leaf's **Verify command** requires is
 represented by an appropriate Verify dependency; do not make a worker fail
 verification merely because a producing leaf is still legitimately in flight.
 <!-- V2.6.9 PLANNER EXTERNAL-CONTRACT RULE END -->
+
+<!-- V2.6.12 CONTEXT-BOUNDED LEAF PLANNING BEGIN -->
+## Context-bounded leaves — fresh context beats repeated compaction
+
+`Complexity: M` is still a bounded leaf. It is NOT permission to place an
+entire research/acquisition pipeline into one worker context.
+
+Plan for a fresh worker/context whenever a leaf combines multiple independent
+stages that can hand off through durable artifacts. In particular, split an
+external-data leaf before execution when it combines two or more of these:
+- multi-entity or multi-endpoint acquisition;
+- many timestamps/samples across a long time span;
+- coarse search followed by fine boundary/event refinement;
+- more than one distinct event type or truth category;
+- raw-response harvesting plus normalization/assembly plus final validation;
+- enough repeated remote/tool work that more than one compaction is reasonably
+  foreseeable.
+
+For external-required projects, prefer a pipeline such as:
+1. bounded raw snapshot acquisition;
+2. one bounded event-search/refinement leaf per event class where needed;
+3. fixture/contract assembly from already durable raw evidence;
+4. a separate deterministic validation leaf when useful.
+
+Use Launch/Contract/Verify deps to connect these leaves. Do not make one worker
+repeatedly compact simply because the overall outcome is conceptually related.
+The durable filesystem is the handoff mechanism; a new context is cheap.
+<!-- V2.6.12 CONTEXT-BOUNDED LEAF PLANNING END -->
+
+<!-- V2.6.12 FAIL-CLOSED VERIFY PLANNING BEGIN -->
+## Verify commands must fail closed
+
+A leaf Verify command is an executable truth contract, not merely a command
+that happens to return zero.
+
+When the Verify command invokes a project-owned checker/probe/test script:
+- every required sub-check named by Outcome/Done when MUST affect the process
+  exit status;
+- if any required sub-check fails, is unresolved, prints `FAIL`/`probe failed`,
+  or cannot establish its required fact, the checker MUST exit nonzero;
+- a checker may report optional diagnostics without failing, but required and
+  optional checks must be explicitly distinguishable;
+- never plan a checker that writes a report containing a required failure while
+  still exiting 0;
+- `Done when` and the Verify exit status must describe the same success state.
+
+Prefer small deterministic assertions over prose-only reports. If success
+cannot yet be proved, the leaf remains incomplete rather than returning a
+false-positive Verify success.
+<!-- V2.6.12 FAIL-CLOSED VERIFY PLANNING END -->

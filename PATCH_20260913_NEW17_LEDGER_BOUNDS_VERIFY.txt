@@ -1,0 +1,17 @@
+Applied: 2026-09-13T11:55:32+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/new17-ledger-bounds-verify-20260913-115532
+
+New17 fixes:
+- preserve the existing attempt_state validator and narrowly repair the proven
+  infrastructure-grant inconsistency when all auditable invariants match;
+- a genuine attempt followed by a supervisor infrastructure retirement now
+  leaves the granted next attempt valid instead of execution-blocking the run;
+- operator/human retry accounting is explicitly excluded from that repair;
+- implementation planning now decomposes context-heavy multi-stage external
+  acquisition into fresh durable leaves instead of relying on repeated compaction;
+- Verify commands/checker scripts must fail closed for every required sub-check;
+- all implementation roles are told not to print a required FAIL while exiting 0.
+
+Not changed here:
+- three-slot concurrency/async subagent dispatch. That remains a separate
+  architectural issue so New18 can isolate the fixes above.

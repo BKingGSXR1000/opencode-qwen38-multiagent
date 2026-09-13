@@ -225,3 +225,21 @@ Error recovery:
 Once the exact contract has been verified during the current task, reuse that
 verified contract without rereading the documentation before every call.
 <!-- V2.6.9 EXTERNAL INTERFACE FRESHNESS END -->
+
+<!-- V2.6.12 FAIL-CLOSED VERIFY ARTIFACTS BEGIN -->
+## Fail-closed checker/probe/test artifacts
+
+If you own a script that is executed by this leaf's exact `Verify command`, its
+exit status is part of the deliverable:
+- every required Done-when/Verify sub-check must make the script exit nonzero
+  when it fails or remains unresolved;
+- never print `FAIL`, `probe failed`, or equivalent for a required check and
+  then exit 0;
+- optional diagnostics may be non-fatal only when they are explicitly optional
+  in the plan;
+- preserve useful partial artifacts/progress before returning nonzero so a
+  retry/fresh worker can resume.
+
+Before returning, run the exact Verify command and confirm that the success
+path really proves the required state rather than merely generating a report.
+<!-- V2.6.12 FAIL-CLOSED VERIFY ARTIFACTS END -->
