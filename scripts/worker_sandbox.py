@@ -35,6 +35,7 @@ EPHEMERAL_DIRS = (
 )
 EPHEMERAL_FILES = (".coverage",)
 SANDBOX_ROOT = Path.home() / ".local/share/v2-worker-sandbox"
+# V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 
 
 class SandboxError(RuntimeError):
@@ -451,6 +452,41 @@ def build_shadow(project: Path, shadow: Path, declared, lower_root="/v2-lower"):
     return shadow
 
 
+def _runtime_state_path(session: str):
+    return SANDBOX_ROOT/"state"/(_safe_session_token(session)+".json")
+
+
+def _mark_runtime_state(project: Path, ctx):
+    _atomic_json(_runtime_state_path(ctx["session"]),{
+        "protocol":"v2-worker-sandbox-runtime-v1",
+        "project":str(project.resolve()),
+        "session":ctx["session"],
+        "deliverable":ctx.get("did",""),
+        "agent":ctx.get("agent",""),
+        "attempt":int(ctx.get("attempt") or 0),
+        "used_bash":True,
+    })
+
+
+def session_runtime_state(session: str):
+    path=_runtime_state_path(session)
+    if not path.exists():
+        return {}
+    try:
+        data=json.loads(path.read_text())
+    except Exception as exc:
+        raise SandboxError(
+            f"worker sandbox runtime marker corrupt for {session}: {type(exc).__name__}"
+        ) from exc
+    if not isinstance(data,dict) or data.get("protocol")!="v2-worker-sandbox-runtime-v1":
+        raise SandboxError(f"worker sandbox runtime marker invalid for {session}")
+    return data
+
+
+def session_used_sandbox(session: str):
+    return bool(session_runtime_state(session).get("used_bash"))
+
+
 def _ephemeral_scratch(session: str):
     base=SANDBOX_ROOT/"scratch"/_safe_session_token(session)
     base.mkdir(parents=True,exist_ok=True)
@@ -584,6 +620,7 @@ def run_bash(project: Path, ctx, command: str):
         raise SandboxError("bubblewrap (bwrap) is required for implementation-worker shell isolation")
     declared=owned_paths(ctx)
     session=ctx["session"]
+    _mark_runtime_state(project,ctx)
     base=SANDBOX_ROOT/"runs"/_safe_session_token(session)
     base.mkdir(parents=True,exist_ok=True)
     run_dir=Path(tempfile.mkdtemp(prefix="cmd-",dir=base))
@@ -646,6 +683,103 @@ def run_bash(project: Path, ctx, command: str):
     return proc.returncode
 
 
+def _prepare_verify_shadow(project: Path, shadow: Path, lower_root: str):
+    # Verify gets a fully disposable writable snapshot of ordinary project
+    # files. Legitimate test/build commands often create outputs outside the
+    # known ephemeral directories, so a read-only project view would create
+    # another false-negative class. Nothing in this snapshot is merged back.
+    #
+    # Keep .git read-only via the lower tree. Known ephemeral runtime paths are
+    # over-mounted from this exact worker session's preserved scratch state.
+    snapshot_paths=[]
+    try:
+        children=list(project.iterdir())
+    except OSError as exc:
+        raise SandboxError(f"cannot enumerate project for Verify snapshot: {exc}") from exc
+    for child in children:
+        rel=child.name
+        if rel==".git" or path_is_ephemeral(rel):
+            continue
+        if child.is_dir() and not child.is_symlink():
+            rel += "/"
+        snapshot_paths.append(rel)
+    build_shadow(project,shadow,snapshot_paths,lower_root)
+
+    for rel in EPHEMERAL_DIRS:
+        path=shadow/rel
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            path.unlink()
+        path.mkdir(parents=True,exist_ok=True)
+    for rel in EPHEMERAL_FILES:
+        path=shadow/rel
+        if path.is_symlink() or (path.exists() and path.is_dir()):
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.touch(exist_ok=True)
+    return shadow
+
+
+def run_verify_bash(project: Path, session: str, command: str, agent: str="", timeout=240):
+    """Run supervisor Verify with the worker's preserved ephemeral runtime."""
+    if not shutil.which("bwrap"):
+        raise SandboxError("bubblewrap (bwrap) is required for supervisor verification isolation")
+    state=session_runtime_state(session)
+    if not state.get("used_bash"):
+        raise SandboxError(f"worker sandbox runtime marker missing for {session}")
+    if state.get("project") != str(project.resolve()):
+        raise SandboxError(f"worker sandbox runtime project mismatch for {session}")
+    scratch=SANDBOX_ROOT/"scratch"/_safe_session_token(session)
+    if not scratch.is_dir():
+        raise SandboxError(f"worker sandbox scratch missing for {session}")
+
+    ctx=resolve_worker(project,session,"",agent)
+    if not ctx.get("worker"):
+        raise SandboxError(f"verification session {session} is not a current implementation worker")
+
+    base=SANDBOX_ROOT/"runs"/_safe_session_token(session)
+    base.mkdir(parents=True,exist_ok=True)
+    run_dir=Path(tempfile.mkdtemp(prefix="verify-",dir=base))
+    lower_alias=run_dir/"lower"
+    lower_alias.mkdir(parents=True,exist_ok=False)
+    lower_root=str(lower_alias.resolve())
+    shadow=run_dir/"project"
+    _prepare_verify_shadow(project,shadow,lower_root)
+
+    args=[
+        "bwrap","--die-with-parent","--new-session",
+        "--ro-bind","/","/",
+        "--proc","/proc",
+        "--dev-bind","/dev","/dev",
+        "--tmpfs","/tmp",
+        "--ro-bind",str(project.resolve()),lower_root,
+        "--bind",str(shadow),str(project.resolve()),
+    ]
+    for kind,src,dst in _ephemeral_mounts(project,session,lower_root):
+        args.extend(["--bind",str(src),str(dst)])
+    home_scratch=_ephemeral_scratch(session)/"home"
+    for rel in (".cache",".npm"):
+        host=home_scratch/rel
+        host.mkdir(parents=True,exist_ok=True)
+        target=Path.home()/rel
+        target.mkdir(parents=True,exist_ok=True)
+        args.extend(["--bind",str(host),str(target)])
+    args.extend(["--tmpfs","/var/tmp"])
+    args.extend([
+        "--chdir",str(project.resolve()),
+        "--setenv","V2_WORKER_SANDBOX","verify",
+        "/bin/bash","-euo","pipefail","-c",command,
+    ])
+
+    proc=subprocess.run(args,text=True,timeout=timeout)
+    # Verify writes are allowed inside this disposable snapshot. They never
+    # merge back. Supervisor fingerprints before/after Verify still protect
+    # the real project against any unexpected sandbox escape.
+    return proc,[]
+
+
 def shell_quote(value: str):
     return "'" + value.replace("'","'\"'\"'") + "'"
 
@@ -696,6 +830,7 @@ def cleanup_session(session: str):
         path=SANDBOX_ROOT/area/token
         if path.exists():
             shutil.rmtree(path,ignore_errors=True)
+    _runtime_state_path(session).unlink(missing_ok=True)
 
 
 def selftest(require_bwrap=False):
@@ -782,10 +917,42 @@ def selftest(require_bwrap=False):
             assert (project/"src/owned.txt").read_text()=="shell-owned\n"
             assert (project/"other.txt").read_text()=="safe\n"
             vp.unlink(missing_ok=True)
-            rc=run_bash(project,ctx,"printf 'shell-ok\\n' > src/owned.txt")
+            rc=run_bash(
+                project,ctx,
+                "mkdir -p node_modules/v2-batch8-probe; "
+                "printf 'ephemeral-ok\\n' > node_modules/v2-batch8-probe/marker; "
+                "printf 'shell-ok\\n' > src/owned.txt"
+            )
             assert rc==0, rc
             assert (project/"src/owned.txt").read_text()=="shell-ok\n"
+            assert not (project/"node_modules").exists()
+            assert session_used_sandbox("ses_test")
+
+            # New25 regression: supervisor Verify must still see the exact
+            # worker's ephemeral dependency/runtime state after child idle.
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "test -f node_modules/v2-batch8-probe/marker && "
+                "grep -q '^shell-ok$' src/owned.txt"
+            )
+            assert checked.returncode==0, checked.returncode
+            assert mutations==[], mutations
+
+            # Legitimate Verify/build writes are allowed only inside the
+            # disposable snapshot and must never change the host project.
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "printf 'verify-disposable\\n' > src/owned.txt; "
+                "printf 'temporary\\n' > verify-only.tmp"
+            )
+            assert checked.returncode==0, checked.returncode
+            assert mutations==[], mutations
+            assert (project/"src/owned.txt").read_text()=="shell-ok\n"
+            assert not (project/"verify-only.tmp").exists()
+
             cleanup_session("ses_test")
+            assert not session_used_sandbox("ses_test")
+            assert not (SANDBOX_ROOT/"scratch"/_safe_session_token("ses_test")).exists()
 
     print("worker-sandbox selftest: OK")
 

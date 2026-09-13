@@ -6,6 +6,7 @@ export const HARD_MAX_CHILD_RESULT_CHARS = 2500;
 export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 
 const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/worker_sandbox.py";
+// V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 const MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "multiedit", "bash", "shell", "execute"]);
 
 function hookArgs(event, output) {
@@ -66,17 +67,6 @@ function guardWorkerMutation(directory, event, output) {
       throw new Error("WORKER_FIREWALL_DENY missing sandbox command");
     }
     args.command = decision.command;
-  }
-}
-
-function cleanupWorkerSandbox(sessionID) {
-  if (!sessionID) return;
-  try {
-    execFileSync("python3", [
-      WORKER_SANDBOX, "cleanup", "--session", String(sessionID),
-    ], { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] });
-  } catch {
-    // Cleanup is best-effort; correctness does not depend on scratch deletion.
   }
 }
 
@@ -261,7 +251,8 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       parentResultChars: receipt.length,
       fullOutputStorage: "session_history",
     };
-    cleanupWorkerSandbox(String(result.metadata?.sessionID || ""));
+    // Batch 8: supervisor Verify still needs this exact attempt's
+    // ephemeral runtime environment. Terminal cleanup is supervisor-owned.
   });
   return () => {
     before.dispose();

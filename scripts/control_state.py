@@ -17,6 +17,7 @@ MAX_SPLIT_DEPTH = 2
 # implementation attempt.  It is deliberately not a general retry mechanism.
 MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS = MAX_INFRASTRUCTURE_RETRY_GRANTS
+# V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # A human authorization may survive one *proven, pre-execution* runtime abort.
 # It releases an existing reservation; it never creates a human grant.
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
@@ -207,6 +208,7 @@ def _attempt_state_v2612_original(entry):
                         failure.get("kind") not in {
                             "opencode-compaction-template", "runtime-cancel",
                             "supervisor-compaction-retire", "child-binding-failure",
+                            "verification-environment",
                         }):
                     infrastructure_failures = None; break
                 if not failure.get("timestamp") or not isinstance(failure.get("session"), str) or not failure["session"]:

@@ -20,7 +20,14 @@ from state_io import (
     StateCorruptionError, load_json_object, atomic_write_json, atomic_write_text,
     exclusive_file_lock,
 )
-from worker_sandbox import violation_path as worker_sandbox_violation_path
+from worker_sandbox import (
+    SandboxError as WorkerSandboxError,
+    cleanup_session as worker_sandbox_cleanup_session,
+    run_verify_bash as worker_sandbox_run_verify_bash,
+    session_used_sandbox as worker_session_used_sandbox,
+    violation_path as worker_sandbox_violation_path,
+)
+# V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
     visible_progress_marker,
@@ -1226,11 +1233,35 @@ def _inside_any(path,items):
     return any(path==item or path.startswith(item.rstrip("/")+"/") for item in items)
 
 
-def run_verify_fail_closed(command,runner=subprocess.run):
-    """Run leaf verification under fail-fast shell semantics."""
+def run_verify_fail_closed(command,runner=subprocess.run,session=""):
+    """Run leaf verification under fail-fast shell semantics.
+
+    If the attempt used worker bash isolation, Verify reuses that exact
+    session's preserved node_modules/venv/cache state instead of judging the
+    implementation from a different bare-host environment.
+    """
     errors=validate_verify_command(command)
     if errors:
         return None,"verify-command-unsafe:"+errors[0]
+
+    if session:
+        try:
+            used_sandbox=worker_session_used_sandbox(session)
+        except WorkerSandboxError as exc:
+            return None,"verify-infrastructure-sandbox-state:"+str(exc)
+        if used_sandbox:
+            try:
+                checked,mutations=worker_sandbox_run_verify_bash(
+                    Path(PROJECT),session,command,timeout=240
+                )
+            except WorkerSandboxError as exc:
+                return None,"verify-infrastructure-sandbox:"+str(exc)
+            if mutations:
+                return checked,"verify-mutated-project-sandbox:"+",".join(mutations[:4])
+            if checked.returncode!=0:
+                return checked,f"verify-failed-{checked.returncode}"
+            return checked,"verified"
+
     try:
         checked=runner(
             ["/bin/bash","-euo","pipefail","-c",command],
@@ -1588,7 +1619,7 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
 
     before_verify=project_fingerprints()
     try:
-        checked,detail=run_verify_fail_closed(command,runner=runner)
+        checked,detail=run_verify_fail_closed(command,runner=runner,session=sid)
     except (OSError,subprocess.TimeoutExpired) as e:
         clear_verify_wait(did)
         return False,f"verification-error-{type(e).__name__}"
@@ -3808,6 +3839,7 @@ def reconcile_idle_implementation_session(sid,agent):
         sid,(parse_deliverable(first_user_text_db(sid)),0)
     )[0]
     if not did:
+        worker_sandbox_cleanup_session(sid)
         post_finalize_seen.add(sid)
         return
 
@@ -3873,28 +3905,48 @@ def reconcile_idle_implementation_session(sid,agent):
             )
             csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
             if not ok and detail != "not-applicable":
-                classification=(
-                    "bad-plan"
-                    if detail.startswith("verify-command-unsafe:")
-                    or (
-                        detail in {"verify-command-missing","owned-artifacts-missing"}
-                        and not meaningful_worker_execution(sid,did)
+                if detail.startswith("verify-infrastructure-"):
+                    granted,grant_detail=record_infrastructure_abort(
+                        sid,did,detail,"verification-environment"
                     )
-                    else "genuine"
-                )
-                recorded,outcome=record_leaf_failure(
-                    did,detail,classification
-                )
-                if recorded:
+                    recorded=False; outcome=grant_detail
+                    if granted or grant_detail=="already-recorded":
+                        recorded,outcome=record_leaf_failure(
+                            did,detail,"infrastructure"
+                        )
                     log(
-                        f"LEAF_FAILURE session={sid} deliverable={did} "
-                        f"classification={classification} outcome={outcome}"
+                        f"LEAF_VERIFY_INFRASTRUCTURE session={sid} "
+                        f"deliverable={did} granted={str(granted).lower()} "
+                        f"detail={detail} outcome={outcome}"
                     )
                     csv(
-                        "LEAF_FAILURE",sid,agent,
-                        f"{did} classification={classification} "
-                        f"outcome={outcome}"
+                        "LEAF_VERIFY_INFRASTRUCTURE",sid,agent,
+                        f"{did} granted={str(granted).lower()} "
+                        f"detail={detail} outcome={outcome}"
                     )
+                else:
+                    classification=(
+                        "bad-plan"
+                        if detail.startswith("verify-command-unsafe:")
+                        or (
+                            detail in {"verify-command-missing","owned-artifacts-missing"}
+                            and not meaningful_worker_execution(sid,did)
+                        )
+                        else "genuine"
+                    )
+                    recorded,outcome=record_leaf_failure(
+                        did,detail,classification
+                    )
+                    if recorded:
+                        log(
+                            f"LEAF_FAILURE session={sid} deliverable={did} "
+                            f"classification={classification} outcome={outcome}"
+                        )
+                        csv(
+                            "LEAF_FAILURE",sid,agent,
+                            f"{did} classification={classification} "
+                            f"outcome={outcome}"
+                        )
 
     if cached_abort:
         supervisor_abort_reasons.pop(sid,None)
@@ -3909,6 +3961,10 @@ def reconcile_idle_implementation_session(sid,agent):
         # Close a requested intent that never produced an aborted terminal
         # session (e.g. crash before the external interrupt happened).
         resolve_abort_intent(sid,"completed-without-observed-abort")
+    # execute.after no longer destroys worker runtime. Cleanup occurs
+    # only after terminal supervisor finalization/classification. Early
+    # verify-deps-pending returns intentionally retain the environment.
+    worker_sandbox_cleanup_session(sid)
     post_finalize_seen.add(sid)
 
 
