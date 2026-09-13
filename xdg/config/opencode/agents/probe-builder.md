@@ -65,12 +65,13 @@ or a few measured fields, not the complete raw response in conversation history.
   artifact with known facts and explicit unknowns. Update progress immediately
   after meaningful discoveries. Do not wait to understand every dependency.
 - Once the artifact's required fields are known, further curiosity, package/API
-  archaeology, astronomy/reference research, or network/kernel downloads are
-  forbidden. Run Verify, then leaf-complete.
+  archaeology, unrelated domain research, or unnecessary network/data downloads
+  are forbidden. Run Verify, then leaf-complete.
 - `Reference policy: internal` means use local, internally consistent facts and
-  deterministic fixtures only. Do not install Skyfield/Astropy, fetch JPL/NAIF
-  data, search external astronomy sources, or create a probe for them unless
-  the original user request explicitly requires that named external truth.
+  deterministic fixtures only. Do not introduce external authoritative
+  datasets/sources, externally maintained interfaces, provider-specific
+  packages, or network reference research unless the accepted task/reference
+  policy explicitly requires that external truth.
 - Write only the exact owned probe artifact and your own progress file. Never
   create or modify another Dxxx's artifact (including package.json). Use /tmp
   or an explicitly Dxxx-owned disposable directory for temporary probes.

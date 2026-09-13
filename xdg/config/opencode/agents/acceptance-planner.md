@@ -42,20 +42,21 @@ REFERENCE POLICY IS STRICT:
 - Choose `external-required` if the ORIGINAL USER REQUEST explicitly asks for
   an external authority/reference OR if the core requested result claims
   correspondence to objective real-world state that cannot be established by
-  self-consistency alone. Examples include date-specific astronomical positions,
-  eclipses/transits/shadows/occultations, geodetic truth, or measured physical
-  reference values.
-- Words such as "correct" or "accurate" alone do not force an external policy
-  for ordinary deterministic software. But "correct positions as seen from
-  Earth at an arbitrary real date/time" is externally grounded astronomical
-  truth and therefore DOES require an independent authoritative truth set.
+  self-consistency alone. Treat this generically as external authoritative
+  data/source, external scientific/reference truth, or an externally maintained
+  interface whose real contract/output is part of correctness.
+- Words such as "correct", "accurate", or "realistic" alone do not force an
+  external policy for ordinary deterministic software. External evidence is
+  required only when the requested correctness claim actually depends on an
+  independently maintained real-world source, reference, measurement, standard,
+  dataset, service, or interface.
 - `external-required` applies to validation/evidence; it does NOT imply a cloud
   or network dependency at application runtime. A local/offline application may
-  be implemented analytically and validated during development against frozen
-  externally grounded fixtures.
+  use frozen externally grounded fixtures obtained during development.
 - Use `internal` only when correctness can genuinely be established from local
-  invariants, independent calculations, or fixtures without claiming agreement
-  with an objective external real-world state.
+  invariants, independent calculations, deterministic fixtures, or a local
+  reference implementation without claiming agreement with external real-world
+  truth.
 - Under `internal`, Evidence Strategy must stay local and self-contained.
 - Use `none` only when no meaningful correctness/reference testing applies.
 - Do not invent external-reference requirements.

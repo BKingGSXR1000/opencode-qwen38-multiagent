@@ -92,10 +92,10 @@ Never construct an API request from model memory.
   Do not binary-search guessed syntax.
 - After authoritative documentation is obtained, use at most TWO live data
   probes in FOUNDATION. One successful minimal probe is sufficient.
-- A successful ephemeris/data row is preferred but is NOT mandatory for
+- A successful live API/data sample is preferred but is NOT mandatory for
   FOUNDATION READY when authoritative documentation itself gives an exact
-  reproducible API/reference contract and the tool transport is the reason a
-  live probe cannot be completed. Record that transport limitation explicitly
+  reproducible interface/reference contract and the tool transport is the reason
+  a live probe cannot be completed. Record that transport limitation explicitly
   and leave actual frozen-data acquisition to VALIDATION.
 
 If an existing `reference-work.json` asks you to repeat a speculative request

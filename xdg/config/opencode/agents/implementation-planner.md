@@ -234,13 +234,14 @@ cannot silently terminate the rest.
 If ACCEPTANCE.md says `Reference policy: external-required`, consume the
 reference foundation/evidence. If policy is `internal` or `none`, do NOT add
 external research merely because the domain could theoretically benefit from it.
-For `internal`, keep acceptance evidence and the plan self-contained: use an
-internally consistent approximate model plus frozen local fixtures or a separate
-local reference implementation. Do not create a probe whose Outcome, Done when,
-or Verify command requires Skyfield, Astropy, JPL, NASA, NAIF, Horizons, BSP
-kernels, downloads, or external scientific truth unless the original request
-explicitly names that authority. “Correct”, “real”, and “as seen from Earth”
-alone do not authorize such a probe.
+For `internal`, keep acceptance evidence and the plan self-contained: use local
+invariants, deterministic fixtures, or a separate local reference
+implementation. Do not create a probe whose Outcome, Done when, or Verify
+command introduces an external authoritative data/source, external
+scientific/reference truth, externally maintained interface, network dataset,
+or named provider merely to improve realism. Such external work must be
+authorized by the accepted Reference policy and grounded in the original task
+or reference foundation; never invent a provider/authority from model memory.
 
 <!-- V2.6.10 PROBE SCOPE DISCIPLINE BEGIN -->
 ## Probe scope discipline

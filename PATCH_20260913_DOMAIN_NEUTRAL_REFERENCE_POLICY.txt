@@ -1,0 +1,10 @@
+Applied: 2026-09-13T15:35:12+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/domain-neutral-reference-policy-20260913-153512
+
+Controlled intervention:
+- removed astronomy/Jupiter/provider-specific reusable policy from active V2 prompts/control guard;
+- generalized to external authoritative data/source, external scientific/reference truth, and externally maintained interface;
+- generalized feature-builder domain boundaries;
+- did not change retries, split validation, worker budgets, concurrency, compaction, ownership, or minimal-leaf planning.
+
+This intentionally does NOT fix the D006-B/read-only split-child defect observed in New18-New20.

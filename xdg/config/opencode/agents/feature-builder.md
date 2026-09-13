@@ -51,10 +51,11 @@ If resumed after an interrupt:
 
 V2.3 FEATURE DOMAIN BOUNDARY:
 Implement UI/viewer/presentation/controls and directly related client code.
-Do NOT derive ephemerides, orbital mathematics, physics, coordinate transforms,
-fitting constants, or server/domain algorithms.
-If domain functions are missing, use a clean interface/stub and report the
-dependency. Do not solve the domain problem yourself.
+Do NOT take ownership of core domain algorithms, scientific/mathematical models,
+business rules, persistence engines, protocol adapters, or server/domain logic
+that belongs to another planned component.
+If required domain functions are missing, use the planned clean interface/stub
+and report the dependency. Do not absorb the missing domain implementation.
 
 V2.4 DIRECT TOOL RULE:
 - NEVER use `execute` / CodeMode.

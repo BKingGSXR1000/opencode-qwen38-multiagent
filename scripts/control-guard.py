@@ -14,7 +14,10 @@ ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
 PLAN_MAX_LINES = 400
 RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
 INTERNAL_EXTERNAL_REFERENCE_RE = re.compile(
-    r"\b(?:skyfield|astropy|jpl|nasa|naif|horizons|de\d{3,4}s?\.bsp|\.bsp\s+kernel)\b",
+    r"\b(?:external(?:ly)?\s+(?:authoritative|maintained|scientific|reference)\s+"
+    r"(?:data|source|truth|reference|interface)|authoritative\s+(?:external\s+)?"
+    r"(?:data|source|reference)|official\s+(?:external\s+)?"
+    r"(?:dataset|api|source|reference)|live\s+external\s+(?:api|service|data))\b",
     re.I,
 )
 
@@ -458,7 +461,7 @@ def validate_acceptance(project: Path, finalize=False):
             errors.append("final line is not exact ACCEPTANCE_COMPLETE marker")
         if reference_policy(text) == "internal" and INTERNAL_EXTERNAL_REFERENCE_RE.search(text):
             errors.append(
-                "internal Reference policy cannot require named external astronomical/reference truth"
+                "internal Reference policy cannot require externally authoritative/reference truth"
             )
         if not re.findall(r"\bA\d{3}\b", text):
             errors.append("no Axxx acceptance IDs found")
@@ -555,7 +558,7 @@ def validate_plan(project: Path, finalize=False):
                 ))
                 if INTERNAL_EXTERNAL_REFERENCE_RE.search(section):
                     errors.append(
-                        f"{did}: internal Reference policy forbids an external astronomy/reference probe"
+                        f"{did}: internal Reference policy forbids an externally authoritative/reference probe"
                     )
 
     if errors:

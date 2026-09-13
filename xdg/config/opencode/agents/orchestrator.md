@@ -59,7 +59,9 @@ Launch exactly one acceptance-planner with a SHORT prompt:
 - include the ORIGINAL USER REQUEST verbatim
 - tell it: "Follow your acceptance-planner protocol."
 - DO NOT tell it which Reference policy to choose
-- DO NOT mention NASA/JPL/Horizons/external authority unless the user explicitly did
+- DO NOT seed a particular external authority/provider/source unless the
+  original task or already-accepted reference policy requires it; do not bias
+  the acceptance planner toward `external-required`
 
 After it returns or is interrupted:
 - require the actual file `.opencode-v2/ACCEPTANCE.ready`
