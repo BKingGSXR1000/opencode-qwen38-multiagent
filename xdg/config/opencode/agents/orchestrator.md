@@ -219,6 +219,18 @@ For recursively created children, the canonical five-line prompt MUST point to
 stay inside it. A split parent becomes ready only after both required children
 are ready and its original unchanged verification succeeds.
 
+<!-- V2.6.14 FRESH IMPLEMENTATION RETRY SESSION BEGIN -->
+## Fresh implementation retry sessions
+
+Every implementation retry MUST launch a **fresh child session**.
+
+- Never pass `sessionID`, fork/resume an earlier implementation child, or try to continue an interrupted/idle implementation conversation.
+- Reuse the same canonical Dxxx ID and the same exact five-line handoff prompt.
+- Resume from durable filesystem state: owned artifacts plus `.opencode-v2/work/Dxxx.progress.md` when present.
+- If a cancelled task-tool call never materialized a worker, re-read `control-status.json`; if the same Dxxx remains eligible, dispatch it fresh.
+- Do not invent a new deliverable ID for a retry.
+<!-- V2.6.14 FRESH IMPLEMENTATION RETRY SESSION END -->
+
 Attempts belong to the exact canonical leaf. At split depths 0 and 1, retry the
 same leaf after its first genuine failure; after its second genuine failure,
 wait for the bounded splitter. At terminal depth 2, make up to three genuine

@@ -1,0 +1,7 @@
+Applied: 2026-09-13T17:37:24+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/new22-unmaterialized-dispatch-20260913-173724
+
+- Reuse unmaterialized dispatch reservations without incrementing attempt count.
+- Keep such attempts eligible in control-status.
+- Bound and audit replay.
+- Force fresh child sessions for implementation retries.

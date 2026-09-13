@@ -42,6 +42,7 @@ SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
 READ_ONLY_SPLIT_ROLES={"tester"}
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
+MAX_UNMATERIALIZED_DISPATCH_REPLAYS=MAX_INFRASTRUCTURE_RETRY_GRANTS
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -532,6 +533,40 @@ def record_leaf_failure(did, reason, classification="genuine"):
     return True,"genuine-recorded"
 
 # V2.6.9 NORMALIZED SCHEDULER STATE BEGIN
+def retryable_unmaterialized_dispatch_entry(entry):
+    """True when the current attempt was only preclaimed and never materialized."""
+    if not isinstance(entry,dict):
+        return False
+    try:
+        count=int(entry.get("count",0))
+    except Exception:
+        return False
+    if count <= 0:
+        return False
+    sessions=entry.get("sessions")
+    if not isinstance(sessions,list) or not sessions:
+        return False
+    current=sessions[-1]
+    if not (isinstance(current,str) and current.startswith("dispatch:")):
+        return False
+    classified=set()
+    for item in entry.get("failure_history",[]):
+        if not isinstance(item,dict):
+            continue
+        try:
+            classified.add(int(item.get("attempt",0)))
+        except Exception:
+            pass
+    if count in classified:
+        return False
+    seq=entry.get("unmaterialized_dispatch_sequence")
+    try:
+        replays=int(entry.get("unmaterialized_dispatch_replays",0)) if int(seq or 0)==count else 0
+    except Exception:
+        replays=0
+    return replays < MAX_UNMATERIALIZED_DISPATCH_REPLAYS
+
+
 def normalized_state_snapshot(project):
     data=state_snapshot(project)
     if not isinstance(data,dict):
@@ -551,6 +586,23 @@ def normalized_state_snapshot(project):
         if isinstance(leaves.get(did),dict):
             leaves[did]["running"]=True
             leaves[did]["eligible"]=False
+
+    try:
+        attempt_entries=(load_attempts().get("deliverables") or {})
+    except Exception:
+        attempt_entries={}
+    for did,leaf in leaves.items():
+        if not isinstance(leaf,dict) or did in active_ids:
+            continue
+        entry=attempt_entries.get(did)
+        if not retryable_unmaterialized_dispatch_entry(entry):
+            continue
+        if leaf.get("complete") or leaf.get("split_required") or leaf.get("launch_deps_missing"):
+            continue
+        leaf["attempt_limit_reached"]=False
+        leaf["eligible"]=True
+        leaf["unmaterialized_dispatch_reusable"]=True
+        log(f"STATE_UNMATERIALIZED_DISPATCH_REUSABLE deliverable={did} attempts={leaf.get('attempts',0)}")
 
     clean=[]
     for item in data.get("execution_blockers",[]) if isinstance(data.get("execution_blockers"),list) else []:
@@ -1371,6 +1423,31 @@ def claim_attempt(sid,did):
                     # extant human authorization, not reserve another one.
                     session_task[sid]=(did,int(pending[-1]["sequence"]))
                     return "existing",int(pending[-1]["sequence"])
+
+                if sid.startswith("dispatch:") and reservations and retryable_unmaterialized_dispatch_entry(ent):
+                    old_reservation=reservations[-1]
+                    sessions[sessions.index(old_reservation)]=sid
+                    for item in ent.get("operator_retry_attempts",[]):
+                        if isinstance(item,dict) and item.get("session")==old_reservation and item.get("state")=="reserved":
+                            item["session"]=sid
+                    sequence=count
+                    prev_seq=ent.get("unmaterialized_dispatch_sequence")
+                    try:
+                        prev_replays=int(ent.get("unmaterialized_dispatch_replays",0)) if int(prev_seq or 0)==sequence else 0
+                    except Exception:
+                        prev_replays=0
+                    ent["unmaterialized_dispatch_sequence"]=sequence
+                    ent["unmaterialized_dispatch_replays"]=prev_replays+1
+                    ent.setdefault("unmaterialized_dispatch_history",[]).append({
+                        "sequence":sequence, "replaced":old_reservation, "replacement":sid,
+                        "source":"supervisor", "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+                    })
+                    save_attempts(data)
+                    session_task[sid]=(did,sequence)
+                    log(f"DISPATCH_REUSE_UNMATERIALIZED deliverable={did} attempt={sequence} replay={prev_replays+1}")
+                    csv("DISPATCH_REUSE_UNMATERIALIZED",sid,"supervisor",f"{did} attempt={sequence} replay={prev_replays+1}")
+                    return "existing",sequence
+
                 if count>=state["allowed_attempts"]:
                     return "limit",count
                 count+=1; ent["count"]=count; sessions.append(sid)
