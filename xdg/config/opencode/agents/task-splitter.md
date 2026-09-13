@@ -74,6 +74,26 @@ ownership instead of trying to infer paths from prose.
 For the second proposal, `depends_on_sibling` may only be the literal string
 `"first"` (or `""` if independent). NEVER emit a derived ID such as D001-A;
 the supervisor alone derives child IDs.
+
+### Read-only verification child
+
+A split may legitimately need one writer plus one independent verifier,
+especially when the parent owns only one artifact.
+
+In that case:
+- child #1 MUST use a writing role (`implementer`, `test-builder`, etc.) and
+  own the applicable parent ownership items;
+- child #2 MAY use role `tester` with exact JSON string
+  `"owned_artifacts": "none"`;
+- that read-only tester MUST be child #2 and MUST set
+  `"depends_on_sibling": "first"`;
+- the tester's Verify command must independently validate child #1's result;
+- NEVER emit an empty string for `owned_artifacts`;
+- NEVER assign a file to role `tester` if that child is expected to create,
+  repair, or rewrite that file. Use a writing role instead.
+
+The non-read-only children must still exactly cover all parent ownership items.
+`none` contributes no ownership; it is only the explicit read-only exception.
 <!-- V2.6.9 NEW5 SPLITTER STRICTNESS END -->
 
 <!-- V2.6.9 REASONING BUDGET DISCIPLINE BEGIN -->

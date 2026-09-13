@@ -40,6 +40,7 @@ MAX_PLANNER_RESTARTS=3
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
+READ_ONLY_SPLIT_ROLES={"tester"}
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}
@@ -329,14 +330,37 @@ def validate_split_proposal(parent, proposals):
         if owned_error:
             raise ValueError(f"child ownership is not canonical: {owned_error}")
         owned=set(owned_list)
-        if not owned or not owned <= parent_owned or seen & owned:
-            raise ValueError("child ownership must be disjoint and inside parent ownership")
-        seen |= owned
         sibling=proposal.get("depends_on_sibling", "")
         if index == 1 and sibling == expected[0]:
             sibling = "first"
         if sibling not in ("", "first") or (sibling == "first" and index != 1):
             raise ValueError("only second child may depend on first child")
+
+        read_only_role=proposal["role"] in READ_ONLY_SPLIT_ROLES
+        if read_only_role and owned:
+            raise ValueError(
+                "read-only split role must use owned_artifacts: none; "
+                "use implementer/test-builder when the child must create an artifact"
+            )
+        if not owned:
+            if not read_only_role:
+                raise ValueError(
+                    "only a read-only tester split child may have owned_artifacts: none"
+                )
+            if proposal["owned_artifacts"].strip() != "none":
+                raise ValueError(
+                    "read-only tester must encode empty ownership as exact 'none'"
+                )
+            if index != 1 or sibling != "first":
+                raise ValueError(
+                    "read-only tester must be the second child and depend on the first"
+                )
+        else:
+            if not owned <= parent_owned or seen & owned:
+                raise ValueError(
+                    "child ownership must be disjoint and inside parent ownership"
+                )
+            seen |= owned
         child=dict(leaf)
         child.update({"id":expected[index],"name":proposal["scope"],
                       "owned_artifacts":_canonical_owned_artifacts(owned_list),
@@ -957,7 +981,12 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
     leaf=(load_manifest().get("leaves") or {}).get(did)
     if not leaf or ready_info(did): return False,"not-applicable"
     paths=owned_artifact_paths(leaf)
-    if not paths or any(not (Path(PROJECT)/path).exists() for path in paths):
+    read_only_no_artifacts=(
+        leaf.get("role") in READ_ONLY_SPLIT_ROLES and not paths
+    )
+    if not read_only_no_artifacts and (
+        not paths or any(not (Path(PROJECT)/path).exists() for path in paths)
+    ):
         progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
         if progress.exists() and progress.stat().st_size:
             return False,"durable-progress-incomplete"

@@ -1,0 +1,17 @@
+Applied: 2026-09-13T16:56:24+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/new21-readonly-split-children-20260913-165624
+
+New21 staged repair:
+- Allow a recursive split to use a read-only second tester with exact
+  Owned artifacts: none.
+- Such a tester must be child #2 and depend on child #1.
+- Read-only tester ownership contributes nothing to the parent ownership
+  partition; writer children must still exactly cover the parent.
+- Forbid assigning owned files to a split child with role tester.
+- A read-only tester can become ready after supervisor ownership-diff checking
+  and successful rerun of its exact Verify command.
+- Product writes by a read-only tester remain ownership violations.
+- Task splitter is explicitly told to emit "none", never an empty string.
+
+This directly fixes the split-validation-failed pattern observed repeatedly in
+New18, New19, New20, and New21.
