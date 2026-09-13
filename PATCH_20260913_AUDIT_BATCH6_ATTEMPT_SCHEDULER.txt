@@ -1,0 +1,15 @@
+Applied: 2026-09-13T21:22:01+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch6-attempt-scheduler-20260913-212200
+
+Audit Batch 6 - attempt/scheduler semantics:
+- canonical attempt_state now owns the bounded unmaterialized-dispatch replay rule;
+- control_state.snapshot no longer needs supervisor-side contradiction repair for exhausted placeholders;
+- cross-process scheduler.lock serializes slot observation plus dispatch reservation;
+- current dispatch placeholders count as reserved worker slots before child materialization;
+- redispatch of the same unmaterialized leaf reuses its existing slot;
+- scheduler DB failures deny new reservations fail-closed;
+- control-status reports active, reserved, occupied, and available worker slots;
+- per-attempt execution baselines distinguish current-attempt writes from stale artifacts left by previous attempts;
+- operator retry consumption and infrastructure finalization use attempt-scoped durable execution evidence;
+- four simultaneous cross-process preclaims deterministically yield at most three reservations;
+- 43 state-machine invariant/concurrency tests pass.

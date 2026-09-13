@@ -16,6 +16,7 @@ MAX_SPLIT_DEPTH = 2
 # *dispatch slot* without relabelling a broken beta compaction as a successful
 # implementation attempt.  It is deliberately not a general retry mechanism.
 MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
+MAX_UNMATERIALIZED_DISPATCH_REPLAYS = MAX_INFRASTRUCTURE_RETRY_GRANTS
 # A human authorization may survive one *proven, pre-execution* runtime abort.
 # It releases an existing reservation; it never creates a human grant.
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
@@ -418,9 +419,61 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     return repaired
 
 
+def _decorate_unmaterialized_dispatch(entry, state):
+    """Project the one legal zero-work dispatch replay directly in canonical state.
+
+    A current `dispatch:<tool-call-id>` placeholder with no failure classification
+    represents a reserved worker slot whose child never materialized.  It may be
+    replayed a bounded number of times without consuming another implementation
+    attempt.  This rule belongs in the authoritative attempt projection so CLI,
+    status UI, and supervisor cannot disagree about exhaustion.
+    """
+    state=dict(state) if isinstance(state,dict) else {}
+    reusable=False
+    if state.get("valid") and isinstance(entry,dict):
+        try:
+            count=int(entry.get("count") or 0)
+        except (TypeError,ValueError):
+            count=0
+        sessions=entry.get("sessions")
+        history=entry.get("failure_history") or []
+        classified=set()
+        if isinstance(history,list):
+            for item in history:
+                if not isinstance(item,dict):
+                    continue
+                try:
+                    classified.add(int(item.get("attempt") or 0))
+                except (TypeError,ValueError):
+                    pass
+        current=(
+            sessions[-1]
+            if isinstance(sessions,list) and sessions
+            and isinstance(sessions[-1],str)
+            else ""
+        )
+        try:
+            seq=int(entry.get("unmaterialized_dispatch_sequence") or 0)
+            replays=(
+                int(entry.get("unmaterialized_dispatch_replays") or 0)
+                if seq==count else 0
+            )
+        except (TypeError,ValueError):
+            replays=MAX_UNMATERIALIZED_DISPATCH_REPLAYS
+        reusable=bool(
+            count>0
+            and current.startswith("dispatch:")
+            and count not in classified
+            and replays < MAX_UNMATERIALIZED_DISPATCH_REPLAYS
+        )
+    state["unmaterialized_dispatch_reusable"]=reusable
+    return state
+
+
 def attempt_state(entry):
     state = _attempt_state_v2612_original(entry)
-    return _v2612_repair_infrastructure_attempt_state(entry, state)
+    state = _v2612_repair_infrastructure_attempt_state(entry, state)
+    return _decorate_unmaterialized_dispatch(entry, state)
 # V2.6.12 INFRASTRUCTURE LEDGER REPAIR END
 
 
@@ -525,8 +578,9 @@ def snapshot(project):
             "infrastructure_grants_remaining": attempt["infrastructure_grants_remaining"],
             "infrastructure_authorized_attempt": attempt["infrastructure_authorized_attempt"],
             "attempt_ledger_valid": attempt["valid"],
+            "unmaterialized_dispatch_reusable": attempt["unmaterialized_dispatch_reusable"],
             "allowed_attempts": attempt["allowed_attempts"],
-            "attempt_limit_reached": not complete and (not attempt["valid"] or count >= attempt["allowed_attempts"]),
+            "attempt_limit_reached": not complete and (not attempt["valid"] or (count >= attempt["allowed_attempts"] and not attempt["unmaterialized_dispatch_reusable"])),
             "launch_deps_missing": launch_missing,
             "contract_deps_missing": contract_missing,
             "verify_deps_missing": verify_missing,
@@ -541,7 +595,8 @@ def snapshot(project):
             "eligible": (
                 not complete and not children and not split_required
                 and not verification_pending
-                and attempt["valid"] and count < attempt["allowed_attempts"]
+                and attempt["valid"]
+                and (count < attempt["allowed_attempts"] or attempt["unmaterialized_dispatch_reusable"])
                 and not launch_missing and not contract_missing
             ),
         }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json,subprocess,sys,tempfile,unittest
+import json,multiprocessing,subprocess,sys,tempfile,unittest
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
 import control_state,leaf_contract,supervisor,state_io,worker_sandbox
@@ -628,6 +628,202 @@ class WorkerSandboxTrustBoundaryTests(unittest.TestCase):
         ok,detail=supervisor.post_session_finalize("D001","s1")
         self.assertFalse(ok)
         self.assertEqual(detail,"sandbox-ownership-violation")
+
+
+class AttemptScopedExecutionEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        leaf={
+            "id":"D001","name":"owned",
+            "owned_artifacts":"`owned.txt`",
+            "owned_artifact_paths":["owned.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":"test -s owned.txt","role":"implementer",
+            "done_when":"owned","acceptance_ids":["A001"],"parallel":"none",
+            "split_children":[],
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":leaf},
+        }))
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor","deliverables":{
+                "D001":{"count":2,"sessions":["old","current"],"automatic_limit":3,
+                        "failure_history":[{"attempt":1,"classification":"genuine"}]}
+            }
+        }))
+    def tearDown(self):
+        supervisor.PROJECT=self.old
+        self.tmp.cleanup()
+
+    def test_stale_artifact_does_not_count_as_current_attempt_execution(self):
+        (self.project/"owned.txt").write_text("from attempt one\n")
+        supervisor.write_execution_baseline("D001",2)
+        self.assertFalse(supervisor.durable_worker_execution("D001","current"))
+        (self.project/"owned.txt").write_text("changed by attempt two\n")
+        self.assertTrue(supervisor.durable_worker_execution("D001","current"))
+
+    def test_progress_change_counts_for_current_attempt(self):
+        (self.project/"owned.txt").write_text("stale\n")
+        supervisor.write_execution_baseline("D001",2)
+        (self.work/"D001.progress.md").write_text("new progress\n")
+        self.assertTrue(supervisor.durable_worker_execution("D001","current"))
+
+
+class CanonicalUnmaterializedDispatchProjectionTests(unittest.TestCase):
+    def test_exhausted_but_unmaterialized_dispatch_is_canonically_reusable(self):
+        entry={
+            "count":3,"sessions":["s1","s2","dispatch:t3"],"automatic_limit":3,
+            "failure_history":[
+                {"attempt":1,"classification":"genuine"},
+                {"attempt":2,"classification":"genuine"},
+            ],
+        }
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+        entry["unmaterialized_dispatch_sequence"]=3
+        entry["unmaterialized_dispatch_replays"]=control_state.MAX_UNMATERIALIZED_DISPATCH_REPLAYS
+        state=control_state.attempt_state(entry)
+        self.assertFalse(state["unmaterialized_dispatch_reusable"])
+
+    def test_snapshot_uses_same_reusable_projection_without_supervisor_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td); work=project/".opencode-v2/work"; work.mkdir(parents=True)
+            leaf={
+                "id":"D001","name":"leaf","owned_artifacts":"`a.txt`",
+                "owned_artifact_paths":["a.txt"],"launch_deps":[],
+                "contract_deps":[],"verify_deps":[],"verify_command":"test -f a.txt",
+                "role":"implementer","done_when":"a","acceptance_ids":["A001"],
+                "parallel":"none","split_children":[],
+            }
+            (project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves":{"D001":leaf}}))
+            (work/"attempts.json").write_text(json.dumps({
+                "owner":"supervisor","deliverables":{
+                    "D001":{
+                        "count":3,"sessions":["s1","s2","dispatch:t3"],
+                        "automatic_limit":3,"failure_history":[
+                            {"attempt":1,"classification":"genuine"},
+                            {"attempt":2,"classification":"genuine"},
+                        ],
+                    }
+                }
+            }))
+            state=control_state.snapshot(project)["leaves"]["D001"]
+            self.assertTrue(state["unmaterialized_dispatch_reusable"])
+            self.assertFalse(state["attempt_limit_reached"])
+            self.assertTrue(state["eligible"])
+
+
+def _scheduler_preclaim_child(project,did,token,queue):
+    import supervisor as child_supervisor
+    child_supervisor.PROJECT=project
+    child_supervisor.validate_dispatch=lambda _agent,text: (text,"")
+    child_supervisor.active_implementation_sessions=lambda strict=False: []
+    child_supervisor.write_ownership_baseline=lambda _did: None
+    child_supervisor.ensure_execution_baseline=lambda _did,_attempt: None
+    child_supervisor.recursive_split_enabled=lambda: False
+    result=child_supervisor.preclaim_attempt("implementer",did,token)
+    queue.put(result)
+
+
+class AtomicSchedulerReservationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        (self.project/".opencode-v2/work").mkdir(parents=True)
+        self.old=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+    def tearDown(self):
+        supervisor.PROJECT=self.old
+        self.tmp.cleanup()
+
+    def test_reserved_placeholders_consume_slots(self):
+        data={"owner":"supervisor","deliverables":{}}
+        for n in range(3):
+            did=f"D{n+1:03d}"
+            data["deliverables"][did]={
+                "count":1,"sessions":[f"dispatch:t{n}"],"automatic_limit":3,
+            }
+        (self.project/".opencode-v2/work/attempts.json").write_text(json.dumps(data))
+        self.assertEqual(supervisor.reserved_dispatch_slot_count(data),3)
+
+    def test_four_concurrent_preclaims_never_reserve_more_than_three_slots(self):
+        ctx=multiprocessing.get_context("spawn")
+        queue=ctx.Queue()
+        procs=[]
+        for n in range(4):
+            did=f"D{n+1:03d}"
+            p=ctx.Process(
+                target=_scheduler_preclaim_child,
+                args=(str(self.project),did,f"t{n}",queue),
+            )
+            p.start(); procs.append(p)
+        for p in procs:
+            p.join(10)
+            self.assertEqual(p.exitcode,0)
+        results=[queue.get(timeout=2) for _ in range(4)]
+        claimed=[r for r in results if r[0]=="claimed"]
+        denied=[r for r in results if r[0]=="denied"]
+        self.assertEqual(len(claimed),3,results)
+        self.assertEqual(len(denied),1,results)
+        self.assertEqual(denied[0][2],"worker_slots_full")
+        ledger=json.loads((self.project/".opencode-v2/work/attempts.json").read_text())
+        self.assertEqual(supervisor.reserved_dispatch_slot_count(ledger),3)
+
+    def test_scheduler_database_failure_denies_new_reservation_fail_closed(self):
+        old_validate=supervisor.validate_dispatch
+        old_active=supervisor.active_implementation_sessions
+        try:
+            supervisor.validate_dispatch=lambda _agent,text: (text,"")
+            def broken(strict=False):
+                if strict:
+                    raise RuntimeError("db unavailable")
+                return []
+            supervisor.active_implementation_sessions=broken
+            result=supervisor.preclaim_attempt("implementer","D001","tok")
+        finally:
+            supervisor.validate_dispatch=old_validate
+            supervisor.active_implementation_sessions=old_active
+        self.assertEqual(result[0],"denied")
+        self.assertEqual(result[2],"worker_scheduler_unavailable")
+        self.assertFalse((self.project/".opencode-v2/work/attempts.json").exists())
+
+    def test_existing_reservation_can_be_reused_even_when_all_slots_are_full(self):
+        data={"owner":"supervisor","deliverables":{}}
+        for n in range(3):
+            did=f"D{n+1:03d}"
+            data["deliverables"][did]={
+                "count":1,"sessions":[f"dispatch:t{n}"],"automatic_limit":3,
+            }
+        (self.project/".opencode-v2/work/attempts.json").write_text(json.dumps(data))
+        old_validate=supervisor.validate_dispatch
+        old_active=supervisor.active_implementation_sessions
+        old_own=supervisor.write_ownership_baseline
+        old_exec=supervisor.ensure_execution_baseline
+        old_split=supervisor.recursive_split_enabled
+        try:
+            supervisor.validate_dispatch=lambda _agent,text: (text,"")
+            supervisor.active_implementation_sessions=lambda strict=False: []
+            supervisor.write_ownership_baseline=lambda _did: None
+            supervisor.ensure_execution_baseline=lambda _did,_attempt: None
+            supervisor.recursive_split_enabled=lambda: False
+            result=supervisor.preclaim_attempt("implementer","D001","replacement")
+        finally:
+            supervisor.validate_dispatch=old_validate
+            supervisor.active_implementation_sessions=old_active
+            supervisor.write_ownership_baseline=old_own
+            supervisor.ensure_execution_baseline=old_exec
+            supervisor.recursive_split_enabled=old_split
+        self.assertEqual(result[0],"claimed",result)
+        ledger=json.loads((self.project/".opencode-v2/work/attempts.json").read_text())
+        self.assertEqual(supervisor.reserved_dispatch_slot_count(ledger),3)
 
 
 if __name__=="__main__": unittest.main()

@@ -5,6 +5,7 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
+                           MAX_UNMATERIALIZED_DISPATCH_REPLAYS,
                            MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
                            RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
                            LEAF_READY_PROTOCOL, VERIFY_WAIT_PROTOCOL,
@@ -54,7 +55,6 @@ SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
-MAX_UNMATERIALIZED_DISPATCH_REPLAYS=MAX_INFRASTRUCTURE_RETRY_GRANTS
 MAX_SPLITTER_ATTEMPTS=2
 SPLITTER_LEASE_SECONDS=600
 MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
@@ -908,37 +908,8 @@ def record_leaf_failure(did, reason, classification="genuine"):
     return True,"genuine-recorded"
 
 def retryable_unmaterialized_dispatch_entry(entry):
-    """True when the current attempt was only preclaimed and never materialized."""
-    if not isinstance(entry,dict):
-        return False
-    try:
-        count=int(entry.get("count",0))
-    except Exception:
-        return False
-    if count <= 0:
-        return False
-    sessions=entry.get("sessions")
-    if not isinstance(sessions,list) or not sessions:
-        return False
-    current=sessions[-1]
-    if not (isinstance(current,str) and current.startswith("dispatch:")):
-        return False
-    classified=set()
-    for item in entry.get("failure_history",[]):
-        if not isinstance(item,dict):
-            continue
-        try:
-            classified.add(int(item.get("attempt",0)))
-        except Exception:
-            pass
-    if count in classified:
-        return False
-    seq=entry.get("unmaterialized_dispatch_sequence")
-    try:
-        replays=int(entry.get("unmaterialized_dispatch_replays",0)) if int(seq or 0)==count else 0
-    except Exception:
-        replays=0
-    return replays < MAX_UNMATERIALIZED_DISPATCH_REPLAYS
+    """Use the canonical attempt projection for bounded zero-work replays."""
+    return bool(attempt_state(entry).get("unmaterialized_dispatch_reusable"))
 
 
 def normalized_state_snapshot(project):
@@ -947,40 +918,36 @@ def normalized_state_snapshot(project):
         return data
 
     leaves=data.get("leaves") if isinstance(data.get("leaves"),dict) else {}
-    active=active_implementation_deliverables()
+    try:
+        active_sessions=active_implementation_sessions(strict=True)
+        scheduler_error=""
+    except Exception as exc:
+        active_sessions=[]
+        scheduler_error=f"{type(exc).__name__}: {exc}"
+    active=active_implementation_deliverables(active_sessions)
     active_ids=set(active)
-    active_count=len(active)
+    active_count=len(active_sessions)
+    try:
+        attempt_data=load_attempts()
+        reserved_count=reserved_dispatch_slot_count(attempt_data)
+    except Exception as exc:
+        attempt_data={"deliverables":{}}
+        reserved_count=MAX_CONCURRENT_IMPLEMENTATION_WORKERS
+        scheduler_error=scheduler_error or f"{type(exc).__name__}: {exc}"
+    occupied=min(MAX_CONCURRENT_IMPLEMENTATION_WORKERS,active_count+reserved_count)
     data["scheduler"]={
         "max_concurrent_workers":MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
         "active_workers":active_count,
-        "available_worker_slots":max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active_count),
+        "reserved_workers":reserved_count,
+        "occupied_worker_slots":occupied,
+        "available_worker_slots":0 if scheduler_error else max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active_count-reserved_count),
         "active_deliverables":sorted(active_ids),
+        "error":scheduler_error,
     }
     for did in active_ids:
         if isinstance(leaves.get(did),dict):
             leaves[did]["running"]=True
             leaves[did]["eligible"]=False
-
-    try:
-        attempt_entries=(load_attempts().get("deliverables") or {})
-    except Exception:
-        attempt_entries={}
-    for did,leaf in leaves.items():
-        if not isinstance(leaf,dict) or did in active_ids:
-            continue
-        entry=attempt_entries.get(did)
-        if not retryable_unmaterialized_dispatch_entry(entry):
-            continue
-        if (
-            leaf.get("complete") or leaf.get("split_required")
-            or leaf.get("verification_pending")
-            or leaf.get("launch_deps_missing") or leaf.get("contract_deps_missing")
-        ):
-            continue
-        leaf["attempt_limit_reached"]=False
-        leaf["eligible"]=True
-        leaf["unmaterialized_dispatch_reusable"]=True
-        log(f"STATE_UNMATERIALIZED_DISPATCH_REUSABLE deliverable={did} attempts={leaf.get('attempts',0)}")
 
     clean=[]
     for item in data.get("execution_blockers",[]) if isinstance(data.get("execution_blockers"),list) else []:
@@ -1295,6 +1262,84 @@ def write_ownership_baseline(did):
     tmp.write_text(json.dumps({"owner":"supervisor","deliverable":did,
                                "files":project_fingerprints()},sort_keys=True)+"\n")
     os.replace(tmp,path)
+
+def execution_baseline_path(did,attempt):
+    return Path(PROJECT)/".opencode-v2/work"/f"{did}.attempt-{int(attempt)}.execution-baseline.json"
+
+def execution_scope_fingerprints(did):
+    """Fingerprint only this leaf's durable owned/progress scope."""
+    root=Path(PROJECT)
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    roots=list(owned_artifact_paths(leaf))+[f".opencode-v2/work/{did}.progress.md"]
+    result={}
+    for rel in roots:
+        path=root/rel
+        key=rel.rstrip("/")
+        if not path.exists():
+            result[key]="missing"
+            continue
+        if path.is_file():
+            try:
+                result[key]="file:"+hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                result[key]="unreadable"
+            continue
+        if path.is_dir():
+            result[key]="dir"
+            for child in sorted(path.rglob("*")):
+                if not child.is_file():
+                    continue
+                relchild=child.relative_to(root).as_posix()
+                try:
+                    result[relchild]="file:"+hashlib.sha256(child.read_bytes()).hexdigest()
+                except OSError:
+                    result[relchild]="unreadable"
+            continue
+        result[key]="other"
+    return result
+
+def write_execution_baseline(did,attempt):
+    path=execution_baseline_path(did,attempt)
+    atomic_write_json(path,{
+        "owner":"supervisor",
+        "deliverable":did,
+        "attempt":int(attempt),
+        "files":execution_scope_fingerprints(did),
+    })
+
+def ensure_execution_baseline(did,attempt):
+    path=execution_baseline_path(did,attempt)
+    if path.exists():
+        try:
+            data=load_json_object(path,label=f"execution baseline {did} attempt {attempt}")
+            if (
+                data.get("owner")=="supervisor"
+                and data.get("deliverable")==did
+                and int(data.get("attempt") or 0)==int(attempt)
+                and isinstance(data.get("files"),dict)
+            ):
+                return
+        except Exception:
+            pass
+    write_execution_baseline(did,attempt)
+
+def attempt_sequence_for_session(sid,did):
+    cached=session_task.get(sid)
+    if cached and cached[0]==did:
+        try:
+            return int(cached[1])
+        except (TypeError,ValueError):
+            pass
+    data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
+    if not isinstance(entry,dict):
+        return 0
+    sessions=entry.get("sessions")
+    if not isinstance(sessions,list):
+        return 0
+    try:
+        return sessions.index(sid)+1
+    except ValueError:
+        return 0
 
 def session_window(sid):
     try:
@@ -1809,8 +1854,8 @@ def validate_dispatch(agent,text):
     return did,""
 
 # V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER BEGIN
-def active_implementation_sessions():
-    """Return live implementation child sessions for this project."""
+def active_implementation_sessions(strict=False):
+    """Return live implementation children; scheduler decisions fail closed."""
     if not PROJECT:
         return []
     try:
@@ -1821,38 +1866,78 @@ def active_implementation_sessions():
             (PROJECT,),
         ).fetchall()
         con.close()
-    except Exception:
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"scheduler_db_unavailable: {exc}") from exc
         return []
     return [(sid,agent) for sid,agent in rows if agent in IMPLEMENTATION_AGENTS]
 
-def active_implementation_deliverables():
+def active_implementation_deliverables(sessions=None):
     result={}
-    for sid,agent in active_implementation_sessions():
+    sessions=active_implementation_sessions() if sessions is None else sessions
+    for sid,agent in sessions:
         did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
         if did:
             result[did]={"session":sid,"agent":agent}
     return result
 
-def available_implementation_slots():
-    return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-len(active_implementation_sessions()))
+def reserved_dispatch_deliverables(data=None):
+    """Current reusable dispatch placeholders each hold one scheduler slot."""
+    data=load_attempts() if data is None else data
+    entries=data.get("deliverables") if isinstance(data,dict) else None
+    if not isinstance(entries,dict):
+        raise StateCorruptionError("attempt ledger deliverables must be an object")
+    result=set()
+    for did,entry in entries.items():
+        if retryable_unmaterialized_dispatch_entry(entry):
+            result.add(did)
+    return result
+
+def reserved_dispatch_slot_count(data=None):
+    return len(reserved_dispatch_deliverables(data))
+
+@contextlib.contextmanager
+def scheduler_lock():
+    """Serialize cross-process slot observation + dispatch reservation."""
+    path=attempts_path().with_name("scheduler.lock")
+    with exclusive_file_lock(path,timeout=5.0):
+        yield
+
+def available_implementation_slots(data=None, strict=False):
+    active=len(active_implementation_sessions(strict=strict))
+    reserved=reserved_dispatch_slot_count(data)
+    return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved)
 # V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER END
 
 def preclaim_attempt(agent,text,dispatch_token):
-    """Reserve a canonical attempt before OpenCode creates its child session."""
+    """Atomically observe scheduler capacity and reserve one canonical attempt."""
     did,violation=validate_dispatch(agent,text)
-    if violation: return "denied",did,violation,0
-    if agent in IMPLEMENTATION_AGENTS and available_implementation_slots() <= 0:
-        return "denied",did,"worker_slots_full",0
-    claim,n=claim_attempt(f"dispatch:{dispatch_token}",did)
-    if claim in {"claimed","existing"}:
-        if claim=="claimed":
-            write_ownership_baseline(did)
-        authorized = n > AUTOMATIC_ATTEMPT_LIMIT
-        suffix = " operator_authorized=true" if authorized else ""
-        log(f"DISPATCH_CLAIM token={dispatch_token} agent={agent} deliverable={did} attempt={n}{suffix}")
-        csv("DISPATCH_CLAIM",f"dispatch:{dispatch_token}",agent,f"{did} attempt={n}{suffix}")
-        return "claimed",did,"",n
-    return "denied",did,("attempt_limit" if claim=="limit" else "attempt_ledger_invalid"),n
+    if violation:
+        return "denied",did,violation,0
+    try:
+        with scheduler_lock():
+            data=load_attempts()
+            existing_slot=did in reserved_dispatch_deliverables(data)
+            if (
+                agent in IMPLEMENTATION_AGENTS
+                and not existing_slot
+                and available_implementation_slots(data,strict=True) <= 0
+            ):
+                return "denied",did,"worker_slots_full",0
+            claim,n=claim_attempt(f"dispatch:{dispatch_token}",did)
+            if claim in {"claimed","existing"}:
+                if claim=="claimed":
+                    write_ownership_baseline(did)
+                ensure_execution_baseline(did,n)
+                authorized = n > AUTOMATIC_ATTEMPT_LIMIT
+                suffix = " operator_authorized=true" if authorized else ""
+                log(f"DISPATCH_CLAIM token={dispatch_token} agent={agent} deliverable={did} attempt={n}{suffix}")
+                csv("DISPATCH_CLAIM",f"dispatch:{dispatch_token}",agent,f"{did} attempt={n}{suffix}")
+                return "claimed",did,"",n
+            return "denied",did,("attempt_limit" if claim=="limit" else "attempt_ledger_invalid"),n
+    except (RuntimeError,StateCorruptionError) as exc:
+        log(f"DISPATCH_SCHEDULER_DENY deliverable={did} error={exc}")
+        return "denied",did,"worker_scheduler_unavailable",0
 
 def grant_operator_retry(dids, reason="explicit operator retry command"):
     """Record one human-only retry grant for each exhausted incomplete leaf.
@@ -2038,12 +2123,30 @@ def release_operator_reservation(sid,did,reason):
                 return released,"released" if released else "infrastructure-retry-limit"
     return False,"not-reserved"
 
-def durable_worker_execution(did):
-    """A project-local artifact/progress change is the durable consumption point."""
-    leaf=(load_manifest().get("leaves") or {}).get(did,{})
-    paths=[Path(PROJECT)/p for p in owned_artifact_paths(leaf)]
-    paths.append(Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md")
-    return any(path.exists() and (not path.is_file() or path.stat().st_size > 0) for path in paths)
+def durable_worker_execution(did,sid=""):
+    """Return True only if THIS attempt changed owned/progress state."""
+    attempt=attempt_sequence_for_session(sid,did) if sid else 0
+    if attempt < 1:
+        try:
+            entry=(load_attempts().get("deliverables") or {}).get(did,{})
+            attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+        except Exception:
+            attempt=0
+    if attempt < 1:
+        return False
+    path=execution_baseline_path(did,attempt)
+    try:
+        baseline=load_json_object(path,label=f"execution baseline {did} attempt {attempt}")
+    except (StateCorruptionError,OSError):
+        return False
+    if (
+        baseline.get("owner")!="supervisor"
+        or baseline.get("deliverable")!=did
+        or int(baseline.get("attempt") or 0)!=attempt
+        or not isinstance(baseline.get("files"),dict)
+    ):
+        return False
+    return baseline["files"] != execution_scope_fingerprints(did)
 
 def meaningful_worker_execution(sid,did):
     """Return the first durable or completed-tool execution boundary.
@@ -2053,7 +2156,7 @@ def meaningful_worker_execution(sid,did):
     consume the explicitly authorized retry rather than being mistaken for a
     pre-provider cancellation.
     """
-    if durable_worker_execution(did):
+    if durable_worker_execution(did,sid):
         return "owned-artifact-or-progress"
     try:
         con=db_connect(); rows=con.execute(
@@ -2695,6 +2798,8 @@ def enforce_assignment(sid,agent,first_user):
         return
 
     claim,n=claim_attempt(sid,did)
+    if claim in {"claimed","existing"}:
+        ensure_execution_baseline(did,n)
     if claim in {"limit","invalid"}:
         reason="attempt_limit" if claim=="limit" else "attempt_ledger_invalid"
         if abort_session(sid,f"dispatch_guard {reason} deliverable={did} count={n}",agent):
@@ -3582,7 +3687,7 @@ def reconcile_idle_implementation_session(sid,agent):
     if infrastructure_reason and not ready_info(did):
         finalized=False
         detail="not-attempted"
-        if durable_worker_execution(did):
+        if durable_worker_execution(did,sid):
             finalized,detail=post_session_finalize(did,sid=sid)
             if detail.startswith("verify-deps-pending:"):
                 note_verify_wait_once(did,sid,agent,detail)
