@@ -54,6 +54,10 @@ IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS=MAX_INFRASTRUCTURE_RETRY_GRANTS
+MAX_SPLITTER_ATTEMPTS=2
+SPLITTER_LEASE_SECONDS=600
+MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
+SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -263,15 +267,35 @@ def split_proposal_path(did):
 def split_status_path(did):
     return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-status.json"
 
+def split_transaction_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-transaction.json"
+
 def load_split_status(did):
     return load_json_object(
         split_status_path(did),default_missing={},label=f"split status {did}"
     )
 
+
 def save_split_status(did, state, **detail):
-    """Persist a finite supervisor-owned split transition."""
-    payload={"owner":"supervisor","parent_id":did,"state":state,
-             "generation":1,"timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),**detail}
+    """Persist a finite supervisor-owned split transition without losing counters."""
+    previous=load_split_status(did)
+    keep={}
+    for key in (
+        "claim_count","proposal_failures","parent_finalize_failures",
+        "children","generation","transaction_id"
+    ):
+        if key in previous:
+            keep[key]=previous[key]
+    generation=detail.pop("generation", keep.get("generation",1) or 1)
+    payload={
+        "owner":"supervisor",
+        "parent_id":did,
+        "state":state,
+        "generation":generation,
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        **keep,
+        **detail,
+    }
     atomic_write_json(split_status_path(did),payload)
     return payload
 
@@ -288,33 +312,264 @@ def _artifact_items(raw):
     paths,error=_strict_owned_artifact_text(raw)
     return [] if error else paths
 
+
 def split_request(did):
-    """Durably request a bounded planner-free split after two real failures."""
+    """Materialize a durable split request from an already-durable ledger marker."""
     if not recursive_split_enabled() or split_depth(did) >= MAX_SPLIT_DEPTH:
         return False,"split-depth-terminal"
-    leaf=(load_manifest().get("leaves") or {}).get(did)
-    if not isinstance(leaf,dict) or leaf_children(did): return False,"not-splittable"
-    path=split_request_path(did); path.parent.mkdir(parents=True,exist_ok=True)
-    attempts=(load_attempts().get("deliverables") or {}).get(did,{})
-    failures=attempts.get("failure_history",[]) if isinstance(attempts,dict) else []
+    manifest=load_manifest()
+    leaf=(manifest.get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"not-splittable"
+    attempts=load_attempts()
+    entry=(attempts.get("deliverables") or {}).get(did,{})
+    marker=entry.get("split_required") if isinstance(entry,dict) else None
+    if not isinstance(marker,dict):
+        return False,"split-marker-missing"
+    generation=int(marker.get("generation") or 1)
+    parent_owned=owned_artifact_paths(leaf)
+    if not parent_owned:
+        save_split_status(
+            did,"split-unavailable-read-only-parent",
+            generation=generation,
+            reason="split parent has no durable owned artifacts to partition",
+        )
+        return False,"split-unavailable-read-only-parent"
+
+    path=split_request_path(did)
+    if path.exists():
+        existing=load_json_object(path,label=f"split request {did}")
+        if (
+            existing.get("parent_id")==did
+            and int(existing.get("generation") or 0)==generation
+            and existing.get("protocol")==SPLIT_PROPOSAL_PROTOCOL
+        ):
+            return True,"split-required"
+        raise StateCorruptionError(f"split request {did} conflicts with ledger generation")
+
+    failures=entry.get("failure_history",[]) if isinstance(entry,dict) else []
     compact=[]
     for item in failures[-2:]:
-        if isinstance(item,dict): compact.append({k:item.get(k) for k in ("attempt","classification","reason","timestamp")})
+        if isinstance(item,dict):
+            compact.append({
+                k:item.get(k)
+                for k in ("attempt","classification","reason","timestamp")
+            })
     progress_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
-    try: progress_text=progress_path.read_text(errors="replace")[:4000]
-    except OSError: progress_text=""
+    try:
+        progress_text=progress_path.read_text(errors="replace")[:4000]
+    except OSError:
+        progress_text=""
     payload={
-        "protocol":SPLIT_PROPOSAL_PROTOCOL,"parent_id":did,"depth":split_depth(did),
-        "parent_scope":leaf.get("name",""),"ownership":leaf.get("owned_artifacts",""),
-        "verification":leaf.get("verify_command",""),"durable_progress":{"path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),"contents":progress_text},
-        "existing_artifacts":owned_artifact_paths(leaf),
-        "ownership_items":owned_artifact_paths(leaf),
+        "protocol":SPLIT_PROPOSAL_PROTOCOL,
+        "parent_id":did,
+        "depth":split_depth(did),
+        "generation":generation,
+        "parent_scope":leaf.get("name",""),
+        "parent_contract":{
+            "name":leaf.get("name",""),
+            "role":leaf.get("role",""),
+            "owned_artifacts":leaf.get("owned_artifacts",""),
+            "verify_command":leaf.get("verify_command",""),
+            "done_when":leaf.get("done_when",""),
+            "acceptance_ids":list(leaf.get("acceptance_ids",[]) or []),
+            "launch_deps":list(leaf.get("launch_deps",[]) or []),
+            "contract_deps":list(leaf.get("contract_deps",[]) or []),
+            "verify_deps":list(leaf.get("verify_deps",[]) or []),
+        },
+        "ownership":leaf.get("owned_artifacts",""),
+        "verification":leaf.get("verify_command",""),
+        "durable_progress":{
+            "path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),
+            "contents":progress_text,
+        },
+        "existing_artifacts":parent_owned,
+        "ownership_items":parent_owned,
         "failed_attempts":compact,
-        "generation":1,
     }
-    tmp=path.with_suffix(".tmp"); tmp.write_text(json.dumps(payload,indent=2)+"\n"); os.replace(tmp,path)
-    split_status_path(did).unlink(missing_ok=True)
+    atomic_write_json(path,payload)
+    status=load_split_status(did)
+    if status.get("state") not in {"splitter-active","split-retryable"}:
+        save_split_status(did,"split-required",generation=generation)
     return True,"split-required"
+
+
+def reconcile_required_splits():
+    """Recover the durable failure->split edge after a supervisor/process crash."""
+    if not PROJECT:
+        return
+    attempts=load_attempts()
+    entries=attempts.get("deliverables") or {}
+    for did,entry in entries.items():
+        if not isinstance(entry,dict) or not isinstance(entry.get("split_required"),dict):
+            continue
+        if ready_info(did) or leaf_children(did):
+            continue
+        if load_split_status(did).get("state") in {
+            "split-validation-failed","splitter-failed",
+            "split-unavailable-read-only-parent","parent-finalize-failed",
+        }:
+            continue
+        split_request(did)
+
+
+def archive_failed_split_proposal(did):
+    path=split_proposal_path(did)
+    if not path.exists():
+        return ""
+    status=load_split_status(did)
+    n=int(status.get("proposal_failures") or 0)+1
+    archived=path.with_name(f"{did}.split-proposal.failed-{n}.json")
+    if archived.exists():
+        archived.unlink()
+    os.replace(path,archived)
+    return str(archived.relative_to(Path(PROJECT)))
+
+
+def record_splitter_failure(did, reason, session="", validation=False):
+    status=load_split_status(did)
+    claims=int(status.get("claim_count") or 0)
+    failures=int(status.get("proposal_failures") or 0)+1
+    archived=archive_failed_split_proposal(did)
+    retryable=claims < MAX_SPLITTER_ATTEMPTS
+    if retryable:
+        state="split-retryable"
+    else:
+        state="split-validation-failed" if validation else "splitter-failed"
+    save_split_status(
+        did,state,
+        claim_count=claims,
+        proposal_failures=failures,
+        session=session,
+        reason=str(reason)[:1000],
+        archived_proposal=archived,
+        lease_until_epoch=0,
+    )
+    return retryable,state
+
+
+def split_transaction_id(parent,generation,children):
+    payload=json.dumps(
+        {"parent":parent,"generation":generation,"children":children},
+        sort_keys=True,separators=(",",":"),
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:24]
+
+
+def load_split_transaction(parent):
+    path=split_transaction_path(parent)
+    if not path.exists():
+        return {}
+    data=load_json_object(path,label=f"split transaction {parent}")
+    if (
+        data.get("owner")!="supervisor"
+        or data.get("protocol")!=SPLIT_TRANSACTION_PROTOCOL
+        or data.get("parent_id")!=parent
+        or data.get("state") not in {"prepared","committed"}
+    ):
+        raise StateCorruptionError(f"split transaction {parent} is invalid")
+    return data
+
+
+def apply_split_transaction(parent,txn):
+    expected=list(txn["children"])
+    child_defs=txn["child_defs"]
+    manifest=load_manifest()
+    leaves=manifest.setdefault("leaves",{})
+    parent_leaf=leaves.get(parent)
+    if not isinstance(parent_leaf,dict):
+        raise StateCorruptionError(f"split parent {parent} disappeared")
+    current=parent_leaf.get("split_children") or []
+    if current not in ([],expected):
+        raise StateCorruptionError(f"split parent {parent} has conflicting children {current}")
+    for child_id in expected:
+        child=child_defs[child_id]
+        existing=leaves.get(child_id)
+        if isinstance(existing,dict) and existing != child:
+            raise StateCorruptionError(f"split child {child_id} conflicts with prepared transaction")
+        leaves[child_id]=child
+        scope_path=Path(PROJECT)/".opencode-v2"/"work"/f"{child_id}.scope.md"
+        atomic_write_text(
+            scope_path,
+            f"# {child_id} split-child scope\n\n"
+            f"Parent: {parent}\n\nScope: {child['name']}\n\n"
+            f"Owned artifacts: {child['owned_artifacts']}\n\n"
+            f"Verify command: `{child['verify_command']}`\n\n"
+            f"Done when: {child['done_when']}\n",
+        )
+    parent_leaf["split_children"]=expected
+    parent_leaf["split_depth"]=split_depth(parent)
+    manifest["recursive_split_protocol"]=RECURSIVE_SPLIT_PROTOCOL
+    save_manifest(manifest)
+
+    overlay=load_split_leaf_overlay()
+    parents=overlay.setdefault("parents",{})
+    prepared_entry={
+        "children":expected,
+        "child_defs":child_defs,
+        "transaction_id":txn["transaction_id"],
+        "timestamp":txn["prepared_at"],
+    }
+    existing_overlay=parents.get(parent)
+    if isinstance(existing_overlay,dict):
+        existing_txn=existing_overlay.get("transaction_id")
+        if existing_txn and existing_txn!=txn["transaction_id"]:
+            raise StateCorruptionError(f"split overlay {parent} conflicts with transaction")
+    parents[parent]=prepared_entry
+    save_split_leaf_overlay(overlay)
+
+    path=split_history_path()
+    history=load_json_object(
+        path,
+        default_missing={"owner":"supervisor","protocol":SPLIT_PROPOSAL_PROTOCOL,"splits":[]},
+        label="split history",
+    )
+    splits=history.get("splits",[])
+    if not isinstance(splits,list):
+        raise StateCorruptionError("split history splits must be an array")
+    if not any(
+        isinstance(item,dict) and item.get("transaction_id")==txn["transaction_id"]
+        for item in splits
+    ):
+        splits.append({
+            "parent":parent,
+            "children":expected,
+            "transaction_id":txn["transaction_id"],
+            "timestamp":txn["prepared_at"],
+            "source":"supervisor",
+        })
+    history["splits"]=splits
+    atomic_write_json(path,history)
+
+    save_split_status(
+        parent,"accepted",
+        generation=txn["generation"],
+        children=expected,
+        transaction_id=txn["transaction_id"],
+        lease_until_epoch=0,
+    )
+    split_request_path(parent).unlink(missing_ok=True)
+    split_proposal_path(parent).unlink(missing_ok=True)
+
+    committed=dict(txn)
+    committed["state"]="committed"
+    committed["committed_at"]=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    atomic_write_json(split_transaction_path(parent),committed)
+    return expected
+
+
+def reconcile_split_transactions():
+    if not PROJECT:
+        return
+    work=Path(PROJECT)/".opencode-v2"/"work"
+    for path in work.glob("D*.split-transaction.json"):
+        parent=path.name.removesuffix(".split-transaction.json")
+        txn=load_split_transaction(parent)
+        if txn.get("state")=="prepared":
+            with dispatch_lock:
+                with attempt_lock():
+                    apply_split_transaction(parent,txn)
+
 
 def validate_split_proposal(parent, proposals):
     """Validate exactly two child scopes; no model-selected IDs or control edits."""
@@ -382,100 +637,140 @@ def validate_split_proposal(parent, proposals):
     if seen != parent_owned: raise ValueError("child ownership must cover all unfinished parent ownership")
     return expected,children
 
+
 def persist_split(parent, proposals):
-    """Supervisor-owned mutation of the authoritative manifest and split history."""
+    """Prepare once, then idempotently commit a recoverable split transaction."""
     with dispatch_lock:
         with attempt_lock():
+            existing=load_split_transaction(parent)
+            if existing:
+                if existing.get("state")=="committed":
+                    return list(existing.get("children") or [])
+                return apply_split_transaction(parent,existing)
+
             expected,children=validate_split_proposal(parent,proposals)
-            manifest=load_manifest(); leaves=manifest.setdefault("leaves",{})
-            for child in children:
-                leaves[child["id"]]=child
-                scope_path=Path(PROJECT)/".opencode-v2"/"work"/f"{child['id']}.scope.md"
-                scope_path.write_text(
-                    f"# {child['id']} split-child scope\n\n"
-                    f"Parent: {parent}\n\nScope: {child['name']}\n\n"
-                    f"Owned artifacts: {child['owned_artifacts']}\n\n"
-                    f"Verify command: `{child['verify_command']}`\n\nDone when: {child['done_when']}\n"
-                )
-            leaves[parent]["split_children"]=expected
-            leaves[parent]["split_depth"]=split_depth(parent)
-            manifest["recursive_split_protocol"]=RECURSIVE_SPLIT_PROTOCOL
-            save_manifest(manifest)
-
-            overlay=load_split_leaf_overlay()
-            parents=overlay.setdefault("parents",{})
-            parents[parent]={
-                "children":list(expected),
-                "child_defs":{child["id"]:child for child in children},
-                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
-            }
-            save_split_leaf_overlay(overlay)
-
-            path=split_history_path(); path.parent.mkdir(parents=True,exist_ok=True)
-            history=load_json_object(
-                path,
-                default_missing={"owner":"supervisor","protocol":SPLIT_PROPOSAL_PROTOCOL,"splits":[]},
-                label="split history",
+            request=load_json_object(
+                split_request_path(parent),label=f"split request {parent}"
             )
-            splits=history.get("splits",[])
-            if not isinstance(splits,list):
-                raise StateCorruptionError("split history splits must be an array")
-            splits.append({"parent":parent,"children":expected,
-                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
-            history["splits"]=splits
-            atomic_write_json(path,history)
-            split_request_path(parent).unlink(missing_ok=True)
-            save_split_status(parent,"accepted",children=expected)
-    sync_control_status_snapshot()
-    log(f"RECURSIVE_SPLIT parent={parent} children={','.join(expected)}")
-    csv("RECURSIVE_SPLIT","","supervisor",f"{parent} -> {','.join(expected)}")
-    return expected
+            generation=int(request.get("generation") or 1)
+            child_defs={child["id"]:child for child in children}
+            transaction_id=split_transaction_id(parent,generation,child_defs)
+            txn={
+                "owner":"supervisor",
+                "protocol":SPLIT_TRANSACTION_PROTOCOL,
+                "state":"prepared",
+                "parent_id":parent,
+                "generation":generation,
+                "children":expected,
+                "child_defs":child_defs,
+                "transaction_id":transaction_id,
+                "prepared_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            }
+            atomic_write_json(split_transaction_path(parent),txn)
+            return apply_split_transaction(parent,txn)
+
 
 def process_split_proposal(did, session="", require_proposal=False):
-    """Validate one durable proposal and always leave a finite outcome.
-
-    This is callable from the splitter's completion hook as well as the
-    supervisor reconciliation loop.  The hook is the primary path; polling is
-    deliberately only crash recovery, never an undefined external action.
-    """
-    if not split_request_path(did).exists(): return False,"split-request-missing"
+    """Validate one proposal; malformed proposals receive one bounded fresh retry."""
+    if not split_request_path(did).exists():
+        txn=load_split_transaction(did)
+        if txn.get("state")=="committed":
+            return True,"accepted"
+        return False,"split-request-missing"
     proposal_path=split_proposal_path(did)
     if not proposal_path.exists():
         if require_proposal:
-            save_split_status(did,"splitter-failed",session=session,
-                              reason="splitter-completed-without-durable-proposal")
-            log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason=missing durable proposal")
-            return False,"splitter-completed-without-durable-proposal"
+            _,state=record_splitter_failure(
+                did,"splitter-completed-without-durable-proposal",
+                session=session,validation=False,
+            )
+            log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason=missing durable proposal state={state}")
+            return False,state
         return False,"proposal-pending"
     try:
-        payload=json.loads(proposal_path.read_text())
-        request=json.loads(split_request_path(did).read_text())
-        if (not isinstance(payload,dict) or payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL or
-                payload.get("parent_id")!=did or payload.get("depth")!=split_depth(did) or
-                payload.get("generation")!=request.get("generation",1)):
+        payload=load_json_object(proposal_path,label=f"split proposal {did}")
+    except StateCorruptionError as exc:
+        retryable,state=record_splitter_failure(
+            did,str(exc),session=session,validation=True
+        )
+        log(f"SPLIT_PROPOSAL_REJECTED parent={did} retryable={retryable} reason={exc}")
+        return False,state
+    request=load_json_object(split_request_path(did),label=f"split request {did}")
+    try:
+        if (
+            payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL
+            or payload.get("parent_id")!=did
+            or payload.get("depth")!=split_depth(did)
+            or payload.get("generation")!=request.get("generation",1)
+        ):
             raise ValueError("proposal protocol, parent, depth, or generation does not match request")
         children=persist_split(did,payload.get("proposals"))
-        proposal_path.unlink(missing_ok=True)
         log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
         return True,"accepted"
-    except Exception as exc:
-        # Keep the model artifact as audit evidence, but never leave a root
-        # waiting forever for a transition that cannot happen.
-        save_split_status(did,"split-validation-failed",session=session,reason=str(exc)[:1000])
-        log(f"SPLIT_PROPOSAL_REJECTED parent={did} reason={exc}")
-        return False,"split-validation-failed"
+    except (ValueError,KeyError,TypeError) as exc:
+        retryable,state=record_splitter_failure(
+            did,str(exc),session=session,validation=True
+        )
+        log(f"SPLIT_PROPOSAL_REJECTED parent={did} retryable={retryable} reason={exc}")
+        return False,state
+
 
 def claim_splitter(parent, dispatch_token):
-    """Preclaim exactly one splitter for a pending split generation."""
+    """Lease one splitter; stale leases and malformed proposals have bounded recovery."""
     if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
         return False,"split-request-missing"
     with dispatch_lock:
         status=load_split_status(parent)
-        if status.get("state") in {"splitter-active","split-validation-failed","splitter-failed"}:
-            return False,status.get("state")
-        if leaf_children(parent): return False,"already-split"
-        save_split_status(parent,"splitter-active",dispatch_token=dispatch_token)
-    log(f"SPLITTER_CLAIM parent={parent} generation=1 token={dispatch_token}")
+        state=status.get("state","split-required")
+        claims=int(status.get("claim_count") or 0)
+        now=time.time()
+        if state=="splitter-active":
+            try:
+                lease_until=float(status.get("lease_until_epoch") or 0)
+            except (TypeError,ValueError):
+                lease_until=0
+            if lease_until > now:
+                return False,"splitter-active"
+            if claims >= MAX_SPLITTER_ATTEMPTS:
+                save_split_status(
+                    parent,"splitter-failed",
+                    claim_count=claims,
+                    reason="splitter lease expired and claim budget is exhausted",
+                    lease_until_epoch=0,
+                )
+                return False,"splitter-failed"
+            save_split_status(
+                parent,"split-retryable",
+                claim_count=claims,
+                reason="splitter lease expired",
+                lease_until_epoch=0,
+            )
+            state="split-retryable"
+
+        if state in {
+            "split-validation-failed","splitter-failed",
+            "split-unavailable-read-only-parent","parent-finalize-failed",
+        }:
+            return False,state
+        if leaf_children(parent):
+            return False,"already-split"
+        if claims >= MAX_SPLITTER_ATTEMPTS:
+            save_split_status(
+                parent,"splitter-failed",
+                claim_count=claims,
+                reason="splitter claim budget exhausted",
+                lease_until_epoch=0,
+            )
+            return False,"splitter-failed"
+
+        claims += 1
+        save_split_status(
+            parent,"splitter-active",
+            claim_count=claims,
+            dispatch_token=dispatch_token,
+            lease_until_epoch=now+SPLITTER_LEASE_SECONDS,
+        )
+    log(f"SPLITTER_CLAIM parent={parent} generation=1 token={dispatch_token} claim={claims}")
     return True,"claimed"
 
 def parse_splitter_final_json(text):
@@ -497,58 +792,119 @@ def parse_splitter_final_json(text):
             pass
     return None
 
-def complete_splitter(parent, session=""):
-    """Completion callback: supervisor persists validated final JSON.
 
-    Preferred protocol: splitter reads the request once and returns one JSON
-    object in its final assistant text. Legacy split-proposal files remain
-    accepted for crash/backward compatibility.
-    """
+def complete_splitter(parent, session=""):
+    """Completion callback: supervisor persists validated final JSON."""
     if split_proposal_path(parent).exists():
         return process_split_proposal(parent,session,require_proposal=True)
     if not split_request_path(parent).exists():
+        txn=load_split_transaction(parent)
+        if txn.get("state")=="committed":
+            return True,"accepted"
         return False,"split-request-missing"
     payload=parse_splitter_final_json(last_assistant_text_db(session)) if session else None
     if not isinstance(payload,dict):
-        save_split_status(parent,"splitter-failed",session=session,
-                          reason="splitter-completed-without-json-proposal")
-        return False,"splitter-completed-without-json-proposal"
-    path=split_proposal_path(parent)
-    tmp=path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload,indent=2)+"\n")
-    os.replace(tmp,path)
+        _,state=record_splitter_failure(
+            parent,"splitter-completed-without-json-proposal",
+            session=session,validation=False,
+        )
+        return False,state
+    atomic_write_json(split_proposal_path(parent),payload)
     log(f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} session={session}")
     return process_split_proposal(parent,session,require_proposal=True)
+
+
 def reconcile_split_proposals():
-    """Crash-recovery reconciliation for proposal files already on disk."""
-    if not PROJECT: return
+    """Crash recovery for prepared transactions and proposal/request state."""
+    if not PROJECT:
+        return
+    reconcile_required_splits()
+    reconcile_split_transactions()
     for request in (Path(PROJECT)/".opencode-v2"/"work").glob("D*.split-request.json"):
         did=request.name.removesuffix(".split-request.json")
         status=load_split_status(did)
-        if status.get("state") in {"split-validation-failed","splitter-failed"}:
+        state=status.get("state")
+        if state in {
+            "split-validation-failed","splitter-failed",
+            "split-unavailable-read-only-parent",
+        }:
             continue
-        if split_proposal_path(did).exists(): process_split_proposal(did)
+        if state=="splitter-active":
+            try:
+                expired=float(status.get("lease_until_epoch") or 0) <= time.time()
+            except (TypeError,ValueError):
+                expired=True
+            if expired:
+                claims=int(status.get("claim_count") or 0)
+                if claims >= MAX_SPLITTER_ATTEMPTS:
+                    save_split_status(
+                        did,"splitter-failed",claim_count=claims,
+                        reason="splitter lease expired and claim budget is exhausted",
+                        lease_until_epoch=0,
+                    )
+                else:
+                    save_split_status(
+                        did,"split-retryable",claim_count=claims,
+                        reason="splitter lease expired",
+                        lease_until_epoch=0,
+                    )
+        if split_proposal_path(did).exists():
+            process_split_proposal(did)
+
 
 def record_leaf_failure(did, reason, classification="genuine"):
-    """Record terminal worker outcome and request, but never invent, a split."""
-    if classification not in {"genuine","infrastructure","bad-plan"}: raise ValueError("invalid failure classification")
+    """Record a terminal worker outcome; the split-required edge is durable in the ledger."""
+    if classification not in {"genuine","infrastructure","bad-plan"}:
+        raise ValueError("invalid failure classification")
+    split_needed=False
     with dispatch_lock:
         with attempt_lock():
-            data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
-            if not isinstance(entry,dict): return False,"missing-ledger-entry"
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"missing-ledger-entry"
             history=entry.setdefault("failure_history",[])
             attempt=int(entry.get("count") or 0)
-            if any(isinstance(x,dict) and x.get("attempt")==attempt for x in history): return False,"already-recorded"
-            history.append({"attempt":attempt,"classification":classification,"reason":reason,
-                            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),"source":"supervisor"})
-            save_attempts(data)
-    if classification!="genuine": return True,classification
-    genuine=sum(1 for x in history if isinstance(x,dict) and x.get("classification")=="genuine")
-    if recursive_split_enabled() and genuine>=2 and split_depth(did)<MAX_SPLIT_DEPTH:
+            already=any(
+                isinstance(x,dict) and x.get("attempt")==attempt
+                for x in history
+            )
+            if not already:
+                history.append({
+                    "attempt":attempt,
+                    "classification":classification,
+                    "reason":reason,
+                    "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                    "source":"supervisor",
+                })
+            if classification=="genuine":
+                genuine=sum(
+                    1 for x in history
+                    if isinstance(x,dict) and x.get("classification")=="genuine"
+                )
+                if (
+                    recursive_split_enabled()
+                    and genuine>=2
+                    and split_depth(did)<MAX_SPLIT_DEPTH
+                ):
+                    marker=entry.get("split_required")
+                    if not isinstance(marker,dict):
+                        entry["split_required"]={
+                            "generation":1,
+                            "reason":"genuine-failure-threshold",
+                            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                        }
+                    split_needed=True
+            if not already or split_needed:
+                save_attempts(data)
+    if already and not split_needed:
+        return False,"already-recorded"
+    if classification!="genuine":
+        return True,classification
+    if split_needed:
         return split_request(did)
     return True,"genuine-recorded"
 
-# V2.6.9 NORMALIZED SCHEDULER STATE BEGIN
 def retryable_unmaterialized_dispatch_entry(entry):
     """True when the current attempt was only preclaimed and never materialized."""
     if not isinstance(entry,dict):
@@ -1072,60 +1428,71 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
 # V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION BEGIN
 _split_parent_finalize_next = {}
 
-def reconcile_split_parent_completions():
-    """Finalize a split parent after every direct child is durably ready.
 
-    Recursive splitting replaces execution of the failed parent with child
-    leaves, but downstream Launch deps still point at the canonical parent ID.
-    Therefore the supervisor must deterministically re-run the parent's
-    unchanged verification and canonical leaf-complete guard once all direct
-    children are ready. The root model must never dispatch the split parent or
-    manufacture its ready sentinel.
-    """
+def reconcile_split_parent_completions():
+    """Finalize split parents with a finite, persistent failure budget."""
     if not PROJECT:
         return
-
-    leaves = (load_manifest().get("leaves") or {})
-    now = time.monotonic()
-
-    # Deepest parents first so nested splits can collapse upward cleanly.
-    parents = []
-    for did, leaf in leaves.items():
-        if not isinstance(leaf, dict):
+    leaves=(load_manifest().get("leaves") or {})
+    now=time.monotonic()
+    parents=[]
+    for did,leaf in leaves.items():
+        if not isinstance(leaf,dict):
             continue
-        children = leaf.get("split_children")
-        if isinstance(children, list) and children:
-            parents.append((split_depth(did), did, children))
+        children=leaf.get("split_children")
+        if isinstance(children,list) and children:
+            parents.append((split_depth(did),did,children))
     parents.sort(reverse=True)
 
-    for _depth, did, children in parents:
+    for _depth,did,children in parents:
         if ready_info(did):
-            _split_parent_finalize_next.pop(did, None)
+            _split_parent_finalize_next.pop(did,None)
+            continue
+        status=load_split_status(did)
+        if status.get("state")=="parent-finalize-failed":
             continue
         if not all(ready_info(child) for child in children):
             continue
-        if now < _split_parent_finalize_next.get(did, 0):
+        if now < _split_parent_finalize_next.get(did,0):
             continue
 
-        ok, detail = post_session_finalize(did)
+        ok,detail=post_session_finalize(did)
         log(
             f"SPLIT_PARENT_FINALIZE parent={did} "
             f"children={','.join(children)} result={detail}"
         )
         csv(
-            "SPLIT_PARENT_FINALIZE",
-            "",
-            "supervisor",
+            "SPLIT_PARENT_FINALIZE","","supervisor",
             f"{did} children={','.join(children)} result={detail}",
         )
-
         if ok:
-            _split_parent_finalize_next.pop(did, None)
-        else:
-            # Retry slowly instead of creating a 0.5-second failure/log storm.
-            _split_parent_finalize_next[did] = time.monotonic() + 10.0
+            _split_parent_finalize_next.pop(did,None)
+            save_split_status(
+                did,"accepted",
+                children=children,
+                parent_finalize_failures=0,
+                parent_finalize_last_result="finalized",
+            )
+            continue
 
-# V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION END
+        failures=int(status.get("parent_finalize_failures") or 0)+1
+        if failures >= MAX_SPLIT_PARENT_FINALIZE_FAILURES:
+            save_split_status(
+                did,"parent-finalize-failed",
+                children=children,
+                parent_finalize_failures=failures,
+                parent_finalize_last_result=detail,
+                reason=detail,
+            )
+            _split_parent_finalize_next.pop(did,None)
+        else:
+            save_split_status(
+                did,"parent-finalize-retry",
+                children=children,
+                parent_finalize_failures=failures,
+                parent_finalize_last_result=detail,
+            )
+            _split_parent_finalize_next[did]=time.monotonic()+10.0
 
 def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
     """Record one bounded infrastructure recovery without rewriting history.

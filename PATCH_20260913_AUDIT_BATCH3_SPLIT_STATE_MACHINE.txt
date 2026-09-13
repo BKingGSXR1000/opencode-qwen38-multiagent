@@ -1,0 +1,15 @@
+Applied: 2026-09-13T19:35:34+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch3-split-state-machine-20260913-193534
+
+Audit Batch 3 - split state machine:
+- second genuine failure now persists split_required in attempts.json before request materialization;
+- supervisor reconciles a missing split request after crashes;
+- split requests include the complete normalized parent contract;
+- split application uses a prepared/committed transaction record and is idempotent across replay;
+- split history is transaction-deduplicated;
+- splitter-active is a 600-second lease, not a permanent state;
+- malformed/missing splitter output gets one bounded fresh retry, then a finite terminal blocker;
+- read-only parents that cannot be partitioned reach an explicit terminal state instead of an invalid split;
+- split-parent finalization has a persistent 3-failure budget instead of retrying forever;
+- control_state exposes retryable versus terminal split states deterministically;
+- 27 state-machine invariant/fault-injection tests pass.

@@ -21,6 +21,11 @@ MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
 SPLIT_STATUS_SUFFIX = ".split-status.json"
 LEAF_READY_PROTOCOL = "v2-leaf-ready-v1"
+SPLIT_PROGRESS_STATES = frozenset({"split-required","splitter-active","split-retryable"})
+SPLIT_TERMINAL_STATES = frozenset({
+    "split-validation-failed","splitter-failed",
+    "split-unavailable-read-only-parent","parent-finalize-failed",
+})
 
 
 # Bootstrap owns this incomplete plan artifact.  Keeping the text here lets the
@@ -465,9 +470,21 @@ def snapshot(project):
         genuine_failures = sum(
             1 for item in history if isinstance(item, dict) and item.get("classification") == "genuine"
         )
-        split_required = (project / ".opencode-v2" / "work" / f"{did}.split-request.json").exists()
-        pending_split = split_status(project, did) if split_required else {}
-        split_state = pending_split.get("state", "split-required") if split_required else ""
+        request_exists = (project / ".opencode-v2" / "work" / f"{did}.split-request.json").exists()
+        split_marker = entry.get("split_required") if isinstance(entry, dict) else None
+        pending_split = split_status(project, did)
+        split_state = pending_split.get("state", "")
+        split_required = bool(
+            not children
+            and (
+                request_exists
+                or isinstance(split_marker, dict)
+                or split_state in SPLIT_PROGRESS_STATES
+                or split_state in SPLIT_TERMINAL_STATES
+            )
+        )
+        if split_required and not split_state:
+            split_state = "split-required"
         leaf_states[did] = {
             "complete": complete,
             "attempts": count,
@@ -493,7 +510,7 @@ def snapshot(project):
             "genuine_failures": genuine_failures,
             "split_required": split_required,
             "split_state": split_state,
-            "split_generation": pending_split.get("generation", 1) if split_required else 0,
+            "split_generation": pending_split.get("generation", (split_marker or {}).get("generation",1)) if split_required else 0,
             "eligible": not complete and not children and not split_required and attempt["valid"] and count < attempt["allowed_attempts"] and not missing,
         }
     acceptance_complete = phase_ready(
@@ -509,14 +526,34 @@ def snapshot(project):
     tests = test_state(project)
     execution_blockers = []
     for did, leaf in leaf_states.items():
-        if leaf["complete"] or leaf["split_children"]:
+        if leaf["complete"]:
             continue
-        if leaf["split_required"] and leaf.get("split_state") not in {"split-validation-failed", "splitter-failed"}:
+        if leaf["split_children"]:
+            if leaf.get("split_state") != "parent-finalize-failed":
+                continue
+            execution_blockers.append({
+                "deliverable":did,
+                "reason":"parent-finalize-failed",
+                "attempts":leaf["attempts"],
+                "allowed_attempts":leaf["allowed_attempts"],
+            })
+            continue
+        if leaf["split_required"]:
+            if leaf.get("split_state") in SPLIT_PROGRESS_STATES:
+                continue
+            if leaf.get("split_state") in SPLIT_TERMINAL_STATES:
+                execution_blockers.append({
+                    "deliverable":did,
+                    "reason":leaf.get("split_state"),
+                    "attempts":leaf["attempts"],
+                    "allowed_attempts":leaf["allowed_attempts"],
+                })
+                continue
+        if not leaf["attempt_limit_reached"] and leaf["attempt_ledger_valid"] and not leaf["operator_infrastructure_blocked"]:
             continue
         execution_blockers.append({
             "deliverable": did,
-            "reason": (leaf.get("split_state") if leaf["split_required"] else
-                       "attempt_ledger_invalid" if not leaf["attempt_ledger_valid"] else
+            "reason": ("attempt_ledger_invalid" if not leaf["attempt_ledger_valid"] else
                        "execution_blocked_infrastructure" if leaf["operator_infrastructure_blocked"] else
                        "attempt_limit_reached"),
             "attempts": leaf["attempts"],
@@ -552,10 +589,12 @@ def resume_phase(state):
     if not state.get("plan", {}).get("complete"):
         return "implementation-plan"
     leaves = state.get("leaves") or {}
-    if any(leaf.get("split_required") and leaf.get("split_state") in {"split-required", "splitter-active"}
-           for leaf in leaves.values()):
+    if any(
+        leaf.get("split_required") and leaf.get("split_state") in SPLIT_PROGRESS_STATES
+        for leaf in leaves.values()
+    ):
         return "recursive-split"
-    if any(not leaf.get("complete") and leaf.get("attempt_limit_reached") for leaf in leaves.values()):
+    if state.get("execution_blockers"):
         return "execution-blocked"
     if any(not leaf.get("complete") for leaf in leaves.values()):
         return "execution"

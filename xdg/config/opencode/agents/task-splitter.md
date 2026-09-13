@@ -48,8 +48,12 @@ no prose before or after it:
 }
 
 Use the request's exact parent_id, depth, and generation. Do not invent child
-IDs; the supervisor derives them. Child ownership sets must be disjoint,
-together cover the parent's owned artifacts, and stay inside parent ownership.
+IDs; the supervisor derives them. The request also contains `parent_contract`
+with the parent's original role, acceptance IDs, dependencies, Verify command,
+and Done-when obligation. Preserve those obligations when choosing the two
+bounded scopes; splitting is recovery, not permission to weaken the parent
+contract. Child ownership sets must be disjoint, together cover the parent's
+owned artifacts, and stay inside parent ownership.
 The supervisor reads your final JSON from OpenCode's session database, validates
 it, and persists the durable split itself. You must NOT write split-proposal.json.
 

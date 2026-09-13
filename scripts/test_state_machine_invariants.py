@@ -251,4 +251,212 @@ class AbortIntentTests(unittest.TestCase):
                 supervisor.session_terminal_aborted=old_terminal
 
 
+class SplitStateMachineTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=self.tmp.name
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.parent={
+            "id":"D001","name":"parent",
+            "owned_artifacts":"`a.txt`, `b.txt`",
+            "owned_artifact_paths":["a.txt","b.txt"],
+            "launch_deps":[],"contract_deps":["D009"],"verify_deps":["D010"],
+            "verify_command":"test -f a.txt -a -f b.txt",
+            "role":"implementer","done_when":"both files are valid",
+            "acceptance_ids":["A001","A002"],"parallel":"none","split_children":[],
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.parent},
+        }))
+        (self.ctrl/"ACCEPTANCE.ready").write_text(
+            "status=complete\nartifact=ACCEPTANCE.md\nmarker=ACCEPTANCE_COMPLETE\nvalidated=deterministic-test\n"
+        )
+        (self.ctrl/"IMPLEMENTATION_PLAN.ready").write_text(
+            "status=complete\nartifact=IMPLEMENTATION_PLAN.md\nmarker=IMPLEMENTATION_PLAN_COMPLETE\nvalidated=deterministic-test\n"
+        )
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "count":2,"sessions":["s1","s2"],"automatic_limit":2,
+                    "failure_history":[
+                        {"attempt":1,"classification":"genuine","reason":"first",
+                         "timestamp":"2026-09-13T00:00:00Z","source":"supervisor"}
+                    ],
+                }
+            },
+        }))
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        supervisor._split_parent_finalize_next.clear()
+        self.tmp.cleanup()
+
+    def proposals(self):
+        return [
+            {
+                "scope":"write both files",
+                "owned_artifacts":"`a.txt`, `b.txt`",
+                "verify_command":"test -f a.txt -a -f b.txt",
+                "role":"implementer",
+                "depends_on_sibling":"",
+                "done_when":"both files exist",
+            },
+            {
+                "scope":"independently verify",
+                "owned_artifacts":"none",
+                "verify_command":"test -f a.txt -a -f b.txt",
+                "role":"tester",
+                "depends_on_sibling":"first",
+                "done_when":"both files verify",
+            },
+        ]
+
+    def test_failure_to_split_edge_survives_request_materialization_failure(self):
+        old=supervisor.split_request
+        supervisor.split_request=lambda _did: (_ for _ in ()).throw(RuntimeError("fault after ledger commit"))
+        try:
+            with self.assertRaises(RuntimeError):
+                supervisor.record_leaf_failure("D001","second","genuine")
+        finally:
+            supervisor.split_request=old
+        ledger=json.loads((self.work/"attempts.json").read_text())
+        self.assertIsInstance(ledger["deliverables"]["D001"].get("split_required"),dict)
+        self.assertFalse((self.work/"D001.split-request.json").exists())
+        supervisor.reconcile_required_splits()
+        self.assertTrue((self.work/"D001.split-request.json").exists())
+
+    def test_split_request_contains_full_parent_contract(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        req=json.loads((self.work/"D001.split-request.json").read_text())
+        contract=req["parent_contract"]
+        self.assertEqual(contract["acceptance_ids"],["A001","A002"])
+        self.assertEqual(contract["contract_deps"],["D009"])
+        self.assertEqual(contract["verify_deps"],["D010"])
+        self.assertEqual(contract["done_when"],"both files are valid")
+
+    def test_read_only_parent_reaches_finite_terminal_state(self):
+        manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        leaf=manifest["leaves"]["D001"]
+        leaf["role"]="tester"
+        leaf["owned_artifacts"]="none"
+        leaf["owned_artifact_paths"]=[]
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(manifest))
+        ok,detail=supervisor.record_leaf_failure("D001","second","genuine")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"split-unavailable-read-only-parent")
+        status=json.loads((self.work/"D001.split-status.json").read_text())
+        self.assertEqual(status["state"],"split-unavailable-read-only-parent")
+        snap=control_state.snapshot(self.project)
+        reasons=[item["reason"] for item in snap["execution_blockers"]]
+        self.assertIn("split-unavailable-read-only-parent",reasons)
+        self.assertEqual(snap["resume_phase"],"execution-blocked")
+
+    def test_stale_splitter_lease_is_recoverable_once_then_bounded(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        supervisor.save_split_status(
+            "D001","splitter-active",claim_count=1,
+            lease_until_epoch=1,dispatch_token="old"
+        )
+        ok,detail=supervisor.claim_splitter("D001","new")
+        self.assertTrue(ok); self.assertEqual(detail,"claimed")
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["claim_count"],2)
+        supervisor.save_split_status(
+            "D001","splitter-active",claim_count=2,
+            lease_until_epoch=1,dispatch_token="new"
+        )
+        ok,detail=supervisor.claim_splitter("D001","third")
+        self.assertFalse(ok); self.assertEqual(detail,"splitter-failed")
+
+    def test_malformed_proposal_gets_one_bounded_fresh_retry(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        ok,_=supervisor.claim_splitter("D001","claim1")
+        self.assertTrue(ok)
+        (self.work/"D001.split-proposal.json").write_text("{broken")
+        ok,detail=supervisor.process_split_proposal("D001",session="s1",require_proposal=True)
+        self.assertFalse(ok); self.assertEqual(detail,"split-retryable")
+        self.assertFalse((self.work/"D001.split-proposal.json").exists())
+        ok,_=supervisor.claim_splitter("D001","claim2")
+        self.assertTrue(ok)
+        (self.work/"D001.split-proposal.json").write_text("{broken again")
+        ok,detail=supervisor.process_split_proposal("D001",session="s2",require_proposal=True)
+        self.assertFalse(ok); self.assertEqual(detail,"split-validation-failed")
+
+    def test_split_transaction_is_idempotent_and_history_not_duplicated(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        first=supervisor.persist_split("D001",self.proposals())
+        second=supervisor.persist_split("D001",self.proposals())
+        self.assertEqual(first,["D001-A","D001-B"])
+        self.assertEqual(second,first)
+        history=json.loads((self.work/"splits.json").read_text())
+        self.assertEqual(len(history["splits"]),1)
+        txn=json.loads((self.work/"D001.split-transaction.json").read_text())
+        self.assertEqual(txn["state"],"committed")
+
+    def test_prepared_split_transaction_replays_after_partial_crash(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        expected,children=supervisor.validate_split_proposal("D001",self.proposals())
+        request=json.loads((self.work/"D001.split-request.json").read_text())
+        child_defs={child["id"]:child for child in children}
+        txn={
+            "owner":"supervisor",
+            "protocol":supervisor.SPLIT_TRANSACTION_PROTOCOL,
+            "state":"prepared","parent_id":"D001",
+            "generation":request["generation"],
+            "children":expected,"child_defs":child_defs,
+            "transaction_id":supervisor.split_transaction_id("D001",request["generation"],child_defs),
+            "prepared_at":"2026-09-13T00:00:00Z",
+        }
+        supervisor.atomic_write_json(self.work/"D001.split-transaction.json",txn)
+        # Simulate a crash after only the main manifest mutation.
+        manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        manifest["leaves"]["D001"]["split_children"]=expected
+        for child in children:
+            manifest["leaves"][child["id"]]=child
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(manifest))
+        supervisor.reconcile_split_transactions()
+        txn2=json.loads((self.work/"D001.split-transaction.json").read_text())
+        self.assertEqual(txn2["state"],"committed")
+        overlay=json.loads((self.work/"split-leaves.json").read_text())
+        self.assertEqual(overlay["parents"]["D001"]["children"],expected)
+
+    def test_parent_finalize_failure_becomes_finite_blocker(self):
+        manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        manifest["leaves"]["D001"]["split_children"]=["D001-A","D001-B"]
+        manifest["leaves"]["D001-A"]=dict(self.parent,id="D001-A",parent="D001",split_children=[])
+        manifest["leaves"]["D001-B"]=dict(self.parent,id="D001-B",parent="D001",split_children=[])
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(manifest))
+        supervisor.save_split_status("D001","accepted",children=["D001-A","D001-B"])
+        old_ready=supervisor.ready_info
+        old_finalize=supervisor.post_session_finalize
+        supervisor.ready_info=lambda did: {"status":"complete"} if did in {"D001-A","D001-B"} else {}
+        supervisor.post_session_finalize=lambda did: (False,"verify-failed-1")
+        try:
+            for _ in range(supervisor.MAX_SPLIT_PARENT_FINALIZE_FAILURES):
+                supervisor._split_parent_finalize_next["D001"]=0
+                supervisor.reconcile_split_parent_completions()
+        finally:
+            supervisor.ready_info=old_ready
+            supervisor.post_session_finalize=old_finalize
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"parent-finalize-failed")
+        self.assertEqual(status["parent_finalize_failures"],supervisor.MAX_SPLIT_PARENT_FINALIZE_FAILURES)
+
+    def test_resume_phase_honors_explicit_execution_blocker(self):
+        state={
+            "acceptance":{"complete":True},
+            "plan":{"complete":True,"blocked":False},
+            "leaves":{"D001":{"complete":False,"split_required":False,"attempt_limit_reached":False}},
+            "execution_blockers":[{"deliverable":"D001","reason":"parent-finalize-failed"}],
+            "tests":{"complete":False},
+            "acceptance_validation":{"complete":False},
+        }
+        self.assertEqual(control_state.resume_phase(state),"execution-blocked")
+
+
 if __name__=="__main__": unittest.main()

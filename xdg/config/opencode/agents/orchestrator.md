@@ -145,17 +145,23 @@ EXECUTION
 Read `.opencode-v2/IMPLEMENTATION_PLAN.guard.json`.
 
 RECURSIVE SPLIT
-When `control-status.json` reports `"resume_phase": "recursive-split"`, launch
-exactly one `task-splitter` for each `split_required` parent, with the short
-prompt `SPLIT_PARENT: Dxxx`. The splitter reads its durable request and RETURNS one JSON object containing
+When `control-status.json` reports `"resume_phase": "recursive-split"`, inspect
+each split-required parent's exact `split_state`.
+- For `split-required` or `split-retryable`, launch one **fresh**
+  `task-splitter` with the short prompt `SPLIT_PARENT: Dxxx`.
+- For `splitter-active`, do not launch a duplicate splitter. Re-read
+  `control-status.json`; the supervisor owns the bounded lease and will expose
+  `split-retryable` if that lease expires.
+The splitter reads its durable request and RETURNS one JSON object containing
 two proposals; it cannot choose child IDs or mutate the manifest/ledger. The
-supervisor persists and validates that JSON on completion;
-immediately re-run `control-status.json`. Never wait for a separate supervisor or
-human cycle. Do not dispatch the split parent, replan the project, grant a
-retry, or manufacture child IDs. At depths 0 and 1 a second genuine failed
-attempt triggers this path; depth 2 never splits and retains its three genuine
-automatic attempts. Infrastructure/runtime failures and bad-plan outcomes do
-not trigger splitting.
+supervisor persists and validates that JSON on completion. A malformed/missing
+proposal receives at most one bounded fresh splitter retry; terminal split
+states are surfaced as execution blockers. Immediately re-run
+`control-status.json` after a splitter returns. Do not dispatch the split parent,
+replan the project, grant a retry, or manufacture child IDs. At depths 0 and 1
+a second genuine failed attempt triggers this path; depth 2 never splits and
+retains its three genuine automatic attempts. Infrastructure/runtime failures
+and bad-plan outcomes do not trigger splitting.
 
 Dispatch only exact planned Dxxx leaves whose Launch deps are complete, using
 the exact `Role:` recorded for that Dxxx in `IMPLEMENTATION_PLAN.guard.json`.
