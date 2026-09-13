@@ -7,7 +7,14 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
                            MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
                            RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
+                           LEAF_READY_PROTOCOL,
                            split_depth, valid_deliverable_id)
+from leaf_contract import (
+    IMPLEMENTATION_ROLES, READ_ONLY_ROLES,
+    strict_owned_artifact_paths as shared_strict_owned_artifact_paths,
+    canonical_owned_artifacts as shared_canonical_owned_artifacts,
+    validate_leaf_contract,
+)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
@@ -39,8 +46,8 @@ MAX_PLANNER_RESTARTS=3
 # use this unambiguous schema name without a destructive migration.
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
-IMPLEMENTATION_AGENTS={"probe-builder","implementer","core-builder","feature-builder","reasoning-builder","integrator","tester","test-builder"}
-READ_ONLY_SPLIT_ROLES={"tester"}
+IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
+READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS=MAX_INFRASTRUCTURE_RETRY_GRANTS
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
@@ -326,10 +333,12 @@ def validate_split_proposal(parent, proposals):
         allowed={"scope","owned_artifacts","verify_command","role","depends_on_sibling","done_when"}
         if set(proposal)-allowed or not all(isinstance(proposal.get(k),str) and proposal[k].strip() for k in ("scope","owned_artifacts","verify_command","role","done_when")):
             raise ValueError("child proposal has missing or unsupported fields")
-        if proposal["role"] not in IMPLEMENTATION_AGENTS: raise ValueError("child role is invalid")
         owned_list,owned_error=_strict_owned_artifact_text(proposal["owned_artifacts"])
         if owned_error:
             raise ValueError(f"child ownership is not canonical: {owned_error}")
+        contract_errors=validate_leaf_contract(proposal["role"], owned_list, proposal["verify_command"])
+        if contract_errors:
+            raise ValueError("; ".join(contract_errors))
         owned=set(owned_list)
         sibling=proposal.get("depends_on_sibling", "")
         if index == 1 and sibling == expected[0]:
@@ -754,39 +763,10 @@ def planner_retirement_reason(sid,elapsed,plan_path=None):
     return planner_progress_reason(sid,elapsed,plan_path)
 
 def _strict_owned_artifact_text(raw):
-    """Return canonical project-relative ownership paths or an error."""
-    if not isinstance(raw, str):
-        return [], "Owned artifacts must be a string"
-    raw = raw.strip()
-    if raw == "none":
-        return [], ""
-    if not raw:
-        return [], "Owned artifacts is empty"
-    values = re.findall(r"`([^`\r\n]+)`", raw)
-    if not values:
-        return [], "Owned artifacts is not canonical"
-    if raw != ", ".join(f"`{value}`" for value in values):
-        return [], "Owned artifacts contains non-path prose"
-    out=[]
-    for value in values:
-        if value != value.strip() or value.startswith(("/", "./", "~")):
-            return [], f"invalid project-relative owned artifact: {value}"
-        if "\\" in value or any(ch.isspace() for ch in value):
-            return [], f"invalid whitespace/backslash in owned artifact: {value}"
-        if any(ch in value for ch in "*?[]{}|<>\"'`;"):
-            return [], f"unsupported owned-artifact metacharacter: {value}"
-        core=value[:-1] if value.endswith("/") else value
-        parts=core.split("/") if core else []
-        if not parts or any(part in ("", ".", "..") for part in parts):
-            return [], f"invalid owned-artifact path segment: {value}"
-        if value in out:
-            return [], f"duplicate owned artifact: {value}"
-        out.append(value)
-    return out, ""
-
+    return shared_strict_owned_artifact_paths(raw)
 
 def _canonical_owned_artifacts(paths):
-    return "none" if not paths else ", ".join(f"`{path}`" for path in paths)
+    return shared_canonical_owned_artifacts(paths)
 
 
 def owned_artifact_paths(leaf):
@@ -1017,7 +997,8 @@ def supervisor_finalize_ready(did):
             f"deliverable={did}\n"
             f"attempt={count}\n"
             "verified=true\n"
-            "protocol=V2.6.9\n"
+            "owner=supervisor\n"
+            f"protocol={LEAF_READY_PROTOCOL}\n"
         )
         tmp=path.with_suffix(".tmp")
         tmp.write_text(body)

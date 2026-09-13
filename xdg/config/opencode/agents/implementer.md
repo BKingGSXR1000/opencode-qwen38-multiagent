@@ -139,9 +139,7 @@ characters before the next meaningful tool action. Inspect owned artifacts and
 Dxxx.progress.md before re-deriving on retries. Externalize numerical/algorithmic
 work into scripts/tests.
 
-Do not invent or weaken verification. FINAL meaningful tool call:
-`.opencode-v2/bin/leaf-complete Dxxx`
-After success return exactly `Dxxx_DONE`. No further reasoning/research.
+Do not invent or weaken verification. Run the exact Verify command, persist a compact result in Dxxx.progress.md when useful, then return normally. The supervisor alone finalizes readiness.
 <!-- V2.6.7 WORKER END -->
 
 <!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT BEGIN -->
@@ -180,8 +178,7 @@ The step budget exists to finish the deliverable, not to maximize investigation.
   not consume the budget before core owned files exist.
 - If the deliverable owns several files, create the minimum complete set early
   and iterate. Do not spend most of the session proving optional details.
-- Reserve enough tool turns for verification and the final
-  `.opencode-v2/bin/leaf-complete Dxxx` call.
+- Reserve enough tool turns for the exact Verify command and a compact durable result before returning.
 <!-- V2.6.9 EARLY ARTIFACT RULE END -->
 
 <!-- V2.6.9 NO DETACHED DELIVERABLE JOBS BEGIN -->

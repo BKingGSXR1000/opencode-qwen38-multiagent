@@ -1,0 +1,14 @@
+Applied: 2026-09-13T19:15:34+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch1b-trust-validator-20260913-191534
+
+Audit Batch 1B:
+- shared leaf_contract.py now governs static-plan and recursive-split role/ownership/Verify semantics;
+- unknown implementation roles and write-capable leaves with no durable artifact are rejected;
+- split-child Verify commands use the same nontrivial verification rule as static leaves;
+- ownership overlap is split-tree-aware: parent/descendant overlap is legal, sibling/unrelated overlap is not;
+- ready sentinels require supervisor owner, stable protocol, and exact current attempt;
+- supervisor ready minting writes that provenance;
+- legacy worker leaf-complete is disabled and no longer bootstrapped;
+- state-writer is mechanically limited to STATE.md;
+- contradictory legacy leaf-complete worker instructions are removed;
+- dedicated state-machine invariant tests cover these trust boundaries.

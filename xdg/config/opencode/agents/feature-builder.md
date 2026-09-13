@@ -141,9 +141,7 @@ characters before the next meaningful tool action. Inspect owned artifacts and
 Dxxx.progress.md before re-deriving on retries. Externalize numerical/algorithmic
 work into scripts/tests.
 
-Do not invent or weaken verification. FINAL meaningful tool call:
-`.opencode-v2/bin/leaf-complete Dxxx`
-After success return exactly `Dxxx_DONE`. No further reasoning/research.
+Do not invent or weaken verification. Run the exact Verify command, persist a compact result in Dxxx.progress.md when useful, then return normally. The supervisor alone finalizes readiness.
 <!-- V2.6.7 WORKER END -->
 
 <!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT BEGIN -->

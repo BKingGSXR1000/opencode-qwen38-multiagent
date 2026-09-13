@@ -19,6 +19,7 @@ MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
 # It releases an existing reservation; it never creates a human grant.
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
 SPLIT_STATUS_SUFFIX = ".split-status.json"
+LEAF_READY_PROTOCOL = "v2-leaf-ready-v1"
 
 
 # Bootstrap owns this incomplete plan artifact.  Keeping the text here lets the
@@ -52,13 +53,26 @@ def _kv(path):
 def _base_ready(project, did):
     project = Path(project)
     data = _kv(project / ".opencode-v2" / "work" / f"{did}.ready")
-    if (
+    if not (
         data.get("status") == "complete"
         and data.get("deliverable") == did
         and data.get("verified") == "true"
+        and data.get("owner") == "supervisor"
+        and data.get("protocol") == LEAF_READY_PROTOCOL
     ):
-        return data
-    return {}
+        return {}
+    try:
+        ready_attempt = int(data.get("attempt") or 0)
+    except (TypeError, ValueError):
+        return {}
+    ledger = load_attempts(project)
+    if ledger.get("owner") != "supervisor":
+        return {}
+    entry = (ledger.get("deliverables") or {}).get(did)
+    state = attempt_state(entry)
+    if not state.get("valid") or ready_attempt < 1 or ready_attempt != state.get("count"):
+        return {}
+    return data
 
 
 def split_depth(did):

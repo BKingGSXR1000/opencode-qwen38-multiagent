@@ -5,8 +5,16 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from leaf_contract import (
+    WRITE_ROLES as SHARED_WRITE_ROLES,
+    strict_owned_artifact_paths as shared_strict_owned_artifact_paths,
+    canonical_owned_artifacts as shared_canonical_owned_artifacts,
+    supervisor_reserved_owned_path as shared_supervisor_reserved_owned_path,
+    ownership_overlap_errors as shared_ownership_overlap_errors,
+    validate_leaf_contract,
+)
 
-ROOT = Path.home() / "AI" / "opencode-qwen38-multiagent-v2"
+ROOT = Path(os.environ.get("V2_ROOT", str(Path.home() / "AI" / "opencode-qwen38-multiagent-v2")))
 AGENTS = ROOT / "xdg" / "config" / "opencode" / "agents"
 
 PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
@@ -32,15 +40,7 @@ FORBIDDEN_WRITE_ROLES = {
     "state-writer",
 }
 
-WRITE_ROLES = {
-    "probe-builder",
-    "implementer",
-    "core-builder",
-    "feature-builder",
-    "reasoning-builder",
-    "integrator",
-    "test-builder",
-}
+WRITE_ROLES = set(SHARED_WRITE_ROLES)
 
 ALIASES = {
     "outcome": ("Outcome",),
@@ -141,115 +141,16 @@ def field(section: str, names):
     return ""
 
 def strict_owned_artifact_paths(raw: str):
-    """Parse the machine-owned artifact field.
-
-    Canonical syntax is either exactly:
-      none
-    or:
-      `project/relative/path`, `second/path`
-
-    Descriptions belong in Outcome/Done when, never in this field.  Keeping the
-    grammar deliberately small prevents prose such as "/PORT=" or "PASS/FAIL"
-    from becoming supervisor-owned filesystem paths.
-    """
-    if not isinstance(raw, str):
-        return [], "Owned artifacts must be a string"
-    raw = raw.strip()
-    if raw == "none":
-        return [], ""
-    if not raw:
-        return [], "Owned artifacts is empty"
-
-    values = re.findall(r"`([^`\r\n]+)`", raw)
-    if not values:
-        return [], (
-            "Owned artifacts must be exact comma-separated backticked "
-            "project-relative paths, or exact 'none'"
-        )
-    canonical = ", ".join(f"`{value}`" for value in values)
-    if raw != canonical:
-        return [], (
-            "Owned artifacts must contain paths only: "
-            "`path`, `path`; move all descriptions/parentheticals to Outcome or Done when"
-        )
-
-    out = []
-    for value in values:
-        if value != value.strip():
-            return [], f"Owned artifact path has surrounding whitespace: {value!r}"
-        if value.startswith(("/", "./", "~")):
-            return [], f"Owned artifact must be project-relative: {value}"
-        if "\\" in value or any(ch.isspace() for ch in value):
-            return [], f"Owned artifact contains whitespace/backslash: {value}"
-        if any(ch in value for ch in "*?[]{}|<>\"'`;"):
-            return [], f"Owned artifact contains unsupported shell/path metacharacter: {value}"
-        core = value[:-1] if value.endswith("/") else value
-        if not core:
-            return [], f"Owned artifact path is invalid: {value}"
-        parts = core.split("/")
-        if any(part in ("", ".", "..") for part in parts):
-            return [], f"Owned artifact contains an invalid path segment: {value}"
-        if value in out:
-            return [], f"Owned artifact is duplicated: {value}"
-        if supervisor_reserved_owned_path(value):
-            return [], f"Owned artifact is supervisor-reserved control state: {value}"
-        out.append(value)
-    return out, ""
-
+    return shared_strict_owned_artifact_paths(raw)
 
 def canonical_owned_artifacts(paths):
-    return "none" if not paths else ", ".join(f"`{path}`" for path in paths)
-
+    return shared_canonical_owned_artifacts(paths)
 
 def supervisor_reserved_owned_path(path: str):
-    """True for control-plane artifacts that no implementation leaf may own."""
-    p=(path or "").rstrip("/")
-    if p.startswith(".opencode-v2/work/"):
-        return True
-    if p.startswith(".opencode-v2/bin/"):
-        return True
-    if p in {
-        ".opencode-v2/control-status.json",
-        ".opencode-v2/IMPLEMENTATION_PLAN.guard.json",
-        ".opencode-v2/root-rollovers.json",
-        ".opencode-v2/reference-gate.json",
-        ".opencode-v2/reference-validation-gate.json",
-        ".opencode-v2/ACCEPTANCE.ready",
-        ".opencode-v2/IMPLEMENTATION_PLAN.ready",
-    }:
-        return True
-    return False
-
+    return shared_supervisor_reserved_owned_path(path)
 
 def ownership_overlap_errors(leaves: dict):
-    """Reject exact and ancestor/descendant ownership overlap across the plan."""
-    entries=[]
-    for did,leaf in leaves.items():
-        for raw in leaf.get("owned_artifact_paths",[]) or []:
-            p=str(raw).rstrip("/")
-            if p:
-                entries.append((did,p))
-    errors=[]
-    seen=set()
-    for i,(did_a,a) in enumerate(entries):
-        for did_b,b in entries[i+1:]:
-            overlap=(a==b or a.startswith(b+"/") or b.startswith(a+"/"))
-            if not overlap:
-                continue
-            key=tuple(sorted(((did_a,a),(did_b,b))))
-            if key in seen:
-                continue
-            seen.add(key)
-            if did_a==did_b:
-                errors.append(
-                    f"{did_a}: overlapping owned artifact paths `{a}` and `{b}`"
-                )
-            else:
-                errors.append(
-                    f"ownership overlap: {did_a} owns `{a}` while "
-                    f"{did_b} owns `{b}`"
-                )
-    return errors
+    return shared_ownership_overlap_errors(leaves)
 
 
 def plan_artifact_paths(raw: str):
@@ -378,12 +279,11 @@ def parse_plan(text: str):
             errors.append(f"{did}: missing Parallel-safe field")
 
         writes = bool(leaf.get("owned_artifact_paths"))
-        if leaf["role"] == "tester" and writes:
-            errors.append(
-                f"{did}: read-only Role 'tester' must use Owned artifacts: none; "
-                "use test-builder when the leaf must create or modify a test artifact"
-            )
-        elif writes and leaf["role"] and not role_can_write(leaf["role"]):
+        for contract_error in validate_leaf_contract(
+            leaf["role"], leaf.get("owned_artifact_paths", []), leaf["verify_command"]
+        ):
+            errors.append(f"{did}: {contract_error}")
+        if writes and leaf["role"] in WRITE_ROLES and not role_can_write(leaf["role"]):
             allowed = ", ".join(sorted(WRITE_ROLES))
             errors.append(
                 f"{did}: role '{leaf['role']}' is not an allowed write-capable Role; "
@@ -394,8 +294,6 @@ def parse_plan(text: str):
                 f"{did}: probe leaf must use exact Role 'probe-builder', got "
                 f"'{leaf['role'] or 'missing'}'"
             )
-        if leaf["verify_command"] in ("true", ":", "echo ok", "echo pass"):
-            errors.append(f"{did}: Verify command is non-verifying")
 
     waves, wave_errors = parse_waves(text)
     errors.extend(wave_errors)
@@ -756,7 +654,7 @@ Status: COMPLETE
             )
             _, _, role_errors = parse_plan(invalid_role)
             assert any(
-                "not an allowed write-capable Role" in e
+                "unknown implementation Role" in e
                 for e in role_errors
             ), role_errors
 

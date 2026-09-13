@@ -70,7 +70,7 @@ or a few measured fields, not the complete raw response in conversation history.
   after meaningful discoveries. Do not wait to understand every dependency.
 - Once the artifact's required fields are known, further curiosity, package/API
   archaeology, unrelated domain research, or unnecessary network/data downloads
-  are forbidden. Run Verify, then leaf-complete.
+  are forbidden. Run Verify, record the result, then return normally for supervisor finalization.
 - `Reference policy: internal` means use local, internally consistent facts and
   deterministic fixtures only. Do not introduce external authoritative
   datasets/sources, externally maintained interfaces, provider-specific
@@ -86,10 +86,7 @@ or a few measured fields, not the complete raw response in conversation history.
 
 Maintain `.opencode-v2/work/Dxxx.progress.md` when useful.
 
-Your FINAL meaningful tool call must be:
-`.opencode-v2/bin/leaf-complete Dxxx`
-
-After success return exactly `Dxxx_DONE`.
+Run the exact Verify command, persist a compact result in Dxxx.progress.md when useful, then return normally. The supervisor alone finalizes readiness.
 
 <!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT BEGIN -->
 ## Project-local control protocol
@@ -129,8 +126,7 @@ The required probe artifact is more important than exhaustive investigation.
   required notes artifact exists and must not prevent completion.
 - If an optional dependency path becomes troublesome, record the verified
   fallback decision in the owned notes artifact and proceed.
-- Reserve enough turns for Verify and the final
-  `.opencode-v2/bin/leaf-complete Dxxx` call.
+- Reserve enough turns for the exact Verify command and a compact durable result before returning.
 <!-- V2.6.9 PROBE DURABILITY RULE END -->
 
 <!-- V2.6.9 NO DETACHED DELIVERABLE JOBS BEGIN -->

@@ -5,7 +5,6 @@ from control_state import IMPLEMENTATION_PLAN_SCAFFOLD
 
 HARNESS_ROOT=Path(__file__).resolve().parents[1]
 RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
-LEAF_COMPLETE_COMMAND=".opencode-v2/bin/leaf-complete Dxxx"
 
 TEST_CHECKS_SCHEMA={
     "$schema":"https://json-schema.org/draft/2020-12/schema",
@@ -94,11 +93,12 @@ running any command:
 ```
 
 Use one `checks[]` entry per intended test command. Run it with the exact
-project-local command `{RUN_CHECKS_COMMAND}`. Complete a verified leaf with
-`{LEAF_COMPLETE_COMMAND}` (substitute the exact deliverable ID). Never read or
-inspect either wrapper or the harness source. Do not create a probe
-deliverable to discover this schema and do not guess or substitute a fallback
-manifest format.
+project-local command `{RUN_CHECKS_COMMAND}`. Implementation workers do not
+create readiness sentinels and do not invoke a leaf-completion command. After
+the worker returns, the supervisor re-runs the exact leaf Verify command and
+alone mints `.opencode-v2/work/Dxxx.ready`. Never inspect the wrapper or harness
+source merely to infer this contract. Do not create a probe deliverable to
+discover this schema and do not guess or substitute a fallback manifest format.
 
 ## Filesystem control protocol
 
@@ -109,8 +109,9 @@ manifest format.
 - The deterministic control guard alone creates `.opencode-v2/ACCEPTANCE.ready`
   and `.opencode-v2/IMPLEMENTATION_PLAN.ready`; agents never create, modify, or
   request either sentinel.
-- A leaf is complete only after the prescribed leaf-completion command creates
-  `.opencode-v2/work/Dxxx.ready`. Do not manufacture ready files manually.
+- A leaf is complete only after the supervisor has re-run its exact Verify
+  command, checked ownership, and minted `.opencode-v2/work/Dxxx.ready`.
+  Agents never create, modify, request, or emulate leaf-ready sentinels.
 - The supervisor alone owns `.opencode-v2/work/attempts.json`; an exact Dxxx has
   at most three automatic implementation attempts. A pre-dispatch denial has
   no claim. At most one supervisor-recorded OpenCode compaction-template
@@ -148,13 +149,12 @@ def bootstrap_control_surface(project):
         ctrl/"bin"/"run-checks":wrapper_text(
             sys.executable,(HARNESS_ROOT/"scripts"/"run-checks.py","--project",project)
         ),
-        ctrl/"bin"/"leaf-complete":wrapper_text(
-            HARNESS_ROOT/"scripts"/"leaf-complete.sh",()
-        ),
         ctrl/"bin"/"control-status":wrapper_text(
             sys.executable,(HARNESS_ROOT/"scripts"/"control-status.py","--project",project)
         ),
     }
+    legacy_leaf_complete=ctrl/"bin"/"leaf-complete"
+    legacy_leaf_complete.unlink(missing_ok=True)
     for path,text in wrappers.items():
         atomic_write(path,text)
         path.chmod(path.stat().st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)

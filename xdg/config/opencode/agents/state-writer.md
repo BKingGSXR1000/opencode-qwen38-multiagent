@@ -7,8 +7,7 @@ permission:
   read: allow
   edit:
     "*": deny
-    ".opencode-v2/**": allow
-    ".opencode-v2/bin/*": deny
+    ".opencode-v2/STATE.md": allow
   glob: allow
   grep: allow
   list: allow
@@ -95,25 +94,6 @@ Use it for:
 
 Keep it compact so a replacement worker can resume without re-deriving.
 
-### Completion sentinel
-Only AFTER all owned artifacts exist and the leaf's Done-when checks pass,
-perform your FINAL file-writing action:
-
-write `.opencode-v2/work/<Dxxx>.ready` with exactly:
-
-status=complete
-deliverable=<Dxxx>
-attempt=<N>
-verified=true
-
-where `<N>` is the attempt number supplied by the orchestrator.
-
-Do not write the sentinel early.
-
-Immediately after the sentinel, return exactly:
-`<Dxxx>_DONE`
-
-Do not start more research, cleanup reasoning, or explanation after the
-sentinel. If OpenCode starts compaction after this point, the sentinel preserves
-the successful result.
+### Completion
+Write only `.opencode-v2/STATE.md`, then return normally. Never create or modify any `.ready` sentinel.
 <!-- V2.6.5 PROGRESSIVE-EXTERNALIZATION END -->
