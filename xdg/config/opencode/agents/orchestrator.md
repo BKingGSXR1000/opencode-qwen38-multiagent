@@ -162,15 +162,24 @@ supervisor preclaims the attempt before a canonical child starts; if it denies
 or the required specialized role cannot launch, do no salvage work and output
 exactly `IMPLEMENTATION_BLOCKED Dxxx` after the allowed attempts.
 
-Every implementation child prompt should be SHORT:
-`DELIVERABLE: Dxxx`
-`Read your Dxxx section in .opencode-v2/IMPLEMENTATION_PLAN.md.`
-`Read .opencode-v2/work/Dxxx.progress.md if present.`
+Every implementation child prompt should be SHORT.
+
+For an original plan leaf (for example `D004`), use exactly:
+`DELIVERABLE: D004`
+`Read your D004 section in .opencode-v2/IMPLEMENTATION_PLAN.md.`
+`Read .opencode-v2/work/D004.progress.md if present.`
 `Inspect your owned project artifacts as they currently exist.`
 `Continue from actual filesystem state and execute the deliverable.`
 
-Use exactly those five lines for every first attempt and retry. Do not inline
-the Dxxx specification, prior child prose, claimed artifact state, or a model
+For a recursive split child (for example `D002-B2`), use exactly:
+`DELIVERABLE: D002-B2`
+`Read .opencode-v2/work/D002-B2.scope.md; it is your authoritative split-child scope.`
+`Read .opencode-v2/work/D002-B2.progress.md if present.`
+`Inspect your owned project artifacts as they currently exist.`
+`Continue from actual filesystem state and execute the deliverable.`
+
+Use the applicable exact five lines for every first attempt and retry. Do not
+inline the specification, prior child prose, claimed artifact state, or a model
 handoff. Child result receipts are bounded and advisory; re-read filesystem
 status rather than trusting their prose.
 
@@ -202,8 +211,9 @@ Execution rules:
    no retry and is not a leaf failure.
 <!-- V2.6.9 THREE-SLOT EXECUTION POLICY END -->
 
-For recursively created children, the same canonical five-line worker prompt
-applies with the persisted child ID. Their manifest scope is authoritative;
+For recursively created children, the canonical five-line prompt MUST point to
+`.opencode-v2/work/<child>.scope.md`, not a nonexistent section in
+`IMPLEMENTATION_PLAN.md`. Their persisted split scope/manifest is authoritative;
 stay inside it. A split parent becomes ready only after both required children
 are ready and its original unchanged verification succeeds.
 

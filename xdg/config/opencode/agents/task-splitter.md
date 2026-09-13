@@ -61,6 +61,16 @@ parent ownership paths. Partition those EXACT items between the two children.
 Do not invent narrower files inside an owned directory and do not add prose to
 `owned_artifacts`.
 
+For each proposal, serialize the assigned items in `owned_artifacts` using the
+exact canonical grammar: each path individually backticked, joined only by
+comma + space. Example JSON string value:
+
+`"owned_artifacts": "`src/a.py`, `src/b.py`"`
+
+Do not include descriptions or any token that is not one of the exact
+`ownership_items`. The supervisor deterministically rejects non-canonical
+ownership instead of trying to infer paths from prose.
+
 For the second proposal, `depends_on_sibling` may only be the literal string
 `"first"` (or `""` if independent). NEVER emit a derived ID such as D001-A;
 the supervisor alone derives child IDs.

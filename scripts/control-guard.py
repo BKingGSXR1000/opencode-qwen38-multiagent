@@ -138,19 +138,70 @@ def field(section: str, names):
 
     return ""
 
-def plan_artifact_paths(raw: str):
-    """Extract actual owned paths without nested command/import code spans."""
-    if not isinstance(raw,str): return []
-    bullet_spans=re.findall(r"(?:^|\s-\s)`([^`]+)`",raw)
-    values=bullet_spans if bullet_spans else (re.findall(r"`([^`]+)`",raw) or raw.split(","))
-    out=[]
+def strict_owned_artifact_paths(raw: str):
+    """Parse the machine-owned artifact field.
+
+    Canonical syntax is either exactly:
+      none
+    or:
+      `project/relative/path`, `second/path`
+
+    Descriptions belong in Outcome/Done when, never in this field.  Keeping the
+    grammar deliberately small prevents prose such as "/PORT=" or "PASS/FAIL"
+    from becoming supervisor-owned filesystem paths.
+    """
+    if not isinstance(raw, str):
+        return [], "Owned artifacts must be a string"
+    raw = raw.strip()
+    if raw == "none":
+        return [], ""
+    if not raw:
+        return [], "Owned artifacts is empty"
+
+    values = re.findall(r"`([^`\r\n]+)`", raw)
+    if not values:
+        return [], (
+            "Owned artifacts must be exact comma-separated backticked "
+            "project-relative paths, or exact 'none'"
+        )
+    canonical = ", ".join(f"`{value}`" for value in values)
+    if raw != canonical:
+        return [], (
+            "Owned artifacts must contain paths only: "
+            "`path`, `path`; move all descriptions/parentheticals to Outcome or Done when"
+        )
+
+    out = []
     for value in values:
-        value=value.strip().strip("`").rstrip(".,;:")
-        if value.startswith("./"): value=value[2:]
-        if not value or any(ch.isspace() for ch in value): continue
-        if any(ch in value for ch in "*?[]{}"): continue
-        if value not in out: out.append(value)
-    return out
+        if value != value.strip():
+            return [], f"Owned artifact path has surrounding whitespace: {value!r}"
+        if value.startswith(("/", "./", "~")):
+            return [], f"Owned artifact must be project-relative: {value}"
+        if "\\" in value or any(ch.isspace() for ch in value):
+            return [], f"Owned artifact contains whitespace/backslash: {value}"
+        if any(ch in value for ch in "*?[]{}|<>\"'`;"):
+            return [], f"Owned artifact contains unsupported shell/path metacharacter: {value}"
+        core = value[:-1] if value.endswith("/") else value
+        if not core:
+            return [], f"Owned artifact path is invalid: {value}"
+        parts = core.split("/")
+        if any(part in ("", ".", "..") for part in parts):
+            return [], f"Owned artifact contains an invalid path segment: {value}"
+        if value in out:
+            return [], f"Owned artifact is duplicated: {value}"
+        out.append(value)
+    return out, ""
+
+
+def canonical_owned_artifacts(paths):
+    return "none" if not paths else ", ".join(f"`{path}`" for path in paths)
+
+
+def plan_artifact_paths(raw: str):
+    """Return only deterministically validated ownership paths."""
+    paths, error = strict_owned_artifact_paths(raw)
+    return [] if error else paths
+
 
 def referenced_paths(raw: str):
     """Project-looking file paths explicitly named in backticks."""
@@ -235,6 +286,13 @@ def parse_plan(text: str):
             "acceptance_ids": re.findall(r"\bA\d{3}\b", vals["acceptance_ids"]),
             "parallel": vals["parallel"],
         }
+        owned_paths, owned_error = strict_owned_artifact_paths(leaf["owned_artifacts"])
+        leaf["owned_artifact_paths"] = owned_paths
+        if owned_error:
+            errors.append(f"{did}: {owned_error}")
+        else:
+            leaf["owned_artifacts"] = canonical_owned_artifacts(owned_paths)
+
         leaves[did] = leaf
 
         required = (
@@ -260,9 +318,7 @@ def parse_plan(text: str):
         if not leaf["parallel"]:
             errors.append(f"{did}: missing Parallel-safe field")
 
-        writes = leaf["owned_artifacts"].strip().lower() not in (
-            "—", "-", "none", "n/a", ""
-        )
+        writes = bool(leaf.get("owned_artifact_paths"))
         if writes and leaf["role"] and not role_can_write(leaf["role"]):
             allowed = ", ".join(sorted(WRITE_ROLES))
             errors.append(
@@ -358,7 +414,8 @@ def parse_plan(text: str):
                 )
 
     test_leaves = [
-        x for x in leaves.values() if "TEST_CHECKS.json" in x["owned_artifacts"]
+        x for x in leaves.values()
+        if ".opencode-v2/TEST_CHECKS.json" in x.get("owned_artifact_paths", [])
     ]
     if not test_leaves:
         errors.append(
@@ -560,7 +617,7 @@ Status: COMPLETE
 ## Deliverables
 ### D001 — Scaffold
 - Outcome: scaffold
-- Owned artifacts / files: app.js
+- Owned artifacts / files: `app.js`
 - Launch deps / depends_on: (none)
 - Contract deps: (none)
 - Verify deps: (none)
@@ -573,7 +630,7 @@ Status: COMPLETE
 - Done when: app exists
 ### D002 — Tests
 - Outcome: tests
-- Owned artifacts / files: .opencode-v2/TEST_CHECKS.json
+- Owned artifacts / files: `.opencode-v2/TEST_CHECKS.json`
 - Launch deps / depends_on: [D001]
 - Contract deps: (none)
 - Verify deps: [D001]
@@ -593,10 +650,10 @@ Status: COMPLETE
             assert not errors, errors
             # MULTILINE_PLAN_FIELD_REGRESSION
             multiline = valid.replace(
-                "- Owned artifacts / files: app.js",
-                "- Owned artifacts / files: app.js,\n"
-                "  server/index.js,\n"
-                "  public/index.html",
+                "- Owned artifacts / files: `app.js`",
+                "- Owned artifacts / files: `app.js`,\n"
+                "  `server/index.js`,\n"
+                "  `public/index.html`",
                 1,
             )
             multi_leaves, _, multi_errors = parse_plan(multiline)
@@ -611,8 +668,8 @@ Status: COMPLETE
                 "- Done when: app exists and serves `tests.js`",
                 1,
             ).replace(
-                "- Owned artifacts / files: .opencode-v2/TEST_CHECKS.json",
-                "- Owned artifacts / files: .opencode-v2/TEST_CHECKS.json, `tests.js`",
+                "- Owned artifacts / files: `.opencode-v2/TEST_CHECKS.json`",
+                "- Owned artifacts / files: `.opencode-v2/TEST_CHECKS.json`, `tests.js`",
                 1,
             )
             _, _, contradiction_errors = parse_plan(contradiction)

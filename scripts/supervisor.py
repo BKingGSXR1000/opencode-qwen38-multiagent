@@ -129,9 +129,15 @@ def parse_deliverable(text):
     return m.group(1) if m else ""
 
 def implementation_prompt(did):
+    split_child = split_depth(did) > 0
+    scope_line = (
+        f"Read .opencode-v2/work/{did}.scope.md; it is your authoritative split-child scope."
+        if split_child
+        else f"Read your {did} section in .opencode-v2/IMPLEMENTATION_PLAN.md."
+    )
     return (
         f"DELIVERABLE: {did}\n"
-        f"Read your {did} section in .opencode-v2/IMPLEMENTATION_PLAN.md.\n"
+        f"{scope_line}\n"
         f"Read .opencode-v2/work/{did}.progress.md if present.\n"
         "Inspect your owned project artifacts as they currently exist.\n"
         "Continue from actual filesystem state and execute the deliverable."
@@ -270,7 +276,8 @@ def expected_children(did):
     return []
 
 def _artifact_items(raw):
-    return owned_artifact_paths({"owned_artifacts":raw})
+    paths,error=_strict_owned_artifact_text(raw)
+    return [] if error else paths
 
 def split_request(did):
     """Durably request a bounded planner-free split after two real failures."""
@@ -291,8 +298,8 @@ def split_request(did):
         "protocol":SPLIT_PROPOSAL_PROTOCOL,"parent_id":did,"depth":split_depth(did),
         "parent_scope":leaf.get("name",""),"ownership":leaf.get("owned_artifacts",""),
         "verification":leaf.get("verify_command",""),"durable_progress":{"path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),"contents":progress_text},
-        "existing_artifacts":_artifact_items(leaf.get("owned_artifacts","")),
-        "ownership_items":_artifact_items(leaf.get("owned_artifacts","")),
+        "existing_artifacts":owned_artifact_paths(leaf),
+        "ownership_items":owned_artifact_paths(leaf),
         "failed_attempts":compact,
         "generation":1,
     }
@@ -308,7 +315,9 @@ def validate_split_proposal(parent, proposals):
         raise ValueError("parent is not eligible for recursive split")
     if leaf_children(parent): raise ValueError("parent already split")
     if not isinstance(proposals,list) or len(proposals)!=2: raise ValueError("split requires exactly two proposals")
-    parent_owned=set(_artifact_items(leaf.get("owned_artifacts","")))
+    parent_owned=set(owned_artifact_paths(leaf))
+    if not parent_owned:
+        raise ValueError("split parent has no validated owned artifacts")
     seen=set(); children=[]
     for index, proposal in enumerate(proposals):
         if not isinstance(proposal,dict): raise ValueError("child proposal must be an object")
@@ -316,7 +325,10 @@ def validate_split_proposal(parent, proposals):
         if set(proposal)-allowed or not all(isinstance(proposal.get(k),str) and proposal[k].strip() for k in ("scope","owned_artifacts","verify_command","role","done_when")):
             raise ValueError("child proposal has missing or unsupported fields")
         if proposal["role"] not in IMPLEMENTATION_AGENTS: raise ValueError("child role is invalid")
-        owned=set(_artifact_items(proposal["owned_artifacts"]))
+        owned_list,owned_error=_strict_owned_artifact_text(proposal["owned_artifacts"])
+        if owned_error:
+            raise ValueError(f"child ownership is not canonical: {owned_error}")
+        owned=set(owned_list)
         if not owned or not owned <= parent_owned or seen & owned:
             raise ValueError("child ownership must be disjoint and inside parent ownership")
         seen |= owned
@@ -326,7 +338,9 @@ def validate_split_proposal(parent, proposals):
         if sibling not in ("", "first") or (sibling == "first" and index != 1):
             raise ValueError("only second child may depend on first child")
         child=dict(leaf)
-        child.update({"id":expected[index],"name":proposal["scope"],"owned_artifacts":proposal["owned_artifacts"],
+        child.update({"id":expected[index],"name":proposal["scope"],
+                      "owned_artifacts":_canonical_owned_artifacts(owned_list),
+                      "owned_artifact_paths":owned_list,
                       "verify_command":proposal["verify_command"],"role":proposal["role"],"done_when":proposal["done_when"],
                       "parent":parent,"split_depth":split_depth(expected[index]),"split_children":[]})
         child["launch_deps"]=list(leaf.get("launch_deps",[])) + ([expected[0]] if sibling=="first" else [])
@@ -663,71 +677,56 @@ def planner_retirement_reason(sid,elapsed,plan_path=None):
         return f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
     return planner_progress_reason(sid,elapsed,plan_path)
 
+def _strict_owned_artifact_text(raw):
+    """Return canonical project-relative ownership paths or an error."""
+    if not isinstance(raw, str):
+        return [], "Owned artifacts must be a string"
+    raw = raw.strip()
+    if raw == "none":
+        return [], ""
+    if not raw:
+        return [], "Owned artifacts is empty"
+    values = re.findall(r"`([^`\r\n]+)`", raw)
+    if not values:
+        return [], "Owned artifacts is not canonical"
+    if raw != ", ".join(f"`{value}`" for value in values):
+        return [], "Owned artifacts contains non-path prose"
+    out=[]
+    for value in values:
+        if value != value.strip() or value.startswith(("/", "./", "~")):
+            return [], f"invalid project-relative owned artifact: {value}"
+        if "\\" in value or any(ch.isspace() for ch in value):
+            return [], f"invalid whitespace/backslash in owned artifact: {value}"
+        if any(ch in value for ch in "*?[]{}|<>\"'`;"):
+            return [], f"unsupported owned-artifact metacharacter: {value}"
+        core=value[:-1] if value.endswith("/") else value
+        parts=core.split("/") if core else []
+        if not parts or any(part in ("", ".", "..") for part in parts):
+            return [], f"invalid owned-artifact path segment: {value}"
+        if value in out:
+            return [], f"duplicate owned artifact: {value}"
+        out.append(value)
+    return out, ""
+
+
+def _canonical_owned_artifacts(paths):
+    return "none" if not paths else ", ".join(f"`{path}`" for path in paths)
+
+
 def owned_artifact_paths(leaf):
-    """Return every path-like ownership item without swallowing later entries.
+    """Return guard-validated ownership; never infer paths from prose."""
+    if not isinstance(leaf, dict):
+        return []
+    explicit=leaf.get("owned_artifact_paths")
+    if isinstance(explicit, list):
+        if not all(isinstance(path,str) for path in explicit):
+            return []
+        canonical=_canonical_owned_artifacts(explicit)
+        checked,error=_strict_owned_artifact_text(canonical)
+        return checked if not error else []
+    checked,error=_strict_owned_artifact_text(leaf.get("owned_artifacts",""))
+    return checked if not error else []
 
-    Ownership fields are planner prose, commonly like:
-      `package.json`, `server.js`, `public/sample.txt` (description)
-    or:
-      `.opencode-v2/work/D001.md`; scratch under `/tmp/opencode/d001/` only.
-
-    The old V2.6.9 parser used a start-of-string "bullet" match and, once it
-    found that first item, discarded all later backtick spans.  That made
-    sibling/concurrency ownership and recursive split validation incorrect.
-    """
-    raw=leaf.get("owned_artifacts","") if isinstance(leaf,dict) else ""
-    if not isinstance(raw,str): return []
-
-    def normalize(value):
-        original=value.strip().strip("`").rstrip(".,;:")
-        if not original or original.lower() in {"-","—","none","n/a"}: return ""
-        # Backticked command fragments such as `node server.js` are not paths.
-        if any(ch.isspace() for ch in original): return ""
-        if any(char in original for char in "*?[]{}|<>"): return ""
-        # A ./foo token inside a descriptive parenthetical is normally an
-        # import specifier, not a separately owned artifact.  Planner-owned
-        # project files are canonicalized without leading ./.
-        if original.startswith("./"): return ""
-        value=original
-        # Accept absolute paths, relative paths/directories, and ordinary
-        # filenames with an extension.  Reject labels like `start` / `test`.
-        pathlike=(value.startswith("/") or "/" in value or
-                  re.search(r"\.[A-Za-z0-9]{1,12}$", value) is not None)
-        return value if pathlike else ""
-
-    candidates=[]
-    # All backtick spans matter; never switch to a first-match-only mode.
-    for value in re.findall(r"`([^`]+)`", raw):
-        p=normalize(value)
-        if p: candidates.append(p)
-
-    # Splitter proposals may be plain strings rather than Markdown.  Add path
-    # tokens from those strings as a compatibility fallback.
-    if not candidates:
-        for piece in raw.split(","):
-            p=normalize(piece)
-            if p:
-                candidates.append(p)
-                continue
-            # Pull explicit absolute/relative path tokens out of explanatory
-            # prose, e.g. "/tmp/x/probe.js (all scratch under /tmp/x/)".
-            for token in re.findall(r"(?:/[^\s,;()]+|(?:[A-Za-z0-9_.@+~-]+/)+[A-Za-z0-9_.@+~-]+/?)", piece):
-                p=normalize(token)
-                if p: candidates.append(p)
-
-    # Preserve order and remove duplicates.
-    result=[]
-    for p in candidates:
-        if p not in result: result.append(p)
-
-    # If a directory and one of its descendants are both named, the directory
-    # already represents that ownership.  Collapse the redundant child path.
-    collapsed=[]
-    for p in result:
-        if any(q.endswith("/") and p.startswith(q) and p != q for q in result):
-            continue
-        collapsed.append(p)
-    return collapsed
 
 def ownership_baseline_path(did):
     return Path(PROJECT)/".opencode-v2/work"/f"{did}.ownership-baseline.json"

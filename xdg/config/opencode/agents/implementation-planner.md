@@ -164,6 +164,43 @@ Every `### Dxxx — Name` MUST contain these exact fields, one per line:
 - Verify command:
 - Done when:
 
+<!-- V2.6.11 STRICT OWNERSHIP GRAMMAR BEGIN -->
+## Owned-artifact grammar — machine protocol
+
+`Owned artifacts:` is machine-readable control data, NOT prose.
+
+Use exactly one of these two forms:
+
+`Owned artifacts: `path/to/file`, `second/path`, `owned-directory/``
+
+or, only when the leaf truly writes no project artifact:
+
+`Owned artifacts: none`
+
+Rules:
+- every owned path is individually backticked;
+- separate paths only with comma + space;
+- paths are project-relative; never start with `/`, `./`, `~`, or contain `..`;
+- do not put descriptions, parentheticals, API routes, field names, commands,
+  expected values, PASS/FAIL text, or explanatory prose in this field;
+- put all such explanation in `Outcome:` or `Done when:`;
+- an owned directory must be the actual project directory and should end in `/`;
+- list only artifacts this leaf is authorized to modify.
+
+Examples:
+
+GOOD:
+`Owned artifacts: `server/server.js`, `static/index.html`, `scripts/verify.sh``
+
+BAD:
+`Owned artifacts: server/server.js (binds /api/state); README.md (PORT=...)`
+
+BAD:
+`Owned artifacts: `server/server.js` (binds `/api/state`), `README.md``
+
+The deterministic guard rejects the entire plan if this field is not canonical.
+<!-- V2.6.11 STRICT OWNERSHIP GRAMMAR END -->
+
 `Verify command:` must be a real executable shell command that proves the leaf's
 Done-when condition. Never use `true`, `:`, or cosmetic echo commands.
 
