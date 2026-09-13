@@ -21,10 +21,15 @@ from state_io import (
     exclusive_file_lock,
 )
 from worker_sandbox import violation_path as worker_sandbox_violation_path
+from watchdog_telemetry import (
+    BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
+    visible_progress_marker,
+)
 
 ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
 DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
 LOG=ROOT/"logs"/"supervisor-events.log"; CSV=ROOT/"logs"/"supervisor-events.csv"; LIVE_STATUS=ROOT/"logs"/"supervisor-live.json"
+WATCHDOG_TELEMETRY=ROOT/"logs"/"watchdog-telemetry.jsonl"
 PROJECT=os.environ.get("V2_PROJECT","")
 START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
@@ -63,6 +68,8 @@ lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 verify_wait_log_state={}
+backend_sampler=BackendTelemetrySampler(ROOT)
+watchdog_telemetry_last={}
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
 
@@ -1786,32 +1793,98 @@ def session_activity_signature(sid):
     except Exception:
         return (-1,0)
 
-def fallback_no_progress_reason(sid,agent,did,observable,now=None):
-    """Bound invisible streams without treating a brief API gap as a failure."""
-    state=event_watch.setdefault(sid,{"stop":threading.Event(),"created":time.monotonic()})
+def fallback_no_progress_reason(
+    sid,agent,did,observable,backend_snapshot=None,now=None
+):
+    """Progress-aware invisible-stream watchdog.
+
+    Local persisted/durable progress always resets the timer.  Once the old
+    600-second threshold is reached, server-global vLLM/GPU telemetry may grant
+    a bounded extension when the backend is demonstrably computing, emitting
+    tokens, or queueing work.  Global telemetry never suppresses retirement
+    forever because it cannot always be attributed to one of several requests.
+    """
+    state=event_watch.setdefault(
+        sid,{"stop":threading.Event(),"created":time.monotonic()}
+    )
     if observable:
-        state.pop("fallback_since",None); state.pop("fallback_signature",None); return ""
+        state.pop("fallback_since",None)
+        state.pop("fallback_signature",None)
+        state.pop("fallback_decision",None)
+        state["fallback_elapsed"]=0.0
+        return ""
     now=time.monotonic() if now is None else now
     signature=(durable_progress_signature(agent,did),session_activity_signature(sid))
     if signature!=state.get("fallback_signature"):
-        state["fallback_signature"]=signature; state["fallback_since"]=now; return ""
+        state["fallback_signature"]=signature
+        state["fallback_since"]=now
+        state["fallback_decision"]={"phase":"local-persisted-progress","abort":False}
+        return ""
     state.setdefault("fallback_since",now)
-    limit=600 if (agent=="reference-researcher" or agent in IMPLEMENTATION_AGENTS) else 300
-    if now-state["fallback_since"]>=limit:
-        return f"no_durable_progress_with_invisible_stream={int(now-state['fallback_since'])}s"
+    elapsed=max(0.0,now-state["fallback_since"])
+    decision=invisible_watchdog_decision(elapsed,backend_snapshot or {})
+    state["fallback_decision"]=decision
+    state["fallback_elapsed"]=elapsed
+    if decision.get("abort"):
+        reason=decision.get("reason") or "backend-not-progressing"
+        phase=decision.get("phase") or "backend-unknown"
+        limit=int(decision.get("limit") or 600)
+        return (
+            f"invisible_stream_stalled={int(elapsed)}s "
+            f"phase={phase} limit={limit}s reason={reason}"
+        )
     return ""
 
-def effective_fallback_reason(sid,agent,did,observable,now=None):
-    """Keep invisible-stream fallback from contradicting planner supervision.
 
-    Implementation planners have a more specific, filesystem-content policy:
-    420 seconds to their first Dxxx structure, then 300 seconds per meaningful
-    plan change. The generic artifact fallback is the same failure condition,
-    so it is intentionally inapplicable to that role. SSE/context/output
-    watchdogs remain independent and active.
-    """
-    if agent=="implementation-planner": return ""
-    return fallback_no_progress_reason(sid,agent,did,observable,now)
+def effective_fallback_reason(
+    sid,agent,did,observable,backend_snapshot=None,now=None
+):
+    """Keep invisible-stream fallback from contradicting planner supervision."""
+    if agent=="implementation-planner":
+        return ""
+    return fallback_no_progress_reason(
+        sid,agent,did,observable,backend_snapshot=backend_snapshot,now=now
+    )
+
+
+def session_watchdog_phase(shape,live,backend_snapshot,visible_age=0.0):
+    """Best-effort phase label for observability; never used as sole truth."""
+    if shape.get("tool_running") or (live or {}).get("tool_running"):
+        return "tool"
+    live=live or {}
+    last_progress=live.get("last_progress")
+    if isinstance(last_progress,(int,float)) and time.monotonic()-last_progress <= 5:
+        if int(live.get("reasoning") or 0)>0:
+            return "reasoning"
+        if int(live.get("text") or 0)>0:
+            return "decode"
+        return "model-progress"
+    if shape.get("reasoning_tokens") or shape.get("reasoning"):
+        if visible_age < HARD_SECONDS:
+            return "reasoning-idle"
+    if shape.get("output_tokens") or shape.get("text"):
+        if visible_age < HARD_SECONDS:
+            return "decode-idle"
+    return backend_phase(backend_snapshot or {})
+
+
+def emit_watchdog_telemetry(sid,row,backend_snapshot,force=False):
+    """Bounded 5-second JSONL telemetry for postmortem/performance analysis."""
+    now=time.time()
+    last=watchdog_telemetry_last.get(sid,0.0)
+    if not force and now-last < 5.0:
+        return
+    watchdog_telemetry_last[sid]=now
+    payload={
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "epoch":now,
+        **row,
+        "backend":backend_snapshot or {},
+    }
+    WATCHDOG_TELEMETRY.parent.mkdir(parents=True,exist_ok=True)
+    with open(WATCHDOG_TELEMETRY,"a",encoding="utf-8") as fh:
+        fh.write(json.dumps(payload,separators=(",",":"))+"\\n")
+
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
@@ -2581,17 +2654,29 @@ def abort_session(sid,reason,agent=""):
         set_abort_intent(sid,reason,agent,"failed")
     kind="INTERRUPT" if ok else "INTERRUPT_FAILED"; log(f"{kind} session={sid} agent={agent} reason={reason}"); csv(kind,sid,agent,reason); return ok
 
-def watchdog_age(sid,key,can_watch,now=None):
-    """Advance a watchdog only for observable, unfinished no-tool output."""
+def watchdog_age(sid,key,can_watch,progress_marker=None,now=None):
+    """Seconds since the last observable model/tool progress, not message age."""
     now=time.monotonic() if now is None else now
-    st=watch.setdefault(sid,{"key":key,"start":None,"aborted_key":None})
+    st=watch.setdefault(
+        sid,
+        {"key":key,"start":None,"aborted_key":None,"progress_marker":None},
+    )
     if st["key"]!=key:
-        st["key"]=key; st["start"]=None; st["aborted_key"]=None
-    if can_watch and st["start"] is None:
-        st["start"]=now
-    elif not can_watch:
+        st["key"]=key
         st["start"]=None
-    return (now-st["start"]) if st["start"] is not None else 0,st
+        st["aborted_key"]=None
+        st["progress_marker"]=None
+    if not can_watch:
+        st["start"]=None
+        st["progress_marker"]=progress_marker
+        return 0,st
+    if st["start"] is None:
+        st["start"]=now
+        st["progress_marker"]=progress_marker
+    elif progress_marker is not None and progress_marker!=st.get("progress_marker"):
+        st["progress_marker"]=progress_marker
+        st["start"]=now
+    return max(0.0,now-st["start"]),st
 
 def planner_context_reason(agent,context_input,tool_running=False):
     if agent!="implementation-planner" or tool_running:
@@ -2610,24 +2695,35 @@ def watchdog_limits(agent):
         return 300,20000,20000
     return HARD_SECONDS,HARD_REASONING_CHARS,HARD_TEXT_CHARS
 
-def reduce_live_event(state,event):
-    """Track no-tool output directly from the beta's transient SSE deltas."""
+def reduce_live_event(state,event,now=None):
+    """Track transient SSE progress and distinguish progress from mere liveness."""
+    now=time.monotonic() if now is None else now
     kind=event.get("type")
     data=event.get("data") if isinstance(event.get("data"),dict) else {}
     delta=data.get("delta") if isinstance(data.get("delta"),str) else ""
+    progressed=False
     if kind=="session.next.reasoning.delta":
         state["reasoning"]=state.get("reasoning",0)+len(delta)
+        progressed=bool(delta)
     elif kind=="session.next.text.delta":
         state["text"]=state.get("text",0)+len(delta)
+        progressed=bool(delta)
     elif kind=="session.next.tool.called":
         state["tool_running"]=True
+        progressed=True
     elif kind=="session.next.tool.success":
-        state.update(reasoning=0,text=0,tool_running=False,last_progress=time.monotonic())
+        state.update(reasoning=0,text=0,tool_running=False)
+        progressed=True
     elif kind=="session.next.tool.failed":
         state["tool_running"]=False
+        progressed=True
     elif kind=="session.next.step.started":
         state.update(reasoning=0,text=0,tool_running=False)
-    state["last_event"]=time.monotonic()
+        progressed=True
+    state["last_event"]=now
+    if progressed:
+        state["last_progress"]=now
+        state["progress_seq"]=int(state.get("progress_seq") or 0)+1
     return state
 
 def event_watchdog_reason(agent,state):
@@ -2643,8 +2739,10 @@ def ensure_event_watch(sid):
     state=event_watch.get(sid)
     if state and state.get("thread") and state["thread"].is_alive(): return state
     stop=threading.Event()
+    created=time.monotonic()
     state={"reasoning":0,"text":0,"tool_running":False,"tool_successes":0,
-           "connected":False,"last_event":time.monotonic(),"stop":stop}
+           "connected":False,"last_event":created,"last_progress":created,
+           "progress_seq":0,"stop":stop}
     event_watch[sid]=state
     def consume(event):
         with lock:
@@ -2738,7 +2836,8 @@ def message_shape(messages,session_info):
         return {
             "agent":agent,"parent":parent,"directory":directory,"first_user":first_user,
             "message_id":"","reasoning":0,"text":0,"tool_running":False,
-            "last_tool_id":"","context_input":None,"observable":False,
+            "last_tool_id":"","context_input":None,"output_tokens":0,
+            "reasoning_tokens":0,"cache_tokens":0,"observable":False,
             "assistant_completed":False,
         }
 
@@ -2765,8 +2864,14 @@ def message_shape(messages,session_info):
             text_chars+=len(p["text"])
 
     tokens=info.get("tokens") if isinstance(info.get("tokens"),dict) else {}
+    def token_int(name):
+        value=tokens.get(name)
+        return int(value) if isinstance(value,(int,float)) else 0
     ci=tokens.get("input")
     ci=int(ci) if isinstance(ci,(int,float)) else None
+    output_tokens=token_int("output")
+    reasoning_tokens=token_int("reasoning")
+    cache_tokens=token_int("cache")
     tm=info.get("time") if isinstance(info.get("time"),dict) else {}
     completed=isinstance(tm.get("completed"),(int,float))
 
@@ -2774,7 +2879,9 @@ def message_shape(messages,session_info):
         "agent":agent,"parent":parent,"directory":directory,"first_user":first_user,
         "message_id":info.get("id") or "","reasoning":reasoning,"text":text_chars,
         "tool_running":tool_running,"last_tool_id":last_tool_id,
-        "context_input":ci,"observable":parts_observable,"assistant_completed":completed,
+        "context_input":ci,"output_tokens":output_tokens,
+        "reasoning_tokens":reasoning_tokens,"cache_tokens":cache_tokens,
+        "observable":parts_observable,"assistant_completed":completed,
     }
 
 def enforce_assignment(sid,agent,first_user):
@@ -3413,6 +3520,7 @@ def api_poll_loop():
         try:
             statuses=http.get_status()
             active=set(statuses)
+            backend_snapshot=backend_sampler.sample()
             now=time.time()
             rows={}
             child_active=False
@@ -3511,11 +3619,15 @@ def api_poll_loop():
                            and not tool_running
                            and (shape.get("observable") or live_observable))
 
-                age,st=watchdog_age(sid,key,can_watch)
+                progress_marker=visible_progress_marker(shape,live)
+                age,st=watchdog_age(
+                    sid,key,can_watch,progress_marker=progress_marker
+                )
                 reasoning=max(shape["reasoning"],int((live or {}).get("reasoning",0)))
                 text_chars=max(shape["text"],int((live or {}).get("text",0)))
                 fallback_reason=effective_fallback_reason(
-                    sid,agent,did,shape.get("observable") or live_observable
+                    sid,agent,did,shape.get("observable") or live_observable,
+                    backend_snapshot=backend_snapshot,
                 ) if parent else ""
                 planner_retired=False
 
@@ -3567,7 +3679,11 @@ def api_poll_loop():
                     if live is not None: live["fallback_aborted"]=True
                     abort_session(sid,f"runaway {fallback_reason}",agent)
 
-                rows[sid]={
+                fallback_state=(live or {}).get("fallback_decision") or {}
+                phase=session_watchdog_phase(
+                    shape,live,backend_snapshot,visible_age=age
+                )
+                row={
                     "session":sid,
                     "agent":agent,
                     "parent":parent,
@@ -3575,19 +3691,36 @@ def api_poll_loop():
                     "attempt":attempt,
                     "reasoning":reasoning,
                     "text":text_chars,
+                    "reasoning_tokens":shape.get("reasoning_tokens",0),
+                    "output_tokens":shape.get("output_tokens",0),
+                    "cache_tokens":shape.get("cache_tokens",0),
                     "tool_running":tool_running,
                     "context_input":shape["context_input"],
                     "observable":shape.get("observable",False),
                     "assistant_completed":shape.get("assistant_completed",False),
+                    "watchdog_phase":phase,
+                    "visible_no_progress_age":round(age,3),
+                    "sse_connected":bool(live and live.get("connected")),
+                    "sse_last_progress_age":(
+                        round(max(0.0,time.monotonic()-live["last_progress"]),3)
+                        if live and isinstance(live.get("last_progress"),(int,float))
+                        else None
+                    ),
+                    "invisible_no_progress_age":round(float((live or {}).get("fallback_elapsed") or 0),3),
+                    "invisible_watchdog":fallback_state,
                     "seen":now,
                     "directory":directory or PROJECT or "",
                     "status":statuses.get(sid),
                 }
+                rows[sid]=row
+                if parent:
+                    emit_watchdog_telemetry(sid,row,backend_snapshot)
 
             payload={
                 "generated":now,
                 "project":PROJECT or "",
                 "source":"http-status+message-poll-v2.6.7b",
+                "backend":backend_snapshot,
                 "sessions":list(rows.values()),
             }
             tmp=LIVE_STATUS.with_suffix(".tmp")

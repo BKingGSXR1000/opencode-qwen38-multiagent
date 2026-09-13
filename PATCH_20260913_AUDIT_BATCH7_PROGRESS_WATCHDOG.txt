@@ -1,0 +1,16 @@
+Applied: 2026-09-13T21:38:55+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch7-progress-watchdog-20260913-213854
+
+Audit Batch 7 - progress-aware watchdog and observability:
+- visible no-tool timeout now measures time since actual SSE/message progress, not age of the assistant message;
+- live reasoning/text deltas reset the no-progress clock;
+- OpenCode input/output/reasoning/cache token fields are surfaced when available;
+- vLLM /metrics samples running/waiting requests, prompt/generation token counters, and KV usage;
+- existing GPU CSV logger supplies GPU utilization/memory/power without launching nvidia-smi every poll;
+- invisible workers keep the old 600s boundary when telemetry is unavailable or the backend is idle;
+- demonstrable prefill/decode/GPU compute grants bounded extensions: 1800s with one running request, 900s with shared activity, 1200s while queued;
+- backend activity never suppresses retirement forever because metrics are server-global;
+- supervisor-live.json now exposes backend and per-session phase/no-progress fields;
+- logs/watchdog-telemetry.jsonl records bounded 5-second performance samples;
+- scripts/watchdog-report.py summarizes time spent in reasoning/decode/tool/prefill/queue/stall phases;
+- 51 state-machine/invariant tests pass.

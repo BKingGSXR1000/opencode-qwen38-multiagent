@@ -2,7 +2,7 @@
 import json,multiprocessing,subprocess,sys,tempfile,unittest
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
-import control_state,leaf_contract,supervisor,state_io,worker_sandbox
+import control_state,leaf_contract,supervisor,state_io,worker_sandbox,watchdog_telemetry
 
 def ready_text(did,attempt=1,owner="supervisor",protocol=None):
     protocol=protocol or control_state.LEAF_READY_PROTOCOL
@@ -825,5 +825,94 @@ class AtomicSchedulerReservationTests(unittest.TestCase):
         ledger=json.loads((self.project/".opencode-v2/work/attempts.json").read_text())
         self.assertEqual(supervisor.reserved_dispatch_slot_count(ledger),3)
 
+
+
+class ProgressAwareWatchdogTests(unittest.TestCase):
+    def setUp(self):
+        supervisor.watch.clear()
+
+    def test_visible_watchdog_resets_on_reasoning_progress(self):
+        key=("m1","")
+        age,st=supervisor.watchdog_age("s1",key,True,progress_marker=("m1","",0),now=100.0)
+        self.assertEqual(age,0)
+        age,st=supervisor.watchdog_age("s1",key,True,progress_marker=("m1","",0),now=219.0)
+        self.assertEqual(age,119.0)
+        age,st=supervisor.watchdog_age("s1",key,True,progress_marker=("m1","",1),now=220.0)
+        self.assertEqual(age,0)
+        age,st=supervisor.watchdog_age("s1",key,True,progress_marker=("m1","",1),now=339.0)
+        self.assertEqual(age,119.0)
+
+    def test_live_sse_reasoning_delta_counts_as_progress(self):
+        state={"reasoning":0,"text":0,"tool_running":False,"progress_seq":0}
+        supervisor.reduce_live_event(
+            state,{"type":"session.next.reasoning.delta","data":{"delta":"abc"}},now=50.0
+        )
+        self.assertEqual(state["reasoning"],3)
+        self.assertEqual(state["progress_seq"],1)
+        self.assertEqual(state["last_progress"],50.0)
+
+    def test_prometheus_metrics_parser(self):
+        text = """
+# HELP vllm:num_requests_running ...
+vllm:num_requests_running{model_name="qwen"} 1
+vllm:num_requests_waiting{model_name="qwen"} 0
+vllm:prompt_tokens_total{model_name="qwen"} 1234
+vllm:generation_tokens_total{model_name="qwen"} 77
+vllm:kv_cache_usage_perc{model_name="qwen"} 0.42
+"""
+        parsed=watchdog_telemetry.parse_prometheus_metrics(text)
+        self.assertEqual(parsed["running"],1)
+        self.assertEqual(parsed["prompt_tokens"],1234)
+        self.assertEqual(parsed["generation_tokens"],77)
+        self.assertAlmostEqual(parsed["kv_usage"],0.42)
+
+    def test_backend_compute_extends_invisible_session(self):
+        snapshot={
+            "metrics_available":True,"running":1,"waiting":0,
+            "backend_progress_age":2.0,"gpu_util":95.0,
+        }
+        d=watchdog_telemetry.invisible_watchdog_decision(700,snapshot)
+        self.assertFalse(d["abort"])
+        self.assertEqual(d["limit"],watchdog_telemetry.INVISIBLE_EXCLUSIVE_EXTENSION_SECONDS)
+
+    def test_shared_backend_progress_has_finite_extension(self):
+        snapshot={
+            "metrics_available":True,"running":3,"waiting":0,
+            "backend_progress_age":2.0,"gpu_util":95.0,
+        }
+        d=watchdog_telemetry.invisible_watchdog_decision(901,snapshot)
+        self.assertTrue(d["abort"])
+        self.assertEqual(d["limit"],watchdog_telemetry.INVISIBLE_SHARED_EXTENSION_SECONDS)
+
+    def test_idle_backend_aborts_at_old_600_second_boundary(self):
+        snapshot={
+            "metrics_available":True,"running":0,"waiting":0,
+            "backend_progress_age":999.0,"gpu_util":0.0,
+        }
+        d=watchdog_telemetry.invisible_watchdog_decision(600,snapshot)
+        self.assertTrue(d["abort"])
+        self.assertEqual(d["phase"],"backend-idle")
+
+
+    def test_backend_phase_distinguishes_prefill_and_decode(self):
+        prefill={
+            "metrics_available":True,"running":1,"waiting":0,
+            "backend_progress_age":1.0,"prompt_progress_age":1.0,
+            "generation_progress_age":None,"gpu_util":90.0,
+        }
+        decode={
+            "metrics_available":True,"running":1,"waiting":0,
+            "backend_progress_age":1.0,"prompt_progress_age":99.0,
+            "generation_progress_age":1.0,"gpu_util":90.0,
+        }
+        self.assertEqual(watchdog_telemetry.backend_phase(prefill),"backend-prefill")
+        self.assertEqual(watchdog_telemetry.backend_phase(decode),"backend-decode")
+
+    def test_unknown_backend_preserves_old_fail_safe_boundary(self):
+        d=watchdog_telemetry.invisible_watchdog_decision(
+            600,{"metrics_available":False}
+        )
+        self.assertTrue(d["abort"])
+        self.assertEqual(d["reason"],"backend-telemetry-unavailable")
 
 if __name__=="__main__": unittest.main()
