@@ -13,6 +13,8 @@ permission:
     ".opencode-v2/work/planner-restarts.json": deny
     ".opencode-v2/root-rollovers.json": deny
     ".opencode-v2/bin/*": deny
+    ".opencode-v2/work/*.ready": deny
+    ".opencode-v2/*.ready": deny
     "*": allow
   glob: allow
   grep: allow
@@ -22,6 +24,8 @@ permission:
     "*planner-restarts.json*": deny
     "*root-rollovers.json*": deny
     "*.opencode-v2/bin/*": deny
+    "*.opencode-v2/work/*.ready*": deny
+    "*.opencode-v2/*.ready*": deny
     "*": allow
   task: deny
   todowrite: deny

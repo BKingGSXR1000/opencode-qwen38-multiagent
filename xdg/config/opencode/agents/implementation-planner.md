@@ -139,7 +139,7 @@ For every implementation leaf, `Role:` MUST be EXACTLY one of:
 - `feature-builder` — UI/user-facing feature slice
 - `reasoning-builder` — genuinely hard algorithmic/math implementation
 - `integrator` — wiring/integration of already-defined components
-- `tester` — bounded validation/checking artifact when appropriate
+- `tester` — read-only validation/checking; MUST use `Owned artifacts: none`
 - `test-builder` — writes test files/suites and TEST_CHECKS manifests
 
 NEVER invent role names. Do not use synthesized names such as `builder`,
@@ -218,9 +218,13 @@ bullets are fine; do not add prose to these lines):
 `- Wave 3: D004`
 The section heading may be numbered, such as `## 5. Execution Waves`.
 
-Every nontrivial coding project MUST include a final S/M tester/test-builder
+Every nontrivial coding project MUST include a final S/M `test-builder`
 leaf owning:
 `.opencode-v2/TEST_CHECKS.json`
+
+`tester` is strictly read-only. A tester MUST use `Owned artifacts: none`.
+If a leaf creates, repairs, or rewrites any test file or manifest, use
+`test-builder`, not `tester`.
 
 Use the exact TEST_CHECKS.json schema and canonical runner invocation in
 `.opencode-v2/CONTROL_CONTRACT.md`. Do not inspect harness source outside the

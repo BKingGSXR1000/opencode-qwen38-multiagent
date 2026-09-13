@@ -1,0 +1,15 @@
+Applied: 2026-09-13T18:50:14+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/audit-batch1-plan-trust-20260913-185014
+
+Audit Batch 1A:
+- reject duplicate Dxxx definitions;
+- reject exact and ancestor/descendant ownership overlap, including split overlay;
+- reject supervisor-reserved control-state ownership;
+- make tester consistently read-only with Owned artifacts: none;
+- require test-builder for TEST_CHECKS.json and test-writing leaves;
+- deny direct edit/bash literal paths to ready sentinels for implementation agents;
+- add deterministic regressions for these trust-boundary rules.
+
+Deferred until exact control_state.py/leaf-complete.sh capture:
+- cryptographically/session-bind ready sentinel semantics;
+- unify initial-plan and recursive-split leaf validation in one shared module.

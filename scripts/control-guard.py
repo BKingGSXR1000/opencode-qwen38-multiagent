@@ -39,7 +39,6 @@ WRITE_ROLES = {
     "feature-builder",
     "reasoning-builder",
     "integrator",
-    "tester",
     "test-builder",
 }
 
@@ -192,12 +191,65 @@ def strict_owned_artifact_paths(raw: str):
             return [], f"Owned artifact contains an invalid path segment: {value}"
         if value in out:
             return [], f"Owned artifact is duplicated: {value}"
+        if supervisor_reserved_owned_path(value):
+            return [], f"Owned artifact is supervisor-reserved control state: {value}"
         out.append(value)
     return out, ""
 
 
 def canonical_owned_artifacts(paths):
     return "none" if not paths else ", ".join(f"`{path}`" for path in paths)
+
+
+def supervisor_reserved_owned_path(path: str):
+    """True for control-plane artifacts that no implementation leaf may own."""
+    p=(path or "").rstrip("/")
+    if p.startswith(".opencode-v2/work/"):
+        return True
+    if p.startswith(".opencode-v2/bin/"):
+        return True
+    if p in {
+        ".opencode-v2/control-status.json",
+        ".opencode-v2/IMPLEMENTATION_PLAN.guard.json",
+        ".opencode-v2/root-rollovers.json",
+        ".opencode-v2/reference-gate.json",
+        ".opencode-v2/reference-validation-gate.json",
+        ".opencode-v2/ACCEPTANCE.ready",
+        ".opencode-v2/IMPLEMENTATION_PLAN.ready",
+    }:
+        return True
+    return False
+
+
+def ownership_overlap_errors(leaves: dict):
+    """Reject exact and ancestor/descendant ownership overlap across the plan."""
+    entries=[]
+    for did,leaf in leaves.items():
+        for raw in leaf.get("owned_artifact_paths",[]) or []:
+            p=str(raw).rstrip("/")
+            if p:
+                entries.append((did,p))
+    errors=[]
+    seen=set()
+    for i,(did_a,a) in enumerate(entries):
+        for did_b,b in entries[i+1:]:
+            overlap=(a==b or a.startswith(b+"/") or b.startswith(a+"/"))
+            if not overlap:
+                continue
+            key=tuple(sorted(((did_a,a),(did_b,b))))
+            if key in seen:
+                continue
+            seen.add(key)
+            if did_a==did_b:
+                errors.append(
+                    f"{did_a}: overlapping owned artifact paths `{a}` and `{b}`"
+                )
+            else:
+                errors.append(
+                    f"ownership overlap: {did_a} owns `{a}` while "
+                    f"{did_b} owns `{b}`"
+                )
+    return errors
 
 
 def plan_artifact_paths(raw: str):
@@ -274,6 +326,10 @@ def parse_plan(text: str):
         vals = {k: field(section, names) for k, names in ALIASES.items()}
         cm = re.search(r"\b(S|M|L|XL)\b", vals["complexity"], re.I)
 
+        if did in leaves:
+            errors.append(f"duplicate deliverable ID: {did}")
+            continue
+
         leaf = {
             "id": did,
             "name": name,
@@ -322,7 +378,12 @@ def parse_plan(text: str):
             errors.append(f"{did}: missing Parallel-safe field")
 
         writes = bool(leaf.get("owned_artifact_paths"))
-        if writes and leaf["role"] and not role_can_write(leaf["role"]):
+        if leaf["role"] == "tester" and writes:
+            errors.append(
+                f"{did}: read-only Role 'tester' must use Owned artifacts: none; "
+                "use test-builder when the leaf must create or modify a test artifact"
+            )
+        elif writes and leaf["role"] and not role_can_write(leaf["role"]):
             allowed = ", ".join(sorted(WRITE_ROLES))
             errors.append(
                 f"{did}: role '{leaf['role']}' is not an allowed write-capable Role; "
@@ -426,9 +487,9 @@ def parse_plan(text: str):
         )
     else:
         for leaf in test_leaves:
-            if leaf["role"] not in ("tester", "test-builder"):
+            if leaf["role"] != "test-builder":
                 errors.append(
-                    f"{leaf['id']}: TEST_CHECKS leaf must use tester/test-builder"
+                    f"{leaf['id']}: TEST_CHECKS leaf writes a manifest and must use test-builder"
                 )
             if leaf["verify_command"] != RUN_CHECKS_COMMAND:
                 errors.append(
@@ -544,6 +605,7 @@ def validate_plan(project: Path, finalize=False):
         leaves, waves, parse_errors = parse_plan(text)
         errors.extend(parse_errors)
         leaves = merge_split_leaf_overlay(project, leaves)
+        errors.extend(ownership_overlap_errors(leaves))
         acceptance = ctrl / "ACCEPTANCE.md"
         try:
             policy = reference_policy(acceptance.read_text(errors="replace"))
@@ -601,7 +663,8 @@ def selftest():
         fake.mkdir()
         for name, edit in (
             ("implementer", "allow"),
-            ("tester", "allow"),
+            ("tester", "deny"),
+            ("test-builder", "allow"),
             ("probe-builder", "allow"),
             ("investigator", "deny"),
         ):
@@ -640,7 +703,7 @@ Status: COMPLETE
 - Acceptance IDs / acceptance: A001
 - Complexity / size: S
 - Deep reasoning: no
-- Role / role: tester
+- Role / role: test-builder
 - Parallel-safe with: (none)
 - Verify command / verify: `.opencode-v2/bin/run-checks`
 - Done when: report passes
@@ -696,6 +759,47 @@ Status: COMPLETE
                 "not an allowed write-capable Role" in e
                 for e in role_errors
             ), role_errors
+
+            duplicate = valid.replace(
+                "## 5. Execution Waves",
+                """### D001 — Duplicate
+- Outcome: duplicate
+- Owned artifacts / files: `other.js`
+- Launch deps / depends_on: (none)
+- Contract deps: (none)
+- Verify deps: (none)
+- Acceptance IDs / acceptance: A001
+- Complexity / size: S
+- Deep reasoning: no
+- Role / role: implementer
+- Parallel-safe with: (none)
+- Verify command / verify: `test -s other.js`
+- Done when: duplicate exists
+## 5. Execution Waves""",
+                1,
+            )
+            _, _, duplicate_errors = parse_plan(duplicate)
+            assert any("duplicate deliverable ID: D001" in e for e in duplicate_errors), duplicate_errors
+
+            tester_writer = valid.replace(
+                "- Role / role: implementer",
+                "- Role / role: tester",
+                1,
+            )
+            _, _, tester_errors = parse_plan(tester_writer)
+            assert any("read-only Role 'tester'" in e for e in tester_errors), tester_errors
+
+            overlap_leaves={
+                "D001":{"owned_artifact_paths":["public/"]},
+                "D002":{"owned_artifact_paths":["public/index.html"]},
+            }
+            overlap_errors=ownership_overlap_errors(overlap_leaves)
+            assert any("ownership overlap" in e for e in overlap_errors), overlap_errors
+
+            reserved_paths,reserved_error=strict_owned_artifact_paths(
+                "`.opencode-v2/work/D001.ready`"
+            )
+            assert not reserved_paths and "supervisor-reserved" in reserved_error, reserved_error
         finally:
             AGENTS = old
     print("control-guard selftest: OK")

@@ -10,6 +10,8 @@ permission:
     ".opencode-v2/work/planner-restarts.json": deny
     ".opencode-v2/root-rollovers.json": deny
     ".opencode-v2/bin/*": deny
+    ".opencode-v2/work/*.ready": deny
+    ".opencode-v2/*.ready": deny
     "*": allow
   glob: allow
   grep: allow
@@ -19,6 +21,8 @@ permission:
     "*planner-restarts.json*": deny
     "*root-rollovers.json*": deny
     "*.opencode-v2/bin/*": deny
+    "*.opencode-v2/work/*.ready*": deny
+    "*.opencode-v2/*.ready*": deny
     "*": allow
   task: deny
   todowrite: deny
@@ -29,7 +33,7 @@ permission:
   external_directory: allow
 ---
 
-Validate; do not implement. Run focused build/test/lint/launch/smoke checks. Filter logs. Return <=120 words: commands, pass/fail, concrete defects, unvalidated items.
+Validate; do not implement. Owned artifacts MUST be `none`. Never create, repair, or rewrite project artifacts. Run focused build/test/lint/launch/smoke checks. Filter logs. Return <=120 words: commands, pass/fail, concrete defects, unvalidated items.
 You are constantly externally monitored.
 
 After 60 seconds without a tool call, you are considered at risk
