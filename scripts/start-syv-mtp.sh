@@ -18,11 +18,11 @@ GPU_LOG="$MA_ROOT/logs/gpu-${STAMP}.csv"
 echo "$SERVER_LOG" > "$MA_ROOT/current-server-log.txt"
 echo "$GPU_LOG" > "$MA_ROOT/current-gpu-log.txt"
 
-echo "Starting Qwen3.8 MTP: CTX=fast, MAX_SEQS=8, PREFIX_CACHE=1, GPU_UTIL=$GPU_UTIL, port=$MA_PORT"
+echo "Starting Qwen3.8 MTP: CTX=fast, MAX_SEQS=3, PREFIX_CACHE=1, GPU_UTIL=$GPU_UTIL, port=$MA_PORT"
 nvidia-smi -i "$MA_GPU_INDEX" --query-gpu=timestamp,index,name,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,power.limit,clocks.current.sm,clocks.current.memory,temperature.gpu --format=csv --loop-ms=500 > "$GPU_LOG" 2>&1 &
 echo $! > "$GPUPIDFILE"
 
-setsid env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$MA_GPU_INDEX" PORT="$MA_PORT" CTX=fast SPEC=mtp DRAFT_TOKENS=4 MAX_SEQS=8 PREFIX_CACHE=1 GPU_UTIL="$GPU_UTIL" TOOLS=1 bash "$MA_SYV_REPO/single-user/start_qwen.sh" > "$SERVER_LOG" 2>&1 &
+setsid env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$MA_GPU_INDEX" PORT="$MA_PORT" CTX=fast SPEC=mtp DRAFT_TOKENS=4 MAX_SEQS=3 PREFIX_CACHE=1 GPU_UTIL="$GPU_UTIL" TOOLS=1 bash "$MA_SYV_REPO/single-user/start_qwen.sh" > "$SERVER_LOG" 2>&1 &
 PID=$!; echo "$PID" > "$PIDFILE"
 echo -n "Waiting for API"
 for i in {1..600}; do
