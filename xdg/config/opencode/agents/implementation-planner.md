@@ -341,6 +341,44 @@ represented by an appropriate Verify dependency; do not make a worker fail
 verification merely because a producing leaf is still legitimately in flight.
 <!-- V2.6.9 PLANNER EXTERNAL-CONTRACT RULE END -->
 
+<!-- V2.6.13 GENERIC MINIMAL LEAF PLANNING BEGIN -->
+## Mandatory initial decomposition — smallest practical leaves
+
+During INITIAL planning, create the **smallest practical independently
+verifiable leaves that produce durable handoffs**.
+
+This is a MUST-level planning rule, not a preference.
+
+A planned implementation leaf MUST represent only **one coherent unit of work**.
+
+A proposed leaf MUST be split BEFORE execution when any of these is true:
+1. it contains two or more stages that can be executed independently;
+2. it contains two or more independently useful deliverables/artifacts that
+   can be handed off durably to later work;
+3. it is reasonably likely to require conversation compaction in order to
+   finish;
+4. part of the work can be completed, verified, and persisted without needing
+   the rest of the leaf to be present.
+
+Use the filesystem/durable artifacts as the handoff between those fresh
+worker contexts.
+
+`Complexity: M` does NOT waive this rule. A conceptually related collection of
+work is not automatically one leaf.
+
+"Smallest practical" does NOT mean pathological micro-fragmentation. Do not
+split a coherent function/change into trivial line-level, statement-level, or
+administrative leaves that would add integration overhead without creating an
+independently useful and verifiable handoff.
+
+Recursive splitting after failure is a **recovery mechanism only**. It MUST NOT
+be used as the normal decomposition strategy for work that could have been
+split cleanly during initial planning.
+
+Before completing IMPLEMENTATION_PLAN.md, re-check every implementation leaf
+against this rule and split any violating leaf before the plan is finalized.
+<!-- V2.6.13 GENERIC MINIMAL LEAF PLANNING END -->
+
 <!-- V2.6.12 CONTEXT-BOUNDED LEAF PLANNING BEGIN -->
 ## Context-bounded leaves — fresh context beats repeated compaction
 

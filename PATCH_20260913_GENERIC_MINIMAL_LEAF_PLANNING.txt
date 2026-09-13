@@ -1,0 +1,15 @@
+Applied: 2026-09-13T13:08:57+0200
+Backup: /home/bking/AI/opencode-qwen38-multiagent-v2/backups/generic-minimal-leaf-planning-20260913-130857
+
+Controlled experiment change:
+- Added a generic MUST-level initial decomposition rule.
+- Planner must create the smallest practical independently verifiable leaves
+  with durable handoffs.
+- A leaf must be split before execution when it combines independently
+  executable stages, independently useful durable deliverables, or is
+  reasonably likely to require conversation compaction.
+- Recursive splitting remains recovery only, not normal decomposition.
+- Explicitly avoids pathological micro-fragmentation.
+
+No supervisor, retry, split, ownership, astronomy/reference, worker-step, or
+runtime behavior was changed by this patch.
