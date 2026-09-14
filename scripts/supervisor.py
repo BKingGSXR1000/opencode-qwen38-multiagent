@@ -383,6 +383,11 @@ def split_request(did):
         "generation":generation,
         "parent_scope":leaf.get("name",""),
         "parent_contract":{
+            # Batch 9B: the model must receive the detailed parent outcome
+            # verbatim. New26 proved name/verify/done_when alone are not
+            # sufficient: a splitter rewrote APPARENT=AIRLESS to APPVENT=AIRLESS
+            # because the authoritative detailed outcome was absent.
+            "outcome":leaf.get("outcome","") or leaf.get("name",""),
             "name":leaf.get("name",""),
             "role":leaf.get("role",""),
             "owned_artifacts":leaf.get("owned_artifacts",""),
@@ -487,6 +492,49 @@ def load_split_transaction(parent):
     return data
 
 
+def render_split_child_scope(child_id,parent,child,parent_leaf):
+    """Render a split scope with deterministic inherited-contract precedence.
+
+    Splitter prose is useful for bounded decomposition, but it is not allowed
+    to rewrite the parent's already-validated requirement. Keep the inherited
+    outcome verbatim and visibly authoritative in every child, including
+    recursive descendants.
+    """
+    binding_outcome=(
+        child.get("outcome","")
+        or parent_leaf.get("outcome","")
+        or parent_leaf.get("name","")
+    )
+    acceptance_ids=child.get("acceptance_ids") or []
+    acceptance_text=(
+        ", ".join(acceptance_ids)
+        if isinstance(acceptance_ids,list)
+        else str(acceptance_ids)
+    )
+    return (
+        f"# {child_id} split-child scope\n\n"
+        f"Parent: {parent}\n\n"
+        "## Binding inherited contract — supervisor preserved\n\n"
+        "The inherited outcome below is verbatim authoritative contract text. "
+        "It outranks the model-generated child decomposition below. If the child "
+        "scope, Verify text, or Done-when text contradicts this inherited outcome, "
+        "ignore the contradictory child text and preserve the inherited outcome.\n\n"
+        f"Inherited outcome (binding): {binding_outcome}\n\n"
+        f"Acceptance IDs (inherited): {acceptance_text or 'none'}\n\n"
+        f"Immediate parent Verify command (binding at parent finalization): "
+        f"`{parent_leaf.get('verify_command','')}`\n\n"
+        f"Immediate parent Done when (binding at parent finalization): "
+        f"{parent_leaf.get('done_when','')}\n\n"
+        "## Bounded child decomposition\n\n"
+        "The following child-specific text may narrow/divide work but may not "
+        "weaken, rename, or contradict the binding inherited contract above.\n\n"
+        f"Child scope: {child['name']}\n\n"
+        f"Owned artifacts: {child['owned_artifacts']}\n\n"
+        f"Child Verify command: `{child['verify_command']}`\n\n"
+        f"Child Done when: {child['done_when']}\n"
+    )
+
+
 def apply_split_transaction(parent,txn):
     expected=list(txn["children"])
     child_defs=txn["child_defs"]
@@ -507,11 +555,7 @@ def apply_split_transaction(parent,txn):
         scope_path=Path(PROJECT)/".opencode-v2"/"work"/f"{child_id}.scope.md"
         atomic_write_text(
             scope_path,
-            f"# {child_id} split-child scope\n\n"
-            f"Parent: {parent}\n\nScope: {child['name']}\n\n"
-            f"Owned artifacts: {child['owned_artifacts']}\n\n"
-            f"Verify command: `{child['verify_command']}`\n\n"
-            f"Done when: {child['done_when']}\n",
+            render_split_child_scope(child_id,parent,child,parent_leaf),
         )
     parent_leaf["split_children"]=expected
     parent_leaf["split_depth"]=split_depth(parent)
@@ -643,7 +687,12 @@ def validate_split_proposal(parent, proposals):
                 )
             seen |= owned
         child=dict(leaf)
+        # Batch 9B: make inheritance explicit rather than relying on dict-copy
+        # accident. Recursive descendants keep the original validated outcome
+        # even when splitter-generated scope prose drifts.
+        inherited_outcome=leaf.get("outcome","") or leaf.get("name","")
         child.update({"id":expected[index],"name":proposal["scope"],
+                      "outcome":inherited_outcome,
                       "owned_artifacts":_canonical_owned_artifacts(owned_list),
                       "owned_artifact_paths":owned_list,
                       "verify_command":proposal["verify_command"],"role":proposal["role"],"done_when":proposal["done_when"],
