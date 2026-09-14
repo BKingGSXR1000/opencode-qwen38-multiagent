@@ -20,6 +20,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 ROOT = Path.home() / "AI/opencode-qwen38-multiagent-v2"
@@ -36,6 +37,7 @@ EPHEMERAL_DIRS = (
 EPHEMERAL_FILES = (".coverage",)
 SANDBOX_ROOT = Path.home() / ".local/share/v2-worker-sandbox"
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
+# V2.6.9 BATCH9A CONCURRENT-SHADOW-GUARD
 
 
 class SandboxError(RuntimeError):
@@ -530,45 +532,94 @@ def _ephemeral_mounts(project: Path, session: str, lower_root="/v2-lower"):
     return mounts
 
 
-def detect_unowned_shadow_changes(project: Path, shadow: Path, declared, lower_root="/v2-lower"):
-    violations=[]
+def snapshot_unowned_shadow_guards(shadow: Path, declared, lower_root="/v2-lower"):
+    """Capture the immutable guard structure created before a worker command.
+
+    Never derive the post-command expected set from the live shared project:
+    supervisor/other-worker commits may legitimately change that tree while this
+    worker is running.
+    """
     declared=list(declared)
+    links={}
+    ancestors=set()
 
     def recurse(rel_dir: str):
-        lower_dir=project/rel_dir if rel_dir else project
         shadow_dir=shadow/rel_dir if rel_dir else shadow
-        lower_names=set()
-        if lower_dir.is_dir():
-            try:
-                lower_names={p.name for p in lower_dir.iterdir()}
-            except OSError:
-                pass
-        shadow_names={p.name for p in shadow_dir.iterdir()} if shadow_dir.is_dir() else set()
-        names=lower_names|shadow_names
+        if not shadow_dir.is_dir():
+            return
         prefix=rel_dir.rstrip("/")+"/" if rel_dir else ""
-        for name in sorted(names):
+        for child in shadow_dir.iterdir():
+            name=child.name
             rel=f"{prefix}{name}" if prefix else name
             if path_is_owned(rel,declared) or path_is_ephemeral(rel):
                 continue
             if path_is_ancestor(rel,declared):
-                s=shadow/rel
-                if not s.is_dir() or s.is_symlink():
+                if not child.is_dir() or child.is_symlink():
+                    raise SandboxError(
+                        f"worker shadow ancestor is not a directory: {rel}"
+                    )
+                ancestors.add(rel)
+                recurse(rel)
+                continue
+            if not child.is_symlink():
+                raise SandboxError(
+                    f"worker shadow guard is not a symlink before execution: {rel}"
+                )
+            links[rel]=os.readlink(child)
+    recurse("")
+    return {"links":links,"ancestors":sorted(ancestors)}
+
+
+def detect_unowned_shadow_changes(shadow: Path, declared, guards):
+    """Detect worker mutations only against the command-start shadow snapshot.
+
+    This intentionally ignores changes to the live shared project after the
+    sandbox is built, preventing concurrent supervisor/worker state from being
+    falsely attributed to this command.
+    """
+    violations=[]
+    declared=list(declared)
+    expected_links=dict((guards or {}).get("links") or {})
+    expected_ancestors=set((guards or {}).get("ancestors") or [])
+    seen_links=set()
+    seen_ancestors=set()
+
+    def recurse(rel_dir: str):
+        shadow_dir=shadow/rel_dir if rel_dir else shadow
+        if not shadow_dir.is_dir():
+            return
+        prefix=rel_dir.rstrip("/")+"/" if rel_dir else ""
+        for child in shadow_dir.iterdir():
+            name=child.name
+            rel=f"{prefix}{name}" if prefix else name
+            if path_is_owned(rel,declared) or path_is_ephemeral(rel):
+                continue
+            if path_is_ancestor(rel,declared):
+                seen_ancestors.add(rel)
+                if rel not in expected_ancestors or not child.is_dir() or child.is_symlink():
                     violations.append(rel)
                 else:
                     recurse(rel)
                 continue
-            s=shadow/rel
-            expected=_lower_target(rel,lower_root)
-            if not s.is_symlink():
+            seen_links.add(rel)
+            expected=expected_links.get(rel)
+            if expected is None or not child.is_symlink():
                 violations.append(rel)
                 continue
             try:
-                if os.readlink(s)!=expected:
+                if os.readlink(child)!=expected:
                     violations.append(rel)
             except OSError:
                 violations.append(rel)
+
     recurse("")
-    return violations
+    for rel in expected_links:
+        if rel not in seen_links:
+            violations.append(rel)
+    for rel in expected_ancestors:
+        if rel not in seen_ancestors:
+            violations.append(rel)
+    return sorted(set(violations))
 
 
 def _replace_path(src: Path, dst: Path):
@@ -629,6 +680,7 @@ def run_bash(project: Path, ctx, command: str):
     shadow=run_dir/"project"
     lower_root=str(lower_alias.resolve())
     build_shadow(project,shadow,declared,lower_root)
+    shadow_guards=snapshot_unowned_shadow_guards(shadow,declared,lower_root)
 
     # lower_alias exists on the host before the root is made read-only. That
     # gives bubblewrap a valid mount target without needing to mkdir anything
@@ -664,7 +716,7 @@ def run_bash(project: Path, ctx, command: str):
     proc=subprocess.run(args,text=True)
     elapsed=time.monotonic()-started
 
-    violations=detect_unowned_shadow_changes(project,shadow,declared,lower_root)
+    violations=detect_unowned_shadow_changes(shadow,declared,shadow_guards)
     merged=merge_owned(project,shadow,declared)
 
     if violations:
@@ -894,10 +946,18 @@ def selftest(require_bwrap=False):
         build_shadow(project,shadow,declared)
         assert (shadow/"src/owned.txt").is_file() and not (shadow/"src/owned.txt").is_symlink()
         assert (shadow/"other.txt").is_symlink()
+        # Capture immutable command-start guards before simulating worker and
+        # concurrent supervisor mutations.
+        shadow_guards=snapshot_unowned_shadow_guards(shadow,declared)
         (shadow/"src/owned.txt").write_text("new\n")
         (shadow/"other.txt").unlink()
         (shadow/"other.txt").write_text("bad\n")
-        assert "other.txt" in detect_unowned_shadow_changes(project,shadow,declared)
+        # Concurrent host changes must not become worker violations.
+        (project/".opencode-v2/work/supervisor-concurrent.json").write_text("{}\n")
+        assert "other.txt" in detect_unowned_shadow_changes(shadow,declared,shadow_guards)
+        assert ".opencode-v2/work/supervisor-concurrent.json" not in detect_unowned_shadow_changes(
+            shadow,declared,shadow_guards
+        )
         merge_owned(project,shadow,declared)
         assert (project/"src/owned.txt").read_text()=="new\n"
         assert (project/"other.txt").read_text()=="safe\n"
@@ -917,6 +977,43 @@ def selftest(require_bwrap=False):
             assert (project/"src/owned.txt").read_text()=="shell-owned\n"
             assert (project/"other.txt").read_text()=="safe\n"
             vp.unlink(missing_ok=True)
+
+            # New26 regression: supervisor/control-plane files created in the
+            # live shared project while a worker shell is running must not be
+            # attributed to that worker. The command writes a marker into its
+            # session-persistent ephemeral node_modules tree after the shadow
+            # snapshot exists; the host thread waits for that marker before
+            # committing synthetic supervisor state.
+            race_marker=(
+                SANDBOX_ROOT/"scratch"/_safe_session_token("ses_test")/
+                "node_modules/v2-batch9-race/started"
+            )
+            concurrent_control=project/".opencode-v2/work/D999.split-transaction.json"
+            race_errors=[]
+            def host_control_commit():
+                deadline=time.monotonic()+5.0
+                while time.monotonic()<deadline and not race_marker.exists():
+                    time.sleep(0.01)
+                if not race_marker.exists():
+                    race_errors.append("worker race marker was not observed")
+                    return
+                concurrent_control.write_text('{"owner":"supervisor"}\n')
+            race_thread=threading.Thread(target=host_control_commit,daemon=True)
+            race_thread.start()
+            rc=run_bash(
+                project,ctx,
+                "mkdir -p node_modules/v2-batch9-race; "
+                "touch node_modules/v2-batch9-race/started; "
+                "sleep 0.25; printf 'race-owned\n' > src/owned.txt"
+            )
+            race_thread.join(timeout=6.0)
+            assert not race_thread.is_alive(), "concurrent control thread did not finish"
+            assert race_errors==[], race_errors
+            assert concurrent_control.is_file(), concurrent_control
+            assert rc==0, rc
+            assert (project/"src/owned.txt").read_text()=="race-owned\n"
+            assert not vp.exists(), vp
+
             rc=run_bash(
                 project,ctx,
                 "mkdir -p node_modules/v2-batch8-probe; "
