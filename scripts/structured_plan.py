@@ -230,10 +230,30 @@ def normalize_document(raw):
                     vals.append(x)
             leaf[fld]=vals
         if not leaf["acceptance_ids"]:
-            errors.append({"key":key,"code":"acceptance","message":f"{key}: acceptance_ids must not be empty"})
+            errors.append({
+                "key":key,
+                "code":"acceptance",
+                "message":(
+                    f"{key}: acceptance_ids must contain at least one MUST acceptance ID Axxx. "
+                    "A SHOULD-only leaf is not a valid standalone implementation leaf; merge optional "
+                    "SHOULD work into a compatible MUST-backed leaf without exceeding task-shape limits, "
+                    "or remove the optional leaf and update dependencies."
+                ),
+            })
         for aid in leaf["acceptance_ids"]:
             if not ACC_RE.fullmatch(aid):
-                errors.append({"key":key,"code":"acceptance","message":f"{key}: invalid acceptance ID {aid!r}"})
+                if re.fullmatch(r"S\d{3}",aid):
+                    message=(
+                        f"{key}: invalid acceptance ID {aid!r}; acceptance_ids accepts MUST IDs Axxx only. "
+                        "SHOULD IDs Sxxx cannot justify a standalone implementation leaf. Merge this optional "
+                        "work into a compatible MUST-backed leaf without exceeding task-shape limits, or remove "
+                        "the optional leaf and update dependencies."
+                    )
+                else:
+                    message=(
+                        f"{key}: invalid acceptance ID {aid!r}; acceptance_ids accepts MUST IDs Axxx only."
+                    )
+                errors.append({"key":key,"code":"acceptance","message":message})
         normalized.append(leaf)
 
     keys={x["key"] for x in normalized}

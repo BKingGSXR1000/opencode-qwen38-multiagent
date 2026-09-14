@@ -114,6 +114,26 @@ Write one JSON object:
 
 Do not add any other root or leaf fields.
 
+## Acceptance-ID semantics — MUST-only
+
+`acceptance_ids` is a non-empty list of **MUST** criteria from `ACCEPTANCE.md`.
+Every entry must match `Axxx` (for example `A001`). Never put `Sxxx` SHOULD
+criteria in `acceptance_ids`.
+
+A SHOULD criterion may be implemented incidentally only inside a leaf that is
+already necessary for at least one MUST `Axxx`, provided the combined work is
+still one coherent leaf and remains inside all task-shape limits.
+
+Never create a standalone leaf whose only justification is SHOULD work. If a
+proposed leaf is SHOULD-only, either:
+- merge that optional work into a compatible MUST-backed leaf; or
+- omit/remove the optional leaf and update any dependencies that referenced it.
+
+Repair rule: if a repair packet reports an invalid `Sxxx`, do **not** replace it
+with an empty `acceptance_ids` list and do not re-add the `Sxxx` on the next
+repair. Repair the topology once by merging or removing that SHOULD-only leaf
+and updating dependency references.
+
 `owned_artifacts` is an array of raw project-relative paths, not Markdown.
 Use `[]` only for a genuinely read-only `tester`.
 
