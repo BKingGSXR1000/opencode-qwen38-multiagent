@@ -101,7 +101,7 @@ if ! proxy_ready; then
     proxy_ready || { echo "ERROR: bounded V2 proxy did not become ready." >&2; exit 1; }
 fi
 
-echo "Bounded V2 proxy ready: $PROXY_URL -> $BASE"
+echo "Bounded V2 proxy ready: $PROXY_URL -> $BASE_URL"
 
 curl -fsS --max-time 5 \
     "${AUTH[@]}" \
