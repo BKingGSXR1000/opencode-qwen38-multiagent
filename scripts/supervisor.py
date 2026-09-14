@@ -71,6 +71,8 @@ MAX_SPLITTER_ATTEMPTS=2
 SPLITTER_LEASE_SECONDS=600
 MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
 SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
+SPLIT_HANDOFF_VERIFY_SENTINEL="SUPERVISOR_HANDOFF_PROGRESS"
+SPLIT_HANDOFF_MARKER="HANDOFF_READY: true"
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -329,6 +331,40 @@ def _artifact_items(raw):
     return [] if error else paths
 
 
+def _split_failure_is_verification_related(reason):
+    reason=str(reason or "")
+    return reason.startswith((
+        "verify-failed-",
+        "verification-error-",
+        "verify-command-unsafe:",
+        "verify-mutated-owned-artifacts:",
+    ))
+
+
+def _split_request_verification_recovery_allowed(request):
+    failures=request.get("failed_attempts",[]) if isinstance(request,dict) else []
+    return any(
+        isinstance(item,dict)
+        and item.get("classification")=="genuine"
+        and _split_failure_is_verification_related(item.get("reason"))
+        for item in failures
+    )
+
+
+def split_handoff_verify_command(child_id):
+    path=f".opencode-v2/work/{child_id}.progress.md"
+    # Keep the shell surface tiny. The child ID is supervisor-derived and
+    # valid_deliverable_id-constrained; the quoted Python payload is data to
+    # the outer shell and is rechecked by validate_verify_command().
+    return (
+        "python3 -c \"from pathlib import Path; "
+        f"t=Path('{path}').read_text(); "
+        "assert 'HANDOFF_READY: true' in t; "
+        "assert 'Findings:' in t; assert 'Evidence:' in t; "
+        "assert 'Next step:' in t; assert len(t.strip()) >= 80\""
+    )
+
+
 def split_request(did):
     """Materialize a durable split request from an already-durable ledger marker."""
     if not recursive_split_enabled() or split_depth(did) >= MAX_SPLIT_DEPTH:
@@ -345,10 +381,15 @@ def split_request(did):
     generation=int(marker.get("generation") or 1)
     parent_owned=owned_artifact_paths(leaf)
     if not parent_owned:
+        reason=(
+            "progress-only handoff leaf is already the minimum split unit"
+            if leaf.get("split_handoff_only")
+            else "split parent has no durable owned artifacts to partition"
+        )
         save_split_status(
             did,"split-unavailable-read-only-parent",
             generation=generation,
-            reason="split parent has no durable owned artifacts to partition",
+            reason=reason,
         )
         return False,"split-unavailable-read-only-parent"
 
@@ -407,6 +448,21 @@ def split_request(did):
         "existing_artifacts":parent_owned,
         "ownership_items":parent_owned,
         "failed_attempts":compact,
+        "decomposition_policy":{
+            "progress_handoff_supported":True,
+            "handoff_verify_sentinel":SPLIT_HANDOFF_VERIFY_SENTINEL,
+            "verification_recovery_allowed":any(
+                item.get("classification")=="genuine"
+                and _split_failure_is_verification_related(item.get("reason"))
+                for item in compact if isinstance(item,dict)
+            ),
+            "rule":(
+                "Split must materially reduce executable work: partition owned "
+                "artifacts, or use a progress-only probe handoff followed by the "
+                "artifact writer. A writer+tester split that leaves the writer with "
+                "all parent work is reserved for verification-related failures."
+            ),
+        },
     }
     atomic_write_json(path,payload)
     status=load_split_status(did)
@@ -495,10 +551,10 @@ def load_split_transaction(parent):
 def render_split_child_scope(child_id,parent,child,parent_leaf):
     """Render a split scope with deterministic inherited-contract precedence.
 
-    Splitter prose is useful for bounded decomposition, but it is not allowed
-    to rewrite the parent's already-validated requirement. Keep the inherited
-    outcome verbatim and visibly authoritative in every child, including
-    recursive descendants.
+    Splitter prose may narrow work but cannot rewrite the validated parent
+    contract. Progress-only handoff children are a supervisor-owned exception
+    to normal artifact ownership: their only durable deliverable is their own
+    `.progress.md`, which is already inside the worker firewall allowlist.
     """
     binding_outcome=(
         child.get("outcome","")
@@ -511,6 +567,34 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
         if isinstance(acceptance_ids,list)
         else str(acceptance_ids)
     )
+    handoff_only=bool(child.get("split_handoff_only"))
+    handoff_source=str(child.get("split_handoff_source") or "")
+    handoff_text=""
+    if handoff_only:
+        handoff_text=(
+            "\n## Progress-only handoff protocol — supervisor enforced\n\n"
+            "This child is deliberately smaller than the failed parent. Do NOT "
+            "create or modify any project artifact and do NOT attempt the final "
+            "parent output. Perform only the bounded discovery/acquisition/diagnosis "
+            "described in Child scope. Record reusable results in "
+            f"`.opencode-v2/work/{child_id}.progress.md` using all of these exact "
+            "labels:\n\n"
+            "`HANDOFF_READY: true`\n\n"
+            "`Findings:`\n\n"
+            "`Evidence:`\n\n"
+            "`Next step:`\n\n"
+            "The progress file is this child's durable deliverable. Keep concrete "
+            "IDs, commands, API shapes, paths, values, or failure causes needed by "
+            "the dependent writer so it does not repeat the probe.\n"
+        )
+    elif handoff_source:
+        handoff_text=(
+            "\n## Required predecessor handoff — supervisor enforced\n\n"
+            f"Before doing project work, read `.opencode-v2/work/{handoff_source}.progress.md`. "
+            "Treat its concrete findings/evidence as the durable result of the prior "
+            "bounded probe. Consume that handoff and finish the artifact stage; do not "
+            "repeat the predecessor's investigation unless direct validation disproves it.\n"
+        )
     return (
         f"# {child_id} split-child scope\n\n"
         f"Parent: {parent}\n\n"
@@ -524,7 +608,8 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
         f"Immediate parent Verify command (binding at parent finalization): "
         f"`{parent_leaf.get('verify_command','')}`\n\n"
         f"Immediate parent Done when (binding at parent finalization): "
-        f"{parent_leaf.get('done_when','')}\n\n"
+        f"{parent_leaf.get('done_when','')}\n"
+        f"{handoff_text}\n"
         "## Bounded child decomposition\n\n"
         "The following child-specific text may narrow/divide work but may not "
         "weaken, rename, or contradict the binding inherited contract above.\n\n"
@@ -631,75 +716,163 @@ def reconcile_split_transactions():
                     apply_split_transaction(parent,txn)
 
 
-def validate_split_proposal(parent, proposals):
-    """Validate exactly two child scopes; no model-selected IDs or control edits."""
+def validate_split_proposal(parent, proposals, request=None):
+    """Validate one materially-shrinking two-child split.
+
+    Accepted shapes are deliberately finite:
+    1) two writers partition the parent's owned artifacts;
+    2) progress-only probe handoff -> writer owning the parent artifacts;
+    3) writer -> read-only tester, but only after verification-related failures.
+
+    Shape (3) does not reduce implementation work, so it is not a generic retry
+    mechanism. New30 showed that repeatedly wrapping a single-artifact writer in
+    testers simply reproduced the same oversized task at every recursive depth.
+    """
     manifest=load_manifest(); leaves=manifest.get("leaves") or {}; leaf=leaves.get(parent)
     expected=expected_children(parent)
     if not recursive_split_enabled() or not isinstance(leaf,dict) or not expected:
         raise ValueError("parent is not eligible for recursive split")
     if leaf_children(parent): raise ValueError("parent already split")
-    if not isinstance(proposals,list) or len(proposals)!=2: raise ValueError("split requires exactly two proposals")
+    if not isinstance(proposals,list) or len(proposals)!=2:
+        raise ValueError("split requires exactly two proposals")
     parent_owned=set(owned_artifact_paths(leaf))
     if not parent_owned:
         raise ValueError("split parent has no validated owned artifacts")
-    seen=set(); children=[]
+    if request is None:
+        request=load_json_object(split_request_path(parent),label=f"split request {parent}")
+
+    seen=set(); children=[]; meta=[]
     for index, proposal in enumerate(proposals):
-        if not isinstance(proposal,dict): raise ValueError("child proposal must be an object")
+        if not isinstance(proposal,dict):
+            raise ValueError("child proposal must be an object")
         allowed={"scope","owned_artifacts","verify_command","role","depends_on_sibling","done_when"}
-        if set(proposal)-allowed or not all(isinstance(proposal.get(k),str) and proposal[k].strip() for k in ("scope","owned_artifacts","verify_command","role","done_when")):
+        if set(proposal)-allowed or not all(
+            isinstance(proposal.get(k),str) and proposal[k].strip()
+            for k in ("scope","owned_artifacts","verify_command","role","done_when")
+        ):
             raise ValueError("child proposal has missing or unsupported fields")
+
         owned_list,owned_error=_strict_owned_artifact_text(proposal["owned_artifacts"])
         if owned_error:
             raise ValueError(f"child ownership is not canonical: {owned_error}")
-        contract_errors=validate_leaf_contract(proposal["role"], owned_list, proposal["verify_command"])
-        if contract_errors:
-            raise ValueError("; ".join(contract_errors))
         owned=set(owned_list)
+        role=proposal["role"].strip()
         sibling=proposal.get("depends_on_sibling", "")
         if index == 1 and sibling == expected[0]:
             sibling = "first"
         if sibling not in ("", "first") or (sibling == "first" and index != 1):
             raise ValueError("only second child may depend on first child")
 
-        read_only_role=proposal["role"] in READ_ONLY_SPLIT_ROLES
-        if read_only_role and owned:
-            raise ValueError(
-                "read-only split role must use owned_artifacts: none; "
-                "use implementer/test-builder when the child must create an artifact"
-            )
-        if not owned:
-            if not read_only_role:
+        handoff_only=(
+            index==0
+            and role=="probe-builder"
+            and proposal["owned_artifacts"].strip()=="none"
+        )
+        if handoff_only:
+            if proposal["verify_command"].strip()!=SPLIT_HANDOFF_VERIFY_SENTINEL:
                 raise ValueError(
-                    "only a read-only tester split child may have owned_artifacts: none"
+                    "progress-only probe must use exact Verify sentinel "
+                    + SPLIT_HANDOFF_VERIFY_SENTINEL
                 )
-            if proposal["owned_artifacts"].strip() != "none":
-                raise ValueError(
-                    "read-only tester must encode empty ownership as exact 'none'"
-                )
-            if index != 1 or sibling != "first":
-                raise ValueError(
-                    "read-only tester must be the second child and depend on the first"
-                )
+            if sibling:
+                raise ValueError("progress-only probe must be first and independent")
         else:
-            if not owned <= parent_owned or seen & owned:
+            contract_errors=validate_leaf_contract(role, owned_list, proposal["verify_command"])
+            if contract_errors:
+                raise ValueError("; ".join(contract_errors))
+
+        read_only_role=role in READ_ONLY_SPLIT_ROLES
+        if not handoff_only:
+            if read_only_role and owned:
                 raise ValueError(
-                    "child ownership must be disjoint and inside parent ownership"
+                    "read-only split role must use owned_artifacts: none; "
+                    "use implementer/test-builder when the child must create an artifact"
                 )
-            seen |= owned
+            if not owned:
+                if not read_only_role:
+                    raise ValueError(
+                        "only the first progress-only probe-builder or a read-only tester "
+                        "may have owned_artifacts: none"
+                    )
+                if proposal["owned_artifacts"].strip() != "none":
+                    raise ValueError("read-only tester must encode empty ownership as exact 'none'")
+                if index != 1 or sibling != "first":
+                    raise ValueError("read-only tester must be the second child and depend on the first")
+            else:
+                if not owned <= parent_owned or seen & owned:
+                    raise ValueError("child ownership must be disjoint and inside parent ownership")
+                seen |= owned
+
         child=dict(leaf)
-        # Batch 9B: make inheritance explicit rather than relying on dict-copy
-        # accident. Recursive descendants keep the original validated outcome
-        # even when splitter-generated scope prose drifts.
         inherited_outcome=leaf.get("outcome","") or leaf.get("name","")
-        child.update({"id":expected[index],"name":proposal["scope"],
-                      "outcome":inherited_outcome,
-                      "owned_artifacts":_canonical_owned_artifacts(owned_list),
-                      "owned_artifact_paths":owned_list,
-                      "verify_command":proposal["verify_command"],"role":proposal["role"],"done_when":proposal["done_when"],
-                      "parent":parent,"split_depth":split_depth(expected[index]),"split_children":[]})
+        child_verify=(
+            split_handoff_verify_command(expected[index])
+            if handoff_only else proposal["verify_command"]
+        )
+        child_done=(
+            "Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; "
+            "no project artifact is modified."
+            if handoff_only else proposal["done_when"]
+        )
+        child.update({
+            "id":expected[index],
+            "name":proposal["scope"],
+            "outcome":inherited_outcome,
+            "owned_artifacts":_canonical_owned_artifacts(owned_list),
+            "owned_artifact_paths":owned_list,
+            "verify_command":child_verify,
+            "role":role,
+            "done_when":child_done,
+            "parent":parent,
+            "split_depth":split_depth(expected[index]),
+            "split_children":[],
+            "split_handoff_only":handoff_only,
+            "split_handoff_source":"",
+        })
         child["launch_deps"]=list(leaf.get("launch_deps",[])) + ([expected[0]] if sibling=="first" else [])
+        if handoff_only:
+            # The probe does not claim acceptance coverage and should not wait on
+            # final-product Verify dependencies. Parent collapse still enforces
+            # the complete inherited contract after both children are READY.
+            child["acceptance_ids"]=[]
+            child["verify_deps"]=[]
         children.append(child)
-    if seen != parent_owned: raise ValueError("child ownership must cover all unfinished parent ownership")
+        meta.append({
+            "owned":owned,
+            "role":role,
+            "sibling":sibling,
+            "handoff_only":handoff_only,
+        })
+
+    handoffs=[i for i,item in enumerate(meta) if item["handoff_only"]]
+    read_only=[i for i,item in enumerate(meta) if item["role"] in READ_ONLY_SPLIT_ROLES and not item["owned"]]
+
+    if handoffs:
+        if handoffs != [0]:
+            raise ValueError("exactly the first child may be a progress-only handoff")
+        second=meta[1]
+        if second["role"] in READ_ONLY_SPLIT_ROLES or not second["owned"]:
+            raise ValueError("progress handoff must be followed by a writing child")
+        if second["sibling"]!="first":
+            raise ValueError("writer after progress handoff must depend on first child")
+        if second["owned"] != parent_owned:
+            raise ValueError("writer after progress handoff must own all unfinished parent artifacts")
+        children[1]["split_handoff_source"]=expected[0]
+    elif read_only:
+        # The only non-shrinking shape is writer -> tester. Keep it solely for
+        # parent-Verify failures where independent verification can actually
+        # repair the failed dimension. Runtime/ownership/progress failures must
+        # decompose executable work instead of retrying the same writer.
+        if read_only != [1] or meta[0]["owned"] != parent_owned or meta[1]["sibling"]!="first":
+            raise ValueError("read-only tester split must be writer(all parent artifacts) -> tester")
+        if not _split_request_verification_recovery_allowed(request):
+            raise ValueError(
+                "non-shrinking writer+tester split is only allowed after verification-related "
+                "failures; use progress-only probe -> writer or partition parent artifacts"
+            )
+
+    if seen != parent_owned:
+        raise ValueError("child ownership must cover all unfinished parent ownership")
     return expected,children
 
 
@@ -713,10 +886,10 @@ def persist_split(parent, proposals):
                     return list(existing.get("children") or [])
                 return apply_split_transaction(parent,existing)
 
-            expected,children=validate_split_proposal(parent,proposals)
             request=load_json_object(
                 split_request_path(parent),label=f"split request {parent}"
             )
+            expected,children=validate_split_proposal(parent,proposals,request=request)
             generation=int(request.get("generation") or 1)
             child_defs={child["id"]:child for child in children}
             transaction_id=split_transaction_id(parent,generation,child_defs)
@@ -1690,13 +1863,25 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
             clear_verify_wait(did)
             return False,"sandbox-ownership-violation"
     paths=owned_artifact_paths(leaf)
+    progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
+    handoff_only=bool(leaf.get("split_handoff_only"))
     read_only_no_artifacts=(
         leaf.get("role") in READ_ONLY_SPLIT_ROLES and not paths
     )
-    if not read_only_no_artifacts and (
+    if handoff_only:
+        if leaf.get("role")!="probe-builder" or paths:
+            clear_verify_wait(did)
+            return False,"split-handoff-contract-invalid"
+        try:
+            handoff_text=progress.read_text(errors="replace")
+        except OSError:
+            handoff_text=""
+        required=(SPLIT_HANDOFF_MARKER,"Findings:","Evidence:","Next step:")
+        if not handoff_text or any(marker not in handoff_text for marker in required):
+            return False,"split-handoff-progress-incomplete"
+    elif not read_only_no_artifacts and (
         not paths or any(not (Path(PROJECT)/path).exists() for path in paths)
     ):
-        progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
         if progress.exists() and progress.stat().st_size:
             return False,"durable-progress-incomplete"
         return False,"owned-artifacts-missing"

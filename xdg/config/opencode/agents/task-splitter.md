@@ -77,13 +77,65 @@ together cover the parent's owned artifacts, and stay inside parent ownership.
 The supervisor reads your final JSON from OpenCode's session database, validates
 it, and persists the durable split itself. You must NOT write split-proposal.json.
 
+<!-- V2.6.9 BATCH14B MATERIAL-SHRINK SPLIT BEGIN -->
+## Material-shrink rule — mandatory
+
+A split is recovery only if it materially reduces the executable work. Do NOT
+reproduce the failed writer unchanged and merely add a tester unless the split
+request explicitly says:
+
+`decomposition_policy.verification_recovery_allowed: true`
+
+The supervisor deterministically accepts only these shapes:
+
+1. **Artifact partition** — both children are writers and receive disjoint,
+   non-empty subsets of `ownership_items` that together cover the parent.
+2. **Progress handoff -> writer** — use this when the parent has one owned
+   artifact or the failures show that discovery/acquisition/diagnosis should be
+   separated from final construction.
+3. **Writer -> tester** — only for verification-related failures when
+   `verification_recovery_allowed` is true. This is not a generic retry shape.
+
+### Progress handoff -> writer exact protocol
+
+For child #1 emit exactly:
+- `"role": "probe-builder"`
+- `"owned_artifacts": "none"`
+- `"depends_on_sibling": ""`
+- `"verify_command": "SUPERVISOR_HANDOFF_PROGRESS"`
+
+Its scope must be a SMALL bounded stage such as one API-contract probe, one
+acquisition/format discovery, one reproducible failure diagnosis, or one set of
+concrete values the final writer needs. It must NOT attempt the final parent
+artifact. The supervisor replaces the sentinel with a safe Verify command and
+requires the worker's own progress file to contain:
+
+- `HANDOFF_READY: true`
+- `Findings:`
+- `Evidence:`
+- `Next step:`
+
+For child #2:
+- use a writing role appropriate to the parent work;
+- own ALL parent `ownership_items`;
+- set `"depends_on_sibling": "first"`;
+- scope it as the final artifact stage that CONSUMES the predecessor handoff
+  instead of repeating the probe.
+
+For recursive splits, apply the same rule again: every generation must either
+partition artifacts or move a bounded discovery stage into the progress-only
+handoff. Never emit another writer+tester wrapper around a runtime/progress/
+ownership failure; the supervisor rejects that as non-shrinking.
+<!-- V2.6.9 BATCH14B MATERIAL-SHRINK SPLIT END -->
+
 <!-- V2.6.9 NEW5 SPLITTER STRICTNESS BEGIN -->
 ## Exact split ownership protocol
 
 The split request contains `ownership_items`, the supervisor-parsed canonical
-parent ownership paths. Partition those EXACT items between the two children.
-Do not invent narrower files inside an owned directory and do not add prose to
-`owned_artifacts`.
+parent ownership paths. Partition those EXACT items between writing children, or
+use the explicitly defined progress-handoff exception above where child #1 owns
+`none` and child #2 owns all parent items. Do not invent narrower files inside
+an owned directory and do not add prose to `owned_artifacts`.
 
 For each proposal, serialize the assigned items in `owned_artifacts` using the
 exact canonical grammar: each path individually backticked, joined only by
@@ -101,10 +153,13 @@ the supervisor alone derives child IDs.
 
 ### Read-only verification child
 
-A split may legitimately need one writer plus one independent verifier,
-especially when the parent owns only one artifact.
+A split may legitimately need one writer plus one independent verifier ONLY
+when `decomposition_policy.verification_recovery_allowed` is true. A single
+owned artifact by itself is NOT a reason to use writer+tester; for runtime,
+progress, ownership, acquisition, or step-limit failures use the progress
+handoff -> writer shape above.
 
-In that case:
+In the verification-recovery case:
 - child #1 MUST use a writing role (`implementer`, `test-builder`, etc.) and
   own the applicable parent ownership items;
 - child #2 MAY use role `tester` with exact JSON string
