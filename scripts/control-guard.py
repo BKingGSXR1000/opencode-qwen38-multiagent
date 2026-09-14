@@ -5,6 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from state_io import atomic_write_text as state_atomic_write_text
 from leaf_contract import (
     WRITE_ROLES as SHARED_WRITE_ROLES,
     strict_owned_artifact_paths as shared_strict_owned_artifact_paths,
@@ -79,10 +80,7 @@ ALIASES = {
 }
 
 def atomic_write(path: Path, text: str):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    state_atomic_write_text(path,text)
 
 def final_nonempty_line(text: str) -> str:
     for line in reversed(text.splitlines()):
@@ -507,8 +505,11 @@ def validate_acceptance(project: Path, finalize=False):
             errors.append(
                 "internal Reference policy cannot require externally authoritative/reference truth"
             )
-        if not re.findall(r"\bA\d{3}\b", text):
-            errors.append("no Axxx acceptance IDs found")
+        must_ids=re.findall(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$",text)
+        if not must_ids:
+            errors.append("no machine-readable MUST lines; use exact '- [ ] A001: description'")
+        elif len(must_ids)!=len(set(must_ids)):
+            errors.append("duplicate machine-readable MUST Axxx IDs")
         if not reference_policy(text):
             errors.append("missing Reference policy: none|internal|external-required")
 

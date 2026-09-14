@@ -24,6 +24,7 @@ from worker_sandbox import (
     SandboxError as WorkerSandboxError,
     cleanup_session as worker_sandbox_cleanup_session,
     run_verify_bash as worker_sandbox_run_verify_bash,
+    commit_verify_outputs as worker_sandbox_commit_verify_outputs,
     session_used_sandbox as worker_session_used_sandbox,
     violation_path as worker_sandbox_violation_path,
 )
@@ -73,6 +74,8 @@ MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
 SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
 SPLIT_HANDOFF_VERIFY_SENTINEL="SUPERVISOR_HANDOFF_PROGRESS"
 SPLIT_HANDOFF_MARKER="HANDOFF_READY: true"
+RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
+ROOT_SESSION_PROTOCOL="v2-root-session-v1"
 MAX_SPLIT_HANDOFF_SCOPE_CHARS=1200
 SPLIT_HANDOFF_STAGE_RE=re.compile(
     r"(?:\([a-z]\)|\(\d+\)|\b(?:first|second|third|then|followed\s+by)\b)",
@@ -303,6 +306,14 @@ def split_status_path(did):
 
 def split_transaction_path(did):
     return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.split-transaction.json"
+
+def splitter_lock_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.splitter.lock"
+
+@contextlib.contextmanager
+def splitter_state_lock(did):
+    with exclusive_file_lock(splitter_lock_path(did),timeout=8.0):
+        yield
 
 def load_split_status(did):
     return load_json_object(
@@ -1019,61 +1030,34 @@ def process_split_proposal(did, session="", require_proposal=False):
 
 
 def claim_splitter(parent, dispatch_token):
-    """Lease one splitter; stale leases and malformed proposals have bounded recovery."""
+    """Cross-process lease one splitter for this exact dispatch token."""
     if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
         return False,"split-request-missing"
-    with dispatch_lock:
-        status=load_split_status(parent)
-        state=status.get("state","split-required")
-        claims=int(status.get("claim_count") or 0)
-        now=time.time()
-        if state=="splitter-active":
-            try:
-                lease_until=float(status.get("lease_until_epoch") or 0)
-            except (TypeError,ValueError):
-                lease_until=0
-            if lease_until > now:
-                return False,"splitter-active"
-            if claims >= MAX_SPLITTER_ATTEMPTS:
-                save_split_status(
-                    parent,"splitter-failed",
-                    claim_count=claims,
-                    reason="splitter lease expired and claim budget is exhausted",
-                    lease_until_epoch=0,
-                )
+    if not dispatch_token:
+        return False,"splitter-dispatch-token-missing"
+    with splitter_state_lock(parent):
+        with dispatch_lock:
+            status=load_split_status(parent)
+            state=status.get("state","split-required")
+            claims=int(status.get("claim_count") or 0)
+            now=time.time()
+            if state=="splitter-active":
+                try: lease_until=float(status.get("lease_until_epoch") or 0)
+                except (TypeError,ValueError): lease_until=0
+                if lease_until>now: return False,"splitter-active"
+                if claims>=MAX_SPLITTER_ATTEMPTS:
+                    save_split_status(parent,"splitter-failed",claim_count=claims,reason="splitter lease expired and claim budget is exhausted",lease_until_epoch=0)
+                    return False,"splitter-failed"
+                save_split_status(parent,"split-retryable",claim_count=claims,reason="splitter lease expired",lease_until_epoch=0)
+                state="split-retryable"
+            if state in {"split-validation-failed","splitter-failed","split-unavailable-read-only-parent","parent-finalize-failed"}: return False,state
+            if leaf_children(parent): return False,"already-split"
+            if claims>=MAX_SPLITTER_ATTEMPTS:
+                save_split_status(parent,"splitter-failed",claim_count=claims,reason="splitter claim budget exhausted",lease_until_epoch=0)
                 return False,"splitter-failed"
-            save_split_status(
-                parent,"split-retryable",
-                claim_count=claims,
-                reason="splitter lease expired",
-                lease_until_epoch=0,
-            )
-            state="split-retryable"
-
-        if state in {
-            "split-validation-failed","splitter-failed",
-            "split-unavailable-read-only-parent","parent-finalize-failed",
-        }:
-            return False,state
-        if leaf_children(parent):
-            return False,"already-split"
-        if claims >= MAX_SPLITTER_ATTEMPTS:
-            save_split_status(
-                parent,"splitter-failed",
-                claim_count=claims,
-                reason="splitter claim budget exhausted",
-                lease_until_epoch=0,
-            )
-            return False,"splitter-failed"
-
-        claims += 1
-        save_split_status(
-            parent,"splitter-active",
-            claim_count=claims,
-            dispatch_token=dispatch_token,
-            lease_until_epoch=now+SPLITTER_LEASE_SECONDS,
-        )
-    log(f"SPLITTER_CLAIM parent={parent} generation=1 token={dispatch_token} claim={claims}")
+            claims+=1
+            save_split_status(parent,"splitter-active",claim_count=claims,dispatch_token=dispatch_token,lease_until_epoch=now+SPLITTER_LEASE_SECONDS)
+    log(f"SPLITTER_CLAIM parent={parent} generation={load_split_status(parent).get('generation',1)} token={dispatch_token} claim={claims}")
     return True,"claimed"
 
 def parse_splitter_final_json(text):
@@ -1096,26 +1080,23 @@ def parse_splitter_final_json(text):
     return None
 
 
-def complete_splitter(parent, session=""):
-    """Completion callback: supervisor persists validated final JSON."""
-    if split_proposal_path(parent).exists():
-        return process_split_proposal(parent,session,require_proposal=True)
-    if not split_request_path(parent).exists():
+def complete_splitter(parent, session="", dispatch_token="", output_text=""):
+    """Accept completion only from the currently leased splitter token."""
+    with splitter_state_lock(parent):
         txn=load_split_transaction(parent)
-        if txn.get("state")=="committed":
-            return True,"accepted"
-        return False,"split-request-missing"
-    payload=parse_splitter_final_json(last_assistant_text_db(session)) if session else None
-    if not isinstance(payload,dict):
-        _,state=record_splitter_failure(
-            parent,"splitter-completed-without-json-proposal",
-            session=session,validation=False,
-        )
-        return False,state
-    atomic_write_json(split_proposal_path(parent),payload)
-    log(f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} session={session}")
-    return process_split_proposal(parent,session,require_proposal=True)
-
+        if txn.get("state")=="committed": return True,"accepted"
+        status=load_split_status(parent)
+        if status.get("state")!="splitter-active": return False,"stale-splitter-state"
+        if not dispatch_token or status.get("dispatch_token")!=dispatch_token:
+            return False,"stale-splitter-completion"
+        if not split_request_path(parent).exists(): return False,"split-request-missing"
+        payload=parse_splitter_final_json(output_text) if output_text else (parse_splitter_final_json(last_assistant_text_db(session)) if session else None)
+        if not isinstance(payload,dict):
+            _,state=record_splitter_failure(parent,"splitter-completed-without-json-proposal",session=session,validation=False)
+            return False,state
+        atomic_write_json(split_proposal_path(parent),payload)
+        log(f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} session={session} token={dispatch_token}")
+        return process_split_proposal(parent,session,require_proposal=True)
 
 def reconcile_split_proposals():
     """Crash recovery for prepared transactions and proposal/request state."""
@@ -1592,7 +1573,8 @@ def run_verify_fail_closed(command,runner=subprocess.run,session=""):
         if used_sandbox:
             try:
                 checked,mutations=worker_sandbox_run_verify_bash(
-                    Path(PROJECT),session,command,timeout=240
+                    Path(PROJECT),session,command,timeout=240,
+                    stage_test_report=(command==RUN_CHECKS_COMMAND),
                 )
             except WorkerSandboxError as exc:
                 return None,"verify-infrastructure-sandbox:"+str(exc)
@@ -2057,6 +2039,14 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
     if violations:
         clear_verify_wait(did)
         return False,"ownership-violation-after-verify:"+",".join(violations[:4])
+
+    if sid and command==RUN_CHECKS_COMMAND:
+        try:
+            if worker_session_used_sandbox(sid):
+                worker_sandbox_commit_verify_outputs(Path(PROJECT),sid)
+        except WorkerSandboxError as exc:
+            clear_verify_wait(did)
+            return False,"verify-report-commit-failed:"+str(exc)
 
     ok,detail=supervisor_finalize_ready(did)
     if ok:
@@ -3584,10 +3574,29 @@ root_nudged_messages=set()
 root_same_session_idle_since=None
 ROOT_SAME_SESSION_IDLE_GRACE=3.0
 
+def root_session_path(): return Path(PROJECT)/".opencode-v2"/"work"/"root-session.json"
+
+def record_root_session(sid):
+    if not PROJECT or not sid: return
+    atomic_write_json(root_session_path(),{"owner":"supervisor","protocol":ROOT_SESSION_PROTOCOL,"project":str(Path(PROJECT).resolve()),"session":sid,"updated_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())})
+
+def _valid_root_session(sid):
+    try:
+        con=db_connect(); row=con.execute("SELECT id FROM session_v2 WHERE id=? AND agent='orchestrator' AND directory=?",(sid,PROJECT)).fetchone(); con.close(); return bool(row)
+    except Exception: return False
+
 def root_orchestrator_id():
     if not PROJECT: return ""
     try:
-        con=db_connect(); row=con.execute("SELECT id FROM session_v2 WHERE agent='orchestrator' AND directory=? AND time_created>=? ORDER BY time_created DESC LIMIT 1",(PROJECT,START_MS)).fetchone(); con.close(); return row[0] if row else ""
+        con=db_connect(); row=con.execute("SELECT id FROM session_v2 WHERE agent='orchestrator' AND directory=? AND time_created>=? ORDER BY time_created DESC LIMIT 1",(PROJECT,START_MS)).fetchone(); con.close()
+        if row:
+            record_root_session(row[0]); return row[0]
+        data=load_json_object(root_session_path(),default_missing={},label="root session tracker")
+        sid=str(data.get("session") or "")
+        if data and (data.get("owner")!="supervisor" or data.get("protocol")!=ROOT_SESSION_PROTOCOL):
+            raise StateCorruptionError("root session tracker is invalid")
+        return sid if sid and _valid_root_session(sid) else ""
+    except StateCorruptionError: raise
     except Exception: return ""
 
 def root_rollover_path(): return Path(PROJECT)/".opencode-v2"/"root-rollovers.json"
@@ -3954,7 +3963,7 @@ def maybe_continue_root(active_sids,child_active):
     if not ok:
         log(f"ROOT_CONTINUATION_FAILED phase={phase} detail={detail}")
         root_idle_since=time.time(); return False
-    record_root_restart(detail,phase); root_idle_since=None
+    record_root_restart(detail,phase); record_root_session(detail); root_idle_since=None
     log(f"ROOT_CONTINUATION_STARTED session={detail} phase={phase}")
     csv("ROOT_CONTINUATION_STARTED",detail,"orchestrator",phase)
     return True
@@ -4660,6 +4669,7 @@ def main():
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
+    ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     args,unknown=ap.parse_known_args()
     if args.claim_dispatch:
         if unknown or not args.project or not args.agent or args.prompt is None:
@@ -4681,11 +4691,15 @@ def main():
         print(f"SPLIT_ALLOW parent={match.group(1)} generation=1")
         return
     if args.complete_splitter:
-        if unknown or not args.project:
-            raise SystemExit("splitter completion requires --project --complete-splitter")
+        if unknown or not args.project or not args.dispatch_token:
+            raise SystemExit("splitter completion requires --project --complete-splitter --dispatch-token")
         PROJECT=args.project
-        ok,detail=complete_splitter(args.complete_splitter,args.prompt or "")
+        try: output=base64.b64decode(args.splitter_output_b64 or "").decode("utf-8")
+        except Exception: raise SystemExit("SPLIT_FAILED invalid splitter output encoding")
+        ok,detail=complete_splitter(args.complete_splitter,args.prompt or "",args.dispatch_token,output)
         print(f"SPLIT_{'ACCEPTED' if ok else 'FAILED'} parent={args.complete_splitter} result={detail}")
+        if not ok: raise SystemExit(3)
+        return
         return
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} implementation_compactions=3 fourth_compaction=retire")
     threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()

@@ -36,6 +36,7 @@ EPHEMERAL_DIRS = (
 )
 EPHEMERAL_FILES = (".coverage",)
 SANDBOX_ROOT = Path.home() / ".local/share/v2-worker-sandbox"
+VERIFY_STAGE_ROOT = SANDBOX_ROOT / "verify-stage"
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # V2.6.9 BATCH9A CONCURRENT-SHADOW-GUARD
 # V2.6.16 RESOLVER-SNAPSHOT-WITH-HOST-IPC-ISOLATION
@@ -291,6 +292,20 @@ def path_is_owned(rel: str, declared):
     return False
 
 
+def assert_no_symlink_components(project: Path, rel: str):
+    """Ownership is lexical; filesystem aliases must not redirect it."""
+    base=project.resolve()
+    clean=_strip_dir_marker(rel).rstrip("/")
+    if not clean:
+        raise SandboxError("empty owned path")
+    current=base
+    for part in PurePosixPath(clean).parts:
+        current=current/part
+        if current.is_symlink():
+            raise SandboxError(f"owned/mutation path traverses symlink: {rel}")
+    return clean
+
+
 def path_is_ancestor(rel: str, declared):
     rel=rel.rstrip("/")
     prefix=rel+"/" if rel else ""
@@ -346,6 +361,13 @@ def authorize_paths(project: Path, ctx, paths, tool: str):
             raise SandboxError(
                 f"WORKER_FIREWALL_DENY {ctx['did']} {tool} path outside ownership: {rel}"
             )
+        try:
+            assert_no_symlink_components(project,rel)
+        except SandboxError:
+            record_violation(project,ctx,"direct-tool-symlink-ownership",{
+                "tool":tool,"path":rel,"owned":declared,
+            })
+            raise
     return normalized
 
 
@@ -405,10 +427,13 @@ def _copy_owned(src: Path, dst: Path, declared_dir: bool):
         shutil.copy2(src,dst)
 
 
-def build_shadow(project: Path, shadow: Path, declared, lower_root="/v2-lower"):
+def build_shadow(project: Path, shadow: Path, declared, lower_root="/v2-lower", enforce_no_symlink=True):
     project=project.resolve()
     shadow.mkdir(parents=True,exist_ok=True)
     declared=list(dict.fromkeys(declared))
+    if enforce_no_symlink:
+        for raw in declared:
+            assert_no_symlink_components(project,_strip_dir_marker(raw))
 
     def recurse(rel_dir: str):
         lower_dir=project/rel_dir if rel_dir else project
@@ -674,11 +699,42 @@ def merge_owned(project: Path, shadow: Path, declared):
     merged=[]
     for raw in declared:
         rel=_strip_dir_marker(raw)
+        assert_no_symlink_components(project,rel)
         src=shadow/rel
         dst=project/rel
         _replace_path(src,dst)
         merged.append(rel)
     return merged
+
+
+def _verify_stage_dir(session: str):
+    return VERIFY_STAGE_ROOT/_safe_session_token(session)
+
+def stage_verify_outputs(shadow: Path, session: str):
+    src=shadow/".opencode-v2/TEST_REPORT.json"
+    if not src.is_file() or src.is_symlink():
+        raise SandboxError("canonical run-checks Verify produced no regular TEST_REPORT.json")
+    try: data=json.loads(src.read_text())
+    except Exception as exc: raise SandboxError(f"staged TEST_REPORT.json is invalid: {exc}") from exc
+    if data.get("status")!="pass" or not isinstance(data.get("checks_run"),int) or data.get("checks_run",0)<=0:
+        raise SandboxError("staged TEST_REPORT.json is not a passing report")
+    stage=_verify_stage_dir(session)
+    if stage.exists(): shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    shutil.copy2(src,stage/"TEST_REPORT.json")
+    logs=shadow/".opencode-v2/test-logs"
+    if logs.is_dir() and not logs.is_symlink(): shutil.copytree(logs,stage/"test-logs",symlinks=False)
+
+def commit_verify_outputs(project: Path, session: str):
+    stage=_verify_stage_dir(session); report=stage/"TEST_REPORT.json"
+    if not report.is_file(): raise SandboxError(f"no staged Verify outputs for {session}")
+    target=project/".opencode-v2/TEST_REPORT.json"
+    target.parent.mkdir(parents=True,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix="."+target.name+".v2verify.",dir=str(target.parent)); os.close(fd)
+    shutil.copy2(report,tmp); os.replace(tmp,target)
+    logs=stage/"test-logs"
+    if logs.is_dir(): _replace_path(logs,project/".opencode-v2/test-logs")
+    return target
 
 
 def _resolver_snapshot_bwrap_args(run_dir: Path):
@@ -820,7 +876,7 @@ def _prepare_verify_shadow(project: Path, shadow: Path, lower_root: str):
         if child.is_dir() and not child.is_symlink():
             rel += "/"
         snapshot_paths.append(rel)
-    build_shadow(project,shadow,snapshot_paths,lower_root)
+    build_shadow(project,shadow,snapshot_paths,lower_root,enforce_no_symlink=False)
 
     for rel in EPHEMERAL_DIRS:
         path=shadow/rel
@@ -839,7 +895,7 @@ def _prepare_verify_shadow(project: Path, shadow: Path, lower_root: str):
     return shadow
 
 
-def run_verify_bash(project: Path, session: str, command: str, agent: str="", timeout=240):
+def run_verify_bash(project: Path, session: str, command: str, agent: str="", timeout=240, stage_test_report=False):
     """Run supervisor Verify with the worker's preserved ephemeral runtime."""
     if not shutil.which("bwrap"):
         raise SandboxError("bubblewrap (bwrap) is required for supervisor verification isolation")
@@ -900,10 +956,74 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
     ])
 
     proc=subprocess.run(args,text=True,timeout=timeout)
+    if proc.returncode==0 and stage_test_report:
+        stage_verify_outputs(shadow,session)
     # Verify writes are allowed inside this disposable snapshot. They never
     # merge back. Supervisor fingerprints before/after Verify still protect
     # the real project against any unexpected sandbox escape.
     return proc,[]
+
+
+def _copy_validator_browser_evidence(project: Path, shadow: Path, started_epoch: float):
+    evidence=shadow/".opencode-v2/browser-evidence.json"
+    if not evidence.is_file() or evidence.is_symlink():
+        raise SandboxError("acceptance-browser command produced no regular browser-evidence.json")
+    try: data=json.loads(evidence.read_text())
+    except Exception as exc: raise SandboxError(f"browser evidence JSON invalid: {exc}") from exc
+    raw=str(data.get("generated_at") or "")
+    try:
+        from datetime import datetime
+        ts=datetime.fromisoformat(raw.replace("Z","+00:00")).timestamp()
+    except Exception as exc:
+        raise SandboxError("browser evidence generated_at is invalid") from exc
+    if ts < started_epoch-5:
+        raise SandboxError("browser evidence is stale")
+    if not isinstance(data.get("url"),str) or not data.get("url"):
+        raise SandboxError("browser evidence URL missing")
+    ctrl=project/".opencode-v2"; ctrl.mkdir(parents=True,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix=".browser-evidence.",suffix=".tmp",dir=str(ctrl)); os.close(fd)
+    shutil.copy2(evidence,tmp); os.replace(tmp,ctrl/"browser-evidence.json")
+    def copy_shot(rel):
+        if not isinstance(rel,str) or not rel or rel.startswith(("/","~","./")) or ".." in PurePosixPath(rel).parts:
+            raise SandboxError(f"unsafe browser evidence screenshot path: {rel!r}")
+        if not rel.startswith(".opencode-v2/acceptance/"):
+            raise SandboxError(f"browser evidence screenshot outside acceptance directory: {rel!r}")
+        src=shadow/rel
+        if not src.is_file() or src.is_symlink():
+            raise SandboxError(f"browser evidence screenshot missing/non-regular: {rel}")
+        dst=project/rel; dst.parent.mkdir(parents=True,exist_ok=True); shutil.copy2(src,dst)
+    if data.get("screenshot"): copy_shot(data.get("screenshot"))
+    for item in data.get("canvas_evidence") or []:
+        rel=item.get("screenshot") if isinstance(item,dict) else None
+        if rel: copy_shot(rel)
+
+def run_validator_bash(project: Path, session: str, command: str, timeout=240):
+    """Run acceptance-validator shell in a disposable project snapshot.
+
+    All ordinary writes are discarded. If the trusted acceptance-browser helper
+    ran successfully, only its timestamped evidence/screenshots are copied back.
+    """
+    if not shutil.which("bwrap"):
+        raise SandboxError("bubblewrap (bwrap) is required for acceptance-validator shell isolation")
+    base=SANDBOX_ROOT/"validator"/_safe_session_token(session)
+    base.mkdir(parents=True,exist_ok=True)
+    run_dir=Path(tempfile.mkdtemp(prefix="cmd-",dir=base))
+    lower_alias=run_dir/"lower"; lower_alias.mkdir()
+    lower_root=str(lower_alias.resolve()); shadow=run_dir/"project"
+    _prepare_verify_shadow(project,shadow,lower_root)
+    resolver_args=_resolver_snapshot_bwrap_args(run_dir)
+    args=["bwrap","--die-with-parent","--new-session","--unshare-pid","--unshare-ipc","--ro-bind","/","/","--proc","/proc","--dev-bind","/dev","/dev","--tmpfs","/run"]
+    args.extend(resolver_args)
+    args.extend(["--unsetenv","DBUS_SYSTEM_BUS_ADDRESS","--unsetenv","DBUS_SESSION_BUS_ADDRESS","--unsetenv","XDG_RUNTIME_DIR","--tmpfs","/tmp","--ro-bind",str(project.resolve()),lower_root,"--bind",str(shadow),str(project.resolve()),"--tmpfs","/var/tmp","--chdir",str(project.resolve()),"--setenv","V2_ACCEPTANCE_SANDBOX","1","/bin/bash","-euo","pipefail","-c",command])
+    started=time.time(); proc=subprocess.run(args,text=True,timeout=timeout)
+    if proc.returncode==0 and "acceptance-browser.mjs" in command:
+        _copy_validator_browser_evidence(project,shadow,started)
+    return proc.returncode
+
+def replacement_validator_command(project: Path, session: str, command: str):
+    encoded=base64.b64encode(command.encode()).decode()
+    parts=["python3",str(Path(__file__).resolve()),"run-validator-bash","--project",str(project.resolve()),"--session",session,"--command-b64",encoded]
+    return " ".join(shell_quote(str(part)) for part in parts)
 
 
 def shell_quote(value: str):
@@ -929,6 +1049,23 @@ def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str,
             raise SandboxError(
                 f"WORKER_FIREWALL_CONTEXT_UNKNOWN cannot identify session for {tool}"
             )
+        if ctx.get("agent")=="acceptance-validator":
+            if tool=="execute":
+                raise SandboxError("ACCEPTANCE_FIREWALL_DENY execute/CodeMode is forbidden")
+            if tool in EDIT_TOOLS:
+                paths=mutation_paths(tool,args)
+                normalized=[_normalize_rel(project,x) for x in paths]
+                if normalized != [".opencode-v2/acceptance-report.json"]:
+                    raise SandboxError(
+                        "ACCEPTANCE_FIREWALL_DENY direct edits are limited to .opencode-v2/acceptance-report.json"
+                    )
+                assert_no_symlink_components(project,normalized[0])
+                return {"action":"pass","worker":False,"validator":True}
+            if tool in {"bash","shell"}:
+                command=args.get("command") if isinstance(args,dict) else None
+                if not isinstance(command,str) or not command.strip():
+                    raise SandboxError("acceptance-validator bash command missing")
+                return {"action":"replace-validator-bash","worker":False,"validator":True,"command":replacement_validator_command(project,ctx["session"],command)}
         return {"action":"pass","worker":False,"reason":ctx.get("reason","")}
     if tool=="execute":
         record_violation(project,ctx,"forbidden-code-mode",{"tool":tool})
@@ -952,11 +1089,13 @@ def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str,
 
 def cleanup_session(session: str):
     token=_safe_session_token(session)
-    for area in ("runs","scratch"):
+    for area in ("runs","scratch","validator"):
         path=SANDBOX_ROOT/area/token
         if path.exists():
             shutil.rmtree(path,ignore_errors=True)
     _runtime_state_path(session).unlink(missing_ok=True)
+    stage=_verify_stage_dir(session)
+    if stage.exists(): shutil.rmtree(stage,ignore_errors=True)
 
 
 def selftest(require_bwrap=False):
@@ -1014,6 +1153,20 @@ def selftest(require_bwrap=False):
             raise AssertionError("unowned edit was allowed")
         except SandboxError:
             pass
+
+        (project/"alias-target").mkdir()
+        (project/"alias").symlink_to(project/"alias-target",target_is_directory=True)
+        try:
+            assert_no_symlink_components(project,"alias/file.txt")
+            raise AssertionError("symlink ownership alias was allowed")
+        except SandboxError:
+            pass
+
+        # Verify snapshots the complete project and must preserve ordinary
+        # project symlinks without treating them as worker-owned mutation paths.
+        verify_shadow=Path(td)/"verify-symlink-shadow"
+        _prepare_verify_shadow(project,verify_shadow,"/v2-lower")
+        assert (verify_shadow/"alias").is_symlink(), "Verify snapshot lost ordinary project symlink"
 
         declared=owned_paths(ctx)
         shadow=Path(td)/"shadow"
@@ -1120,6 +1273,19 @@ def selftest(require_bwrap=False):
             assert mutations==[], mutations
             assert (project/"src/owned.txt").read_text()=="shell-ok\n"
             assert not (project/"verify-only.tmp").exists()
+
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "mkdir -p .opencode-v2/test-logs; "
+                "printf '{\"status\":\"pass\",\"checks_run\":1}' > .opencode-v2/TEST_REPORT.json; "
+                "printf 'ok\n' > .opencode-v2/test-logs/01.log",
+                stage_test_report=True,
+            )
+            assert checked.returncode==0 and mutations==[], (checked.returncode,mutations)
+            assert not (project/".opencode-v2/TEST_REPORT.json").exists()
+            commit_verify_outputs(project,"ses_test")
+            assert (project/".opencode-v2/TEST_REPORT.json").is_file()
+            (project/".opencode-v2/TEST_REPORT.json").unlink()
 
             # Batch 14A: /tmp persists across shell calls for this session,
             # is visible to preserved-environment Verify, and remains isolated
@@ -1239,6 +1405,11 @@ def main():
     b.add_argument("--agent",default="")
     b.add_argument("--command-b64",required=True)
 
+    v=sub.add_parser("run-validator-bash")
+    v.add_argument("--project",required=True)
+    v.add_argument("--session",required=True)
+    v.add_argument("--command-b64",required=True)
+
     c=sub.add_parser("cleanup")
     c.add_argument("--session",required=True)
 
@@ -1272,6 +1443,13 @@ def main():
             if not ctx.get("worker"):
                 raise SandboxError("run-bash session is not a current implementation worker")
             return run_bash(project,ctx,command)
+        except SandboxError as exc:
+            print(str(exc),file=sys.stderr)
+            return 73
+    if ns.cmd=="run-validator-bash":
+        try:
+            command=base64.b64decode(ns.command_b64).decode()
+            return run_validator_bash(project,ns.session,command)
         except SandboxError as exc:
             print(str(exc),file=sys.stderr)
             return 73

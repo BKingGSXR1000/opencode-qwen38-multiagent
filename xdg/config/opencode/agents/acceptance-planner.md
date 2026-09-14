@@ -34,7 +34,7 @@ Required structure:
 - short Original Goal
 - exactly one plain line:
   `Reference policy: none|internal|external-required`
-- specific Axxx MUST checks
+- specific MUST checks using exact machine-readable lines `- [ ] A001: description` (Axxx only; unique IDs)
 - optional SHOULD checks
 - Evidence Strategy explaining how MUSTs can be verified
 

@@ -56,7 +56,16 @@ SUPERVISOR_RESERVED_EXACT = frozenset({
 
 def supervisor_reserved_owned_path(path: str):
     p=(path or "").rstrip("/")
-    return any(p.startswith(prefix) for prefix in SUPERVISOR_RESERVED_PREFIXES) or p in SUPERVISOR_RESERVED_EXACT
+    if not p:
+        return False
+    roots=tuple(prefix.rstrip("/") for prefix in SUPERVISOR_RESERVED_PREFIXES)
+    reserved=roots+tuple(SUPERVISOR_RESERVED_EXACT)
+    # Reject the reserved path itself, descendants, and an owned directory that
+    # would recursively contain any reserved control path (e.g. .opencode-v2/).
+    return any(
+        p==item or p.startswith(item+"/") or item.startswith(p+"/")
+        for item in reserved
+    )
 
 def strict_owned_artifact_paths(raw: str):
     if not isinstance(raw,str): return [],"Owned artifacts must be a string"
@@ -93,7 +102,7 @@ def validate_verify_command(verify_command: str):
     if not command:
         errors.append("missing Verify command")
         return errors
-    if command in NON_VERIFYING_COMMANDS:
+    if command.lower() in NON_VERIFYING_COMMANDS:
         errors.append("Verify command is non-verifying")
     try:
         tokens=_shell_tokens(command)

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-import argparse,json,os,re,shlex,stat,subprocess,sys,time
-from pathlib import Path
+import argparse,json,os,re,shlex,stat,subprocess,sys,tempfile,time
+from pathlib import Path, PurePosixPath
 from control_state import IMPLEMENTATION_PLAN_SCAFFOLD
+from leaf_contract import validate_verify_command
+from state_io import atomic_write_text
 
 HARNESS_ROOT=Path(__file__).resolve().parents[1]
 RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
@@ -14,11 +16,9 @@ TEST_CHECKS_SCHEMA={
     "required":["checks"],
     "properties":{
         "checks":{
-            "type":"array",
-            "minItems":1,
+            "type":"array","minItems":1,
             "items":{
-                "type":"object",
-                "additionalProperties":False,
+                "type":"object","additionalProperties":False,
                 "required":["name","command"],
                 "properties":{
                     "name":{"type":"string","minLength":1},
@@ -27,21 +27,14 @@ TEST_CHECKS_SCHEMA={
                 },
             },
         },
-        "required_files":{
-            "type":"array",
-            "items":{"type":"string","minLength":1},
-        },
+        "required_files":{"type":"array","items":{"type":"string","minLength":1}},
     },
 }
 
-def atomic_write(path,text):
-    path.parent.mkdir(parents=True,exist_ok=True)
-    tmp=path.with_suffix(path.suffix+".tmp"); tmp.write_text(text); os.replace(tmp,path)
-
+def atomic_write(path,text): atomic_write_text(path,text)
 def slug(s): return re.sub(r"[^A-Za-z0-9._-]+","-",s).strip("-") or "check"
 
 def validate_schema(value,schema,path="manifest"):
-    """Small validator for the schema features used by this public contract."""
     kind=schema.get("type")
     if kind=="object":
         if not isinstance(value,dict): raise ValueError(f"{path} must be an object")
@@ -70,9 +63,20 @@ def validate_schema(value,schema,path="manifest"):
     raise ValueError(f"unsupported schema type for {path}: {kind!r}")
 
 def validate_test_checks(spec):
-    """Validate from the same schema emitted into CONTROL_CONTRACT.md."""
     validate_schema(spec,TEST_CHECKS_SCHEMA)
     return spec["checks"],spec.get("required_files",[])
+
+def validate_required_file(project: Path, raw: str):
+    raw=str(raw or "").strip()
+    p=PurePosixPath(raw)
+    if not raw or p.is_absolute() or raw.startswith(("./","~")) or "\\" in raw:
+        raise ValueError(f"required_files entry must be a canonical project-relative path: {raw!r}")
+    if any(part in ("",".","..") for part in p.parts):
+        raise ValueError(f"required_files entry escapes/is not canonical: {raw!r}")
+    target=(project/Path(*p.parts)).resolve(strict=False)
+    try: target.relative_to(project.resolve())
+    except ValueError: raise ValueError(f"required_files entry resolves outside project: {raw!r}")
+    return target
 
 def control_contract_text():
     schema=json.dumps(TEST_CHECKS_SCHEMA,indent=2,sort_keys=True)
@@ -92,45 +96,32 @@ running any command:
 {schema}
 ```
 
-Use one `checks[]` entry per intended test command. Run it with the exact
-project-local command `{RUN_CHECKS_COMMAND}`. Implementation workers do not
-create readiness sentinels and do not invoke a leaf-completion command. After
-the worker returns, the supervisor re-runs the exact leaf Verify command and
-alone mints `.opencode-v2/work/Dxxx.ready`. Never inspect the wrapper or harness
-source merely to infer this contract. Do not create a probe deliverable to
-discover this schema and do not guess or substitute a fallback manifest format.
+Every `checks[].command` is also validated by the same fail-closed Verify-command
+policy used by implementation leaves and is executed with `bash -euo pipefail`.
+Commands that mask failure (`||`, `set +e`, forced `exit 0`, non-verifying
+commands) are rejected. Every `required_files[]` path must be canonical,
+project-relative, and resolve inside the project.
+
+Run the manifest with exact project-local command `{RUN_CHECKS_COMMAND}`.
+Implementation workers do not create readiness sentinels and do not invoke a
+leaf-completion command. After the worker returns, the supervisor re-runs the
+exact leaf Verify command and alone mints `.opencode-v2/work/Dxxx.ready`.
 
 ## Filesystem control protocol
 
 - Bootstrap creates `.opencode-v2/IMPLEMENTATION_PLAN.md` as an explicitly
-  incomplete scaffold before implementation planning. Planners progressively
-  fill that same file; an untouched scaffold has no completion marker and can
-  never qualify for `IMPLEMENTATION_PLAN.ready`.
+  incomplete scaffold before implementation planning.
 - The deterministic control guard alone creates `.opencode-v2/ACCEPTANCE.ready`
-  and `.opencode-v2/IMPLEMENTATION_PLAN.ready`; agents never create, modify, or
-  request either sentinel.
-- A leaf is complete only after the supervisor has re-run its exact Verify
-  command, checked ownership, and minted `.opencode-v2/work/Dxxx.ready`.
-  Agents never create, modify, request, or emulate leaf-ready sentinels.
-- The supervisor alone owns `.opencode-v2/work/attempts.json`; an exact Dxxx has
-  at most three automatic implementation attempts. A pre-dispatch denial has
-  no claim. At most one supervisor-recorded OpenCode compaction-template
-  failure with no owned/progress artifact may receive a separately auditable
-  recovery slot. Only a human running the trusted external
-  `./scripts/operator-control.py --project <project> retry-failed` (or `retry
-  Dxxx ...`) can record one additional auditable attempt; agents never invoke or
-  emulate that command. A human grant is reserved before child launch and is
-  consumed only after durable state or a completed worker tool action. One proven zero-work runtime
-  cancellation releases that same reservation without decrementing historical
-  dispatch count; a repeated cancellation is execution-blocked infrastructure
-  until a human explicitly acts. Never edit, repair, or create alternative/salvage IDs.
-  New ledgers identify this stable schema as `v2-attempt-ledger-v1`; legacy
-  `V2.6.7` is a historical ledger label, not the active harness release.
-- `.opencode-v2/work/Dxxx.progress.md` is the durable retry handoff. Read it
-  when present before re-deriving work.
-- `.opencode-v2/TEST_REPORT.json` with `status=pass` and `checks_run > 0` is the
-  required final-test evidence. The only success verdict is exact bare
-`ACCEPTANCE_PASS`.
+  and `.opencode-v2/IMPLEMENTATION_PLAN.ready`.
+- A leaf is complete only after supervisor verification and supervisor-owned
+  readiness creation.
+- The supervisor alone owns `.opencode-v2/work/attempts.json` and all other
+  `.opencode-v2/work/` and `.opencode-v2/bin/` control state.
+- `.opencode-v2/work/Dxxx.progress.md` is the durable retry handoff.
+- `.opencode-v2/TEST_REPORT.json` with `status=pass`, internally consistent
+  successful check results, and `checks_run > 0` is required final-test evidence.
+- Final acceptance is not a model token alone: deterministic finalization must
+  mint a hash-bound `.opencode-v2/acceptance-pass.json`.
 """
 
 def wrapper_text(target,args):
@@ -138,35 +129,70 @@ def wrapper_text(target,args):
     return "#!/usr/bin/env bash\nset -Eeuo pipefail\n" + f"exec {quoted} \"$@\"\n"
 
 def bootstrap_control_surface(project):
-    """Generate project-local delegates to the canonical harness implementation."""
     ctrl=project/".opencode-v2"
     atomic_write(ctrl/"CONTROL_CONTRACT.md",control_contract_text())
-    # The planner always starts from durable, explicitly incomplete state.  Do
-    # not overwrite a partial plan on a later bootstrap/restart.
     plan=ctrl/"IMPLEMENTATION_PLAN.md"
     if not plan.exists(): atomic_write(plan,IMPLEMENTATION_PLAN_SCAFFOLD)
     wrappers={
-        ctrl/"bin"/"run-checks":wrapper_text(
-            sys.executable,(HARNESS_ROOT/"scripts"/"run-checks.py","--project",project)
-        ),
-        ctrl/"bin"/"control-status":wrapper_text(
-            sys.executable,(HARNESS_ROOT/"scripts"/"control-status.py","--project",project)
-        ),
+        ctrl/"bin"/"run-checks":wrapper_text(sys.executable,(HARNESS_ROOT/"scripts"/"run-checks.py","--project",project)),
+        ctrl/"bin"/"control-status":wrapper_text(sys.executable,(HARNESS_ROOT/"scripts"/"control-status.py","--project",project)),
     }
-    legacy_leaf_complete=ctrl/"bin"/"leaf-complete"
-    legacy_leaf_complete.unlink(missing_ok=True)
+    (ctrl/"bin"/"leaf-complete").unlink(missing_ok=True)
     for path,text in wrappers.items():
-        atomic_write(path,text)
-        path.chmod(path.stat().st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)
+        atomic_write(path,text); path.chmod(path.stat().st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)
     return wrappers
+
+def run_checks(project: Path):
+    ctrl=project/".opencode-v2"; spec_path=ctrl/"TEST_CHECKS.json"; report_path=ctrl/"TEST_REPORT.json"; logs=ctrl/"test-logs"
+    if not spec_path.exists(): raise ValueError("TEST_CHECKS.json missing")
+    try: spec=json.loads(spec_path.read_text()); checks,required=validate_test_checks(spec)
+    except (ValueError,json.JSONDecodeError) as e: raise ValueError(f"invalid TEST_CHECKS.json: {e}")
+    required_targets=[]
+    for raw in required: required_targets.append((raw,validate_required_file(project,raw)))
+    missing=[raw for raw,target in required_targets if not target.exists()]
+    results=[]; logs.mkdir(parents=True,exist_ok=True)
+    for i,ch in enumerate(checks,1):
+        name=ch["name"].strip(); cmd=ch["command"].strip(); timeout=ch.get("timeout_seconds",180)
+        start=time.time(); timed_out=False; unsafe=validate_verify_command(cmd)
+        if unsafe:
+            rc=125; stdout=""; stderr="unsafe test command: "+"; ".join(unsafe)
+        else:
+            try:
+                p=subprocess.run(["/bin/bash","-euo","pipefail","-c",cmd],cwd=project,text=True,capture_output=True,timeout=timeout)
+                rc=p.returncode; stdout=p.stdout or ""; stderr=p.stderr or ""
+            except subprocess.TimeoutExpired as e:
+                rc=124; stdout=e.stdout or ""; stderr=e.stderr or ""; timed_out=True
+        log=logs/f"{i:02d}-{slug(name)}.log"
+        atomic_write(log,f"$ {cmd}\nexit={rc} timeout={timed_out}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
+        results.append({"name":name,"command":cmd,"exit_code":rc,"timed_out":timed_out,"duration_seconds":round(time.time()-start,3),"log":str(log.relative_to(project))})
+    passed=not missing and all(x["exit_code"]==0 and not x["timed_out"] for x in results)
+    report={"protocol":"v2-test-report-v1","status":"pass" if passed else "fail","checks_run":len(results),"checks_passed":sum(1 for x in results if x["exit_code"]==0 and not x["timed_out"]),"missing_required_files":missing,"checks":results}
+    atomic_write(report_path,json.dumps(report,indent=2,sort_keys=True)+"\n")
+    return report, 0 if passed else 1
+
+def selftest():
+    with tempfile.TemporaryDirectory() as td:
+        project=Path(td); (project/".opencode-v2").mkdir()
+        (project/"ok.txt").write_text("ok\n")
+        for bad in ("../etc/passwd","/etc/passwd","./ok.txt"):
+            try: validate_required_file(project,bad); raise AssertionError(bad)
+            except ValueError: pass
+        (project/".opencode-v2/TEST_CHECKS.json").write_text(json.dumps({"checks":[{"name":"masked","command":"false; true"}],"required_files":["ok.txt"]}))
+        report,rc=run_checks(project)
+        assert rc!=0 and report["status"]=="fail" and report["checks"][0]["exit_code"]!=0, report
+        (project/".opencode-v2/TEST_CHECKS.json").write_text(json.dumps({"checks":[{"name":"ok","command":"test -s ok.txt"}],"required_files":["ok.txt"]}))
+        report,rc=run_checks(project)
+        assert rc==0 and report["checks_passed"]==1, report
+    print("run-checks selftest: OK")
 
 def main():
     ap=argparse.ArgumentParser(); ap.add_argument("--project",default=".")
     ap.add_argument("--bootstrap-control-contract",action="store_true")
     ap.add_argument("--print-test-checks-schema",action="store_true")
+    ap.add_argument("--selftest",action="store_true")
     args=ap.parse_args()
-    if args.print_test_checks_schema:
-        print(json.dumps(TEST_CHECKS_SCHEMA,indent=2,sort_keys=True)); return
+    if args.selftest: selftest(); return
+    if args.print_test_checks_schema: print(json.dumps(TEST_CHECKS_SCHEMA,indent=2,sort_keys=True)); return
     project=Path(args.project).resolve(); ctrl=project/".opencode-v2"
     if args.bootstrap_control_contract:
         wrappers=bootstrap_control_surface(project)
@@ -174,24 +200,7 @@ def main():
         print(f"IMPLEMENTATION_PLAN_SCAFFOLD_READY {ctrl/'IMPLEMENTATION_PLAN.md'}")
         for path in wrappers: print(f"CONTROL_COMMAND_READY {path}")
         return
-    spec_path=ctrl/"TEST_CHECKS.json"; report_path=ctrl/"TEST_REPORT.json"; logs=ctrl/"test-logs"
-    if not spec_path.exists(): raise SystemExit("ERROR: TEST_CHECKS.json missing")
-    try: spec=json.loads(spec_path.read_text()); checks,required=validate_test_checks(spec)
-    except (ValueError,json.JSONDecodeError) as e: raise SystemExit(f"ERROR: invalid TEST_CHECKS.json: {e}")
-    missing=[p for p in required if not (project/p).exists()]
-    results=[]; logs.mkdir(parents=True,exist_ok=True)
-    for i,ch in enumerate(checks,1):
-        name=ch["name"].strip(); cmd=ch["command"].strip(); timeout=ch.get("timeout_seconds",180)
-        start=time.time(); timed_out=False
-        try:
-            p=subprocess.run(cmd,cwd=project,shell=True,executable="/bin/bash",text=True,capture_output=True,timeout=timeout)
-            rc=p.returncode; stdout=p.stdout or ""; stderr=p.stderr or ""
-        except subprocess.TimeoutExpired as e:
-            rc=124; stdout=e.stdout or ""; stderr=e.stderr or ""; timed_out=True
-        log=logs/f"{i:02d}-{slug(name)}.log"
-        log.write_text(f"$ {cmd}\nexit={rc} timeout={timed_out}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
-        results.append({"name":name,"command":cmd,"exit_code":rc,"timed_out":timed_out,"duration_seconds":round(time.time()-start,3),"log":str(log.relative_to(project))})
-    passed=not missing and all(x["exit_code"]==0 for x in results)
-    report={"protocol":"V2.6.7","status":"pass" if passed else "fail","checks_run":len(results),"checks_passed":sum(1 for x in results if x["exit_code"]==0),"missing_required_files":missing,"checks":results}
-    atomic_write(report_path,json.dumps(report,indent=2)+"\n"); print(json.dumps(report,indent=2)); raise SystemExit(0 if passed else 1)
+    try: report,rc=run_checks(project)
+    except ValueError as e: raise SystemExit(f"ERROR: {e}")
+    print(json.dumps(report,indent=2)); raise SystemExit(rc)
 if __name__=="__main__": main()

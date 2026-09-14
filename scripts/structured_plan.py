@@ -9,6 +9,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from state_io import atomic_write_text as state_atomic_write_text, atomic_write_json as state_atomic_write_json
 
 PROTOCOL = "v2-structured-plan-v1"
 REPAIR_PROTOCOL = "v2-structured-plan-repair-v1"
@@ -51,13 +52,10 @@ HOST_REMEDIATION_RE = re.compile(
 )
 
 def atomic_write_text(path: Path, text: str):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name("." + path.name + ".tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    state_atomic_write_text(path,text)
 
 def atomic_write_json(path: Path, obj):
-    atomic_write_text(path, json.dumps(obj, indent=2, sort_keys=True) + "\n")
+    state_atomic_write_json(path,obj)
 
 def canonical_owned(paths: list[str]) -> str:
     if not paths:

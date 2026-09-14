@@ -7,8 +7,7 @@ permission:
   read: allow
   edit:
     "*": deny
-    ".opencode-v2/**": allow
-    ".opencode-v2/bin/*": deny
+    ".opencode-v2/acceptance-report.json": allow
   glob: allow
   grep: allow
   list: allow
@@ -35,6 +34,29 @@ Read:
 
 Validate every MUST Axxx exactly as written.
 Never weaken a MUST to match an implementation fallback.
+
+Before returning, write exactly one `.opencode-v2/acceptance-report.json` with:
+```json
+{
+  "protocol": "v2-acceptance-report-v1",
+  "result": "PASS",
+  "checks": [
+    {
+      "id": "A001",
+      "status": "PASS",
+      "evidence": "concise concrete evidence",
+      "required_executable": true,
+      "command": "exact command when executable evidence is required",
+      "exit_code": 0
+    }
+  ]
+}
+```
+Use one check for every and only the exact MUST Axxx IDs. For non-executable
+evidence omit `required_executable`, `command`, and `exit_code`. Set top-level
+`result` to `FAIL` if any MUST fails. Do not write any other control file.
+The plugin runs a deterministic finalizer after your exact PASS token; your token
+alone can never create final acceptance.
 For every required executable validation, record the exact command and exit code
 in `.opencode-v2/acceptance-report.json`. A non-zero required check is a FAIL.
 You may correct an objectively contract-contradictory check and rerun it, but

@@ -73,21 +73,28 @@ function positiveInt(value) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-function messageText(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((item) => {
-    if (typeof item === "string") return item;
-    if (!item || typeof item !== "object") return "";
-    if (typeof item.text === "string") return item.text;
-    if (typeof item.content === "string") return item.content;
-    return "";
-  }).join("\n");
+function messageText(value, depth = 0) {
+  // Provider adapters are allowed to nest text under content/parts/input_text
+  // objects. New34 proved that inspecting only string/array `message.content`
+  // can miss a real OpenCode v1.18.19 compaction request and incorrectly leave
+  // the orchestrator's 2048-token role cap in force. Flatten only the messages
+  // tree recursively; the anchored-summary markers below still provide the
+  // semantic discriminator.
+  if (depth > 16 || value == null) return "";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => messageText(item, depth + 1)).filter(Boolean).join("\n");
+  }
+  if (typeof value !== "object") return "";
+  return Object.values(value)
+    .map((item) => messageText(item, depth + 1))
+    .filter(Boolean)
+    .join("\n");
 }
 
 function detectPurpose(j) {
   const messages = Array.isArray(j.messages) ? j.messages : [];
-  const text = messages.map((m) => messageText(m?.content)).join("\n");
+  const text = messageText(messages);
   const anchored =
     text.includes("Create a new anchored summary") ||
     text.includes("Update the anchored summary") ||
@@ -175,10 +182,39 @@ function runSelfTest() {
   const normal = {
     messages: [{ role: "user", content: "Read control-status.json and continue.\n## Goal\n## Progress\n## Relevant Files" }],
   };
+  // New34 production regression: the compaction Started row was durable but
+  // the immediately-following provider request was classified as normal and
+  // inherited v2_max_tokens=2048. The prompt can arrive under provider-specific
+  // nested message objects; recursive extraction must still identify it.
+  const nestedCompaction = {
+    messages: [{
+      role: "user",
+      content: {
+        parts: [{ type: "input_text", payload: { text: [
+          "Here is the conversation so far:",
+          "<conversation>",
+          "assistant: prior work",
+          "</conversation>",
+          "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
+          "## Objective",
+          "## Work State",
+          "## Relevant Files",
+        ].join("\n") } }],
+      },
+    }],
+    tools: [{}, {}],
+    v2_max_tokens: 2048,
+  };
   if (detectPurpose(current) !== "compaction") throw new Error("current compaction prompt not detected");
   if (detectPurpose(update) !== "compaction") throw new Error("update compaction prompt not detected");
   if (detectPurpose(legacy) !== "compaction") throw new Error("legacy compaction prompt not detected");
   if (detectPurpose(normal) !== "normal") throw new Error("normal request misclassified as compaction");
+  if (detectPurpose(nestedCompaction) !== "compaction") throw new Error("nested compaction request not detected");
+  const nestedCapped = JSON.parse(JSON.stringify(nestedCompaction));
+  const nestedResult = enforceGenerationCap(nestedCapped, "off", detectPurpose(nestedCapped));
+  if (nestedResult.cap !== COMPACTION_GENERATION_CAP || nestedResult.source !== "compaction-purpose") {
+    throw new Error("nested compaction did not override inherited role cap");
+  }
   const capped = JSON.parse(JSON.stringify(current));
   const result = enforceGenerationCap(capped, "off", detectPurpose(capped));
   if (result.cap !== COMPACTION_GENERATION_CAP || result.source !== "compaction-purpose") {

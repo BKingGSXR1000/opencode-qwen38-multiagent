@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -6,6 +6,7 @@ export const HARD_MAX_CHILD_RESULT_CHARS = 2500;
 export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 
 const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/worker_sandbox.py";
+const FINALIZE_ACCEPTANCE = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/finalize-acceptance.py";
 // V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 const MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "multiedit", "bash", "shell", "execute"]);
 
@@ -62,7 +63,7 @@ function guardWorkerMutation(directory, event, output) {
   } catch {
     throw new Error(`WORKER_FIREWALL_DENY invalid guard response for ${tool}`);
   }
-  if (decision?.action === "replace-bash") {
+  if (decision?.action === "replace-bash" || decision?.action === "replace-validator-bash") {
     if (typeof decision.command !== "string" || !decision.command) {
       throw new Error("WORKER_FIREWALL_DENY missing sandbox command");
     }
@@ -108,17 +109,6 @@ export function proposalFromOutput(output, parent, directory) {
   }
 }
 
-export function materializeSplitterProposal(directory, parent, output) {
-  const path = join(directory, ".opencode-v2", "work", `${parent}.split-proposal.json`);
-  if (existsSync(path)) return true;
-  const proposal = proposalFromOutput(output, parent, directory);
-  if (!proposal) return false;
-  const temp = `${path}.tmp`;
-  writeFileSync(temp, `${JSON.stringify(proposal, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-  renameSync(temp, path);
-  return true;
-}
-
 function fileStatus(path) {
   try {
     return existsSync(path) ? "present" : "absent";
@@ -155,9 +145,6 @@ function ownedArtifacts(directory, did) {
 }
 
 export function boundedChildResult({ directory, args = {}, metadata = {}, original = "" }) {
-  if (args?.agent === "acceptance-validator" && /(?:^|\n)\s*ACCEPTANCE_PASS\s*(?:\n|<\/subagent>)/.test(original)) {
-    return "ACCEPTANCE_PASS";
-  }
   const did = exactDeliverable(args);
   const childSessionID = metadata?.sessionID || "unknown";
   const readyPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
@@ -198,6 +185,9 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     const args = hookArgs(event, output);
     const agent = args.agent;
     const prompt = args.prompt;
+    if (agent === "acceptance-validator") {
+      execFileSync("python3", [FINALIZE_ACCEPTANCE, "--prepare", directory], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    }
     if (agent === "task-splitter") {
       const parent = splitParent(args);
       if (!parent) throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
@@ -226,20 +216,32 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       // supervisor reads only the splitter's durable proposal and records an
       // explicit failure if it is absent or invalid; no root cycle is needed.
       const session = String(result.metadata?.sessionID || "");
+      const token = hookCallID(event);
+      const encoded = Buffer.from(String(result.output || ""), "utf8").toString("base64");
       try {
-        materializeSplitterProposal(directory, splitterParent, result.output || "");
-        supervisor(directory, ["--complete-splitter", splitterParent, "--prompt", session]);
+        supervisor(directory, ["--complete-splitter", splitterParent, "--prompt", session, "--dispatch-token", token, "--splitter-output-b64", encoded]);
       } catch {
-        // The supervisor has the durable preclaim/status and will surface a
-        // finite failure rather than making the parent-visible receipt trusted.
+        // Status/lease state is durable; stale or invalid completions cannot commit.
       }
     }
-    const receipt = boundedChildResult({
-      directory,
-      args,
-      metadata: result.metadata,
-      original: result.output || "",
-    });
+    let receipt;
+    if (args?.agent === "acceptance-validator") {
+      const raw = String(result.output || "").trim();
+      const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
+      if (!modelPass) {
+        receipt = "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS";
+      } else {
+        try {
+          execFileSync("python3", [FINALIZE_ACCEPTANCE, directory], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+          receipt = "ACCEPTANCE_PASS";
+        } catch (error) {
+          const detail = String(error?.stderr || error?.message || error).trim().replace(/\s+/g, " ").slice(0, 1200);
+          receipt = `ACCEPTANCE_FAIL\nDETERMINISTIC_GATE: ${detail || "failed"}`;
+        }
+      }
+    } else {
+      receipt = boundedChildResult({ directory, args, metadata: result.metadata, original: result.output || "" });
+    }
     // The beta constructs the parent-visible tool response from `content`.
     // Updating `output` alone only changed hook metadata, not the text the root
     // receives, so replace both representations with the same bounded receipt.

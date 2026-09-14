@@ -299,8 +299,9 @@ control files, relaunch a splitter for an existing split generation, or
 redispatch a ready Dxxx.
 
 WORKER COMPLETION
-Workers finish through:
-`.opencode-v2/bin/leaf-complete Dxxx`
+Implementation workers return normally after durable work. The external supervisor
+re-runs Verify and alone creates `.opencode-v2/work/Dxxx.ready`; workers never
+invoke a leaf-completion command.
 
 REFERENCE VALIDATION COMPLETION
 After `.opencode-v2/TEST_REPORT.json` exists with status=pass and before the
@@ -322,8 +323,10 @@ Require `.opencode-v2/TEST_REPORT.json` with:
 - status=pass
 - checks_run > 0
 
-Then run a fresh acceptance-validator.
-Only exact ACCEPTANCE_PASS means success. On success, your entire final response
+Then run a fresh acceptance-validator. The task plugin clears stale validator
+outputs before launch and runs `finalize-acceptance.py` after an exact model PASS.
+Only the exact parent-visible ACCEPTANCE_PASS returned after that deterministic
+hash-bound gate means success. On success, your entire final response
 MUST be the exact bare text ACCEPTANCE_PASS, with no Markdown, emoji, heading,
 prefix, suffix, or other prose. On failure, your first line MUST be the exact
 bare token ACCEPTANCE_FAIL, followed only by concise failure evidence.

@@ -4,6 +4,7 @@
 This module deliberately derives every value from the authoritative artifacts.
 It does not write readiness, attempts, or test state.
 """
+import hashlib
 import json
 from pathlib import Path
 from state_io import StateCorruptionError, load_json_object
@@ -496,13 +497,33 @@ def planner_restarts(project):
 
 
 def test_state(project):
-    data=load_json_object(
-        Path(project) / ".opencode-v2" / "TEST_REPORT.json",
-        default_missing={},
-        label="test report",
+    data=load_json_object(Path(project)/".opencode-v2"/"TEST_REPORT.json",default_missing={},label="test report")
+    checks=data.get("checks")
+    run=data.get("checks_run"); passed_count=data.get("checks_passed"); missing=data.get("missing_required_files")
+    complete=bool(
+        data.get("status")=="pass" and isinstance(run,int) and not isinstance(run,bool) and run>0
+        and isinstance(passed_count,int) and not isinstance(passed_count,bool) and passed_count==run
+        and isinstance(missing,list) and not missing and isinstance(checks,list) and len(checks)==run
+        and all(isinstance(item,dict) and item.get("exit_code")==0 and item.get("timed_out") is False for item in checks)
     )
-    passed = data.get("status") == "pass" and isinstance(data.get("checks_run"), int) and data["checks_run"] > 0
-    return {"complete": passed, "status": data.get("status"), "checks_run": data.get("checks_run", 0)}
+    return {"complete":complete,"status":data.get("status"),"checks_run":run or 0,"checks_passed":passed_count or 0}
+
+def acceptance_pass_valid(project):
+    root=Path(project)/".opencode-v2"; path=root/"acceptance-pass.json"
+    if not path.exists(): return False
+    try:
+        data=load_json_object(path,label="acceptance pass")
+        if data.get("protocol")!="v2-acceptance-pass-v1" or data.get("result")!="PASS": return False
+        pairs=(("acceptance_sha256",root/"ACCEPTANCE.md"),("report_sha256",root/"acceptance-report.json"),("test_report_sha256",root/"TEST_REPORT.json"))
+        for key,p in pairs:
+            if not p.is_file() or hashlib.sha256(p.read_bytes()).hexdigest()!=data.get(key): return False
+        browser_hash=str(data.get("browser_evidence_sha256") or "")
+        if browser_hash:
+            bp=root/"browser-evidence.json"
+            if not bp.is_file() or hashlib.sha256(bp.read_bytes()).hexdigest()!=browser_hash: return False
+        return True
+    except Exception:
+        return False
 
 
 def verify_wait_info(project,did):
@@ -662,7 +683,7 @@ def snapshot(project):
         "execution_blockers": execution_blockers,
         "tests": tests,
         "acceptance_validation": {
-            "complete": (project / ".opencode-v2" / "acceptance-pass.json").exists()
+            "complete": acceptance_pass_valid(project)
         },
     }
     state["resume_phase"] = resume_phase(state)
