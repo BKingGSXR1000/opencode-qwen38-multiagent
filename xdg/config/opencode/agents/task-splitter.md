@@ -56,7 +56,23 @@ names, flags, paths, constants, or other requirements in it. Preserve those
 obligations when choosing the two bounded scopes; splitting is recovery, not
 permission to weaken or rewrite the parent contract. The supervisor will also
 place the inherited Outcome verbatim into each child scope and it wins over any
-contradictory child-decomposition prose. Child ownership sets must be disjoint,
+contradictory child-decomposition prose.
+
+### Parent Verify contradiction recovery
+
+The parent `Verify command` is executable evidence, not permission to weaken the
+parent's Outcome, Acceptance IDs, or Done-when obligation. If the parent Verify
+command itself appears inconsistent with those higher-level obligations (for
+example a numeric range in Verify contradicts the Done-when range), make child
+#2 a read-only `tester` whenever the ownership partition permits it. That tester
+must independently verify the FULL inherited parent semantics using a corrected,
+safe command derived from the parent contract. Do not copy the known-bad literal
+merely to make the child fail in the same way. The supervisor may use such an
+already-READY read-only tester as a narrowly-scoped recovery verifier only after
+the original parent Verify fails; it will re-run the tester command itself before
+creating parent readiness.
+
+Child ownership sets must be disjoint,
 together cover the parent's owned artifacts, and stay inside parent ownership.
 The supervisor reads your final JSON from OpenCode's session database, validates
 it, and persists the durable split itself. You must NOT write split-proposal.json.

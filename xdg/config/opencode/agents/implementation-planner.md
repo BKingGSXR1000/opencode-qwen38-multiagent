@@ -81,6 +81,15 @@ A Verify command is a machine contract. Do not invent arbitrary numeric gates.
 - Never use a guessed file-size threshold as a proxy for validity.
 - When a later leaf depends on a probe for an unknown property, do not freeze a
   contradictory guessed value before that probe runs.
+- Before finalizing each leaf, cross-check every literal bound, enum, unit, and
+  expected value in `Verify command` against that leaf's Outcome, Acceptance IDs,
+  and Done-when text. The Verify command is evidence for the semantic contract;
+  it must not introduce a narrower, wider, renamed, or unit-converted requirement
+  that contradicts the contract. If a value is converted between units, compute
+  the conversion consistently and state one source of truth in Outcome/Done-when.
+- Never write `Done when: ... and the Verify command exits 0` as if the command
+  text itself were a product requirement. State the semantic success conditions;
+  the separate Verify field is only the executable proof mechanism.
 
 Every S/M implementation leaf must be operationally bounded:
 - design normal execution to finish in <=10 minutes;

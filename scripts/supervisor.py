@@ -1662,8 +1662,13 @@ def supervisor_finalize_ready(did):
     except Exception as exc:
         return False,f"ready-write-error-{type(exc).__name__}"
 
-def post_session_finalize(did,sid="",runner=subprocess.run):
-    """Fail-closed finalization after artifacts, ownership, deps, and Verify pass."""
+def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_override=""):
+    """Fail-closed finalization after artifacts, ownership, deps, and Verify pass.
+
+    A non-empty verify_command_override is reserved for supervisor-owned split-
+    parent recovery. All normal artifact, dependency, ownership, mutation, and
+    ready-provenance checks still run; only the executable Verify command changes.
+    """
     leaf=(load_manifest().get("leaves") or {}).get(did)
     if not leaf or ready_info(did):
         clear_verify_wait(did)
@@ -1695,7 +1700,7 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
         persist_verify_wait(did,sid,missing)
         return False,"verify-deps-pending:"+",".join(missing)
 
-    command=(leaf.get("verify_command") or "").strip()
+    command=(verify_command_override or leaf.get("verify_command") or "").strip()
     command_errors=validate_verify_command(command)
     if command_errors:
         clear_verify_wait(did)
@@ -1730,6 +1735,47 @@ def post_session_finalize(did,sid="",runner=subprocess.run):
 
 # V2.6.9 GAMETESTNEW6 SPLIT-PARENT FINALIZATION BEGIN
 _split_parent_finalize_next = {}
+
+
+def split_parent_recovery_tester(parent,children,leaves):
+    """Return one strict read-only child verifier eligible to recover parent Verify.
+
+    This is intentionally narrow. Splitter prose may not authorize readiness. A
+    fallback candidate must be a supervisor-validated tester child that inherited
+    the parent's semantic contract exactly, owns nothing, depends on a sibling,
+    is already READY, and uses a different safe Verify command. The command is
+    re-run by the supervisor before parent readiness can be created.
+    """
+    parent_leaf=leaves.get(parent)
+    if not isinstance(parent_leaf,dict) or not isinstance(children,list) or len(children)!=2:
+        return ""
+    parent_outcome=str(parent_leaf.get("outcome") or "")
+    parent_acceptance=tuple(sorted(parent_leaf.get("acceptance_ids") or []))
+    parent_verify=str(parent_leaf.get("verify_command") or "").strip()
+    candidates=[]
+    for child_id in children:
+        child=leaves.get(child_id)
+        if not isinstance(child,dict):
+            continue
+        if child.get("parent")!=parent or child.get("role")!="tester":
+            continue
+        if owned_artifact_paths(child):
+            continue
+        if str(child.get("outcome") or "")!=parent_outcome:
+            continue
+        if tuple(sorted(child.get("acceptance_ids") or []))!=parent_acceptance:
+            continue
+        siblings=[item for item in children if item!=child_id]
+        launch_deps=child.get("launch_deps") or []
+        if not siblings or siblings[0] not in launch_deps:
+            continue
+        command=str(child.get("verify_command") or "").strip()
+        if not command or command==parent_verify or validate_verify_command(command):
+            continue
+        if not ready_info(child_id):
+            continue
+        candidates.append(child_id)
+    return candidates[0] if len(candidates)==1 else ""
 
 
 def reconcile_split_parent_completions():
@@ -1768,6 +1814,30 @@ def reconcile_split_parent_completions():
         verify_wait_log_state.pop(did,None)
 
         ok,detail=post_session_finalize(did)
+        original_detail=detail
+        recovery_child=""
+        recovery_command=""
+        if not ok and detail.startswith("verify-failed-"):
+            recovery_child=split_parent_recovery_tester(did,children,leaves)
+            if recovery_child:
+                recovery_command=str(
+                    (leaves.get(recovery_child) or {}).get("verify_command") or ""
+                ).strip()
+                recovered,recovery_detail=post_session_finalize(
+                    did,verify_command_override=recovery_command
+                )
+                log(
+                    f"SPLIT_PARENT_VERIFY_RECOVERY parent={did} "
+                    f"tester={recovery_child} original={detail} "
+                    f"recovery={recovery_detail}"
+                )
+                csv(
+                    "SPLIT_PARENT_VERIFY_RECOVERY","","supervisor",
+                    f"{did} tester={recovery_child} original={detail} "
+                    f"recovery={recovery_detail}",
+                )
+                ok,detail=recovered,recovery_detail
+
         log(
             f"SPLIT_PARENT_FINALIZE parent={did} "
             f"children={','.join(children)} result={detail}"
@@ -1778,12 +1848,21 @@ def reconcile_split_parent_completions():
         )
         if ok:
             _split_parent_finalize_next.pop(did,None)
-            save_split_status(
-                did,"accepted",
-                children=children,
-                parent_finalize_failures=0,
-                parent_finalize_last_result="finalized",
-            )
+            accepted_detail={
+                "children":children,
+                "parent_finalize_failures":0,
+                "parent_finalize_last_result":"finalized",
+            }
+            if recovery_child:
+                accepted_detail.update({
+                    "parent_finalize_mode":"split-readonly-verifier-recovery",
+                    "parent_verify_original_result":original_detail,
+                    "parent_verify_recovery_child":recovery_child,
+                    "parent_verify_recovery_command_sha256":hashlib.sha256(
+                        recovery_command.encode("utf-8")
+                    ).hexdigest(),
+                })
+            save_split_status(did,"accepted",**accepted_detail)
             continue
 
         failures=int(status.get("parent_finalize_failures") or 0)+1
