@@ -11,6 +11,7 @@ const LOG =
 const VALID_EFFORTS = new Set(["low", "medium", "high"]);
 const MODE = "v2-role-aware-bounded-v1";
 const GLOBAL_GENERATION_CEILING = 12288;
+const COMPACTION_GENERATION_CAP = 8192;
 const FALLBACK_GENERATION_CAPS = Object.freeze({
   off: 4096,
   low: 5120,
@@ -72,15 +73,54 @@ function positiveInt(value) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-function enforceGenerationCap(j, policy) {
+function messageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((item) => {
+    if (typeof item === "string") return item;
+    if (!item || typeof item !== "object") return "";
+    if (typeof item.text === "string") return item.text;
+    if (typeof item.content === "string") return item.content;
+    return "";
+  }).join("\n");
+}
+
+function detectPurpose(j) {
+  const messages = Array.isArray(j.messages) ? j.messages : [];
+  const text = messages.map((m) => messageText(m?.content)).join("\n");
+  const anchored =
+    text.includes("Create a new anchored summary from the conversation history") ||
+    text.includes("Update the anchored summary below using the conversation history") ||
+    text.includes("Here is the summary of the conversation before the <conversation>");
+  const structure =
+    text.includes("<conversation>") &&
+    text.includes("## Objective") &&
+    text.includes("## Work State") &&
+    text.includes("## Relevant Files");
+  return anchored && structure ? "compaction" : "normal";
+}
+
+function enforceGenerationCap(j, policy, purpose) {
   const roleCap = positiveInt(j.v2_max_tokens);
   delete j.v2_max_tokens;
 
-  const fallback = FALLBACK_GENERATION_CAPS[policy] || FALLBACK_GENERATION_CAPS.unchanged;
-  const configured = roleCap || fallback;
-  const existing = [positiveInt(j.max_tokens), positiveInt(j.max_completion_tokens)]
-    .filter((x) => x !== null);
-  const cap = Math.min(configured, GLOBAL_GENERATION_CEILING, ...existing);
+  let cap;
+  let source;
+  if (purpose === "compaction") {
+    // OpenCode beta's compaction request currently arrives without max_tokens.
+    // New31 proved that the normal non-thinking 4096 clamp can truncate a
+    // legitimate anchored summary and detach the visible parent session. Give
+    // only recognized compaction prompts a larger, still-hard bounded budget.
+    cap = Math.min(COMPACTION_GENERATION_CAP, GLOBAL_GENERATION_CEILING);
+    source = "compaction-purpose";
+  } else {
+    const fallback = FALLBACK_GENERATION_CAPS[policy] || FALLBACK_GENERATION_CAPS.unchanged;
+    const configured = roleCap || fallback;
+    const existing = [positiveInt(j.max_tokens), positiveInt(j.max_completion_tokens)]
+      .filter((x) => x !== null);
+    cap = Math.min(configured, GLOBAL_GENERATION_CEILING, ...existing);
+    source = roleCap ? "role-marker" : "fallback";
+  }
 
   // vLLM's OpenAI-compatible chat endpoint consumes max_tokens. Avoid sending
   // a null/duplicate max_completion_tokens alongside it.
@@ -90,7 +130,7 @@ function enforceGenerationCap(j, policy) {
   } else {
     j.max_completion_tokens = cap;
   }
-  return { cap, source: roleCap ? "role-marker" : "fallback" };
+  return { cap, source };
 }
 
 const server = http.createServer((req, res) => {
@@ -109,6 +149,7 @@ const server = http.createServer((req, res) => {
           "explicit reasoning_effort low/medium/high > enable_thinking=false",
         hard_thinking_budget: THINKING_BUDGETS,
         hard_generation_ceiling: GLOBAL_GENERATION_CEILING,
+        compaction_generation_cap: COMPACTION_GENERATION_CAP,
         fallback_generation_caps: FALLBACK_GENERATION_CAPS,
       })
     );
@@ -184,13 +225,15 @@ const server = http.createServer((req, res) => {
         }
 
         j.chat_template_kwargs = ctk;
-        const generation = enforceGenerationCap(j, policy);
+        const purpose = detectPurpose(j);
+        const generation = enforceGenerationCap(j, policy, purpose);
 
         const after = meta(j);
 
         log({
           kind: "request",
           policy,
+          purpose,
           generation,
           before,
           after,
