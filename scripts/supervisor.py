@@ -73,8 +73,14 @@ MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
 SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
 SPLIT_HANDOFF_VERIFY_SENTINEL="SUPERVISOR_HANDOFF_PROGRESS"
 SPLIT_HANDOFF_MARKER="HANDOFF_READY: true"
+MAX_SPLIT_HANDOFF_SCOPE_CHARS=1200
+SPLIT_HANDOFF_STAGE_RE=re.compile(
+    r"(?:\([a-z]\)|\(\d+\)|\b(?:first|second|third|then|followed\s+by)\b)",
+    re.I,
+)
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
+state_blocker_exempt_active_seen=set()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 verify_wait_log_state={}
 backend_sampler=BackendTelemetrySampler(ROOT)
@@ -184,8 +190,16 @@ def recursive_split_enabled():
     return load_manifest().get("recursive_split_protocol") == RECURSIVE_SPLIT_PROTOCOL
 
 def leaf_automatic_limit(did):
-    """Two real attempts lead to a split until the terminal split depth."""
+    """Two real attempts lead to a split except for minimum-unit handoffs.
+
+    Progress-only handoff children have no owned artifact that can be
+    partitioned again. Treat them like terminal leaves: three genuine attempts
+    are available, but they never manufacture a futile recursive split edge.
+    """
     if recursive_split_enabled() and split_depth(did) >= 0:
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        if isinstance(leaf,dict) and leaf.get("split_handoff_only"):
+            return AUTOMATIC_ATTEMPT_LIMIT
         return 3 if split_depth(did) >= MAX_SPLIT_DEPTH else 2
     return AUTOMATIC_ATTEMPT_LIMIT
 
@@ -581,10 +595,13 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
     if handoff_only:
         handoff_text=(
             "\n## Progress-only handoff protocol — supervisor enforced\n\n"
-            "This child is deliberately smaller than the failed parent. Do NOT "
-            "create or modify any project artifact and do NOT attempt the final "
-            "parent output. Perform only the bounded discovery/acquisition/diagnosis "
-            "described in Child scope. Record reusable results in "
+            "This child is an explicit exception to the inherited parent-output "
+            "obligation above. The parent outcome remains binding for eventual "
+            "parent collapse, but THIS child must NOT create or modify the final "
+            "project artifact or attempt the final parent output. Its complete "
+            "deliverable is only the bounded discovery/acquisition/diagnosis in "
+            "Child scope plus the durable progress handoff below. Record reusable "
+            "results in "
             f"`.opencode-v2/work/{child_id}.progress.md` using all of these exact "
             "labels:\n\n"
             "`HANDOFF_READY: true`\n\n"
@@ -784,6 +801,17 @@ def validate_split_proposal(parent, proposals, request=None):
                 )
             if sibling:
                 raise ValueError("progress-only probe must be first and independent")
+            scope=proposal["scope"].strip()
+            if len(scope)>MAX_SPLIT_HANDOFF_SCOPE_CHARS:
+                raise ValueError(
+                    "progress-only probe scope is too large: "
+                    f"{len(scope)} chars > {MAX_SPLIT_HANDOFF_SCOPE_CHARS}"
+                )
+            if len(SPLIT_HANDOFF_STAGE_RE.findall(scope))>1:
+                raise ValueError(
+                    "progress-only probe scope is compound; isolate one bounded "
+                    "discovery/acquisition/diagnosis stage"
+                )
         else:
             contract_errors=validate_leaf_contract(role, owned_list, proposal["verify_command"])
             if contract_errors:
@@ -1157,10 +1185,13 @@ def record_leaf_failure(did, reason, classification="genuine"):
                     1 for x in history
                     if isinstance(x,dict) and x.get("classification")=="genuine"
                 )
+                leaf=(load_manifest().get("leaves") or {}).get(did,{})
+                handoff_only=isinstance(leaf,dict) and bool(leaf.get("split_handoff_only"))
                 if (
                     recursive_split_enabled()
                     and genuine>=2
                     and split_depth(did)<MAX_SPLIT_DEPTH
+                    and not handoff_only
                 ):
                     marker=entry.get("split_required")
                     if not isinstance(marker,dict):
@@ -1184,6 +1215,16 @@ def retryable_unmaterialized_dispatch_entry(entry):
     """Use the canonical attempt projection for bounded zero-work replays."""
     return bool(attempt_state(entry).get("unmaterialized_dispatch_reusable"))
 
+
+def note_state_blocker_exempt_active(did,reason):
+    key=(str(did),str(reason or ""))
+    if key in state_blocker_exempt_active_seen:
+        return
+    state_blocker_exempt_active_seen.add(key)
+    log(
+        f"STATE_BLOCKER_EXEMPT_ACTIVE deliverable={key[0]} "
+        f"reason={key[1]}"
+    )
 
 def normalized_state_snapshot(project):
     data=state_snapshot(project)
@@ -1231,10 +1272,7 @@ def normalized_state_snapshot(project):
         # New13 regression: control_state emitted attempt_limit_reached for
         # leaves whose own canonical flag was false (often attempts=0).
         if did in active_ids:
-            log(
-                f"STATE_BLOCKER_EXEMPT_ACTIVE deliverable={did} "
-                f"reason={item.get('reason','')}"
-            )
+            note_state_blocker_exempt_active(did,item.get("reason",""))
             continue
         if item.get("reason")=="attempt_limit_reached" and not leaf.get("attempt_limit_reached",False):
             log(
@@ -1851,17 +1889,57 @@ def ownership_violations(did,sid=""):
             continue
         violations.append(path)
     return violations
+def persisted_completed_tool_turns(sid):
+    """Count persisted assistant turns that completed at least one tool action.
+
+    Polling can miss fast tool transitions. New32 executed dozens of probe tools
+    while the old edge-based counter remained below its limit. The session DB is
+    the durable source of truth and survives compaction/restart.
+    """
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq",
+            (sid,),
+        ).fetchall(); con.close()
+    except Exception:
+        return 0
+    turns=0
+    for (raw,) in rows:
+        try:
+            data=json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        content=data.get("content") if isinstance(data,dict) else []
+        if not isinstance(content,list):
+            continue
+        completed=False
+        for part in content:
+            if not isinstance(part,dict) or part.get("type")!="tool":
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            if state.get("status") and state.get("status")!="running":
+                completed=True; break
+        if completed:
+            turns+=1
+    return turns
+
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
     """Stop probe read/research loops before their finite OpenCode step budget."""
     if agent!="probe-builder" or not did: return ""
     now=time.monotonic() if now is None else now
     signature=durable_progress_signature(agent,did)
-    state=worker_progress.setdefault(sid,{"signature":signature,"turns":0,"last_tool":""})
+    persisted_turns=persisted_completed_tool_turns(sid)
+    state=worker_progress.setdefault(
+        sid,{"signature":signature,"baseline_turns":0,"turns":persisted_turns}
+    )
     if signature!=state["signature"]:
-        state.update(signature=signature,turns=0,last_tool=tool_id or "")
+        state.update(
+            signature=signature,baseline_turns=persisted_turns,turns=0
+        )
         return ""
-    if tool_id and tool_id!=state.get("last_tool"):
-        state["last_tool"]=tool_id; state["turns"]+=1
+    state["turns"]=max(0,persisted_turns-int(state.get("baseline_turns") or 0))
     if state["turns"]>=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS:
         return ("probe_research_loop_no_owned_progress "
                 f"tool_turns={state['turns']} limit={PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS}")
@@ -2183,19 +2261,35 @@ def record_compaction_infrastructure_failure(sid,did):
     """Compatibility wrapper for a failed beta compaction template."""
     return record_infrastructure_abort(sid,did,"opencode-compaction-template","opencode-compaction-template")
 
-def compaction_failure(sid):
-    """Return the terminal beta compaction failure type, if any."""
+def latest_compaction_state(sid):
+    """Return the newest compaction row including its terminal status.
+
+    OpenCode creates the row before the summary request finishes, then updates
+    the SAME row to completed/failed. Therefore row count alone is not a safe
+    transition key.
+    """
     try:
         con=db_connect()
         row=con.execute(
-            "SELECT data FROM session_message WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1",
+            "SELECT seq,data FROM session_message "
+            "WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1",
             (sid,),
         ).fetchone(); con.close()
-        data=json.loads(row[0]) if row else {}
+        if not row:
+            return {"seq":0,"status":"","error_type":""}
+        data=json.loads(row[1]) if row[1] else {}
         error=data.get("error") if isinstance(data.get("error"),dict) else {}
-        return error.get("type") if data.get("status")=="failed" else ""
+        return {
+            "seq":int(row[0] or 0),
+            "status":str(data.get("status") or ""),
+            "error_type":str(error.get("type") or ""),
+        }
     except Exception:
-        return ""
+        return {"seq":0,"status":"","error_type":""}
+
+def compaction_failure(sid):
+    state=latest_compaction_state(sid)
+    return state["error_type"] if state.get("status")=="failed" else ""
 
 def durable_progress_signature(agent,did=""):
     paths=[]
@@ -4307,7 +4401,12 @@ def reconcile_idle_implementation_session(sid,agent):
     cached_abort=supervisor_abort_reasons.get(sid,"")
     durable_abort=persisted_abort_reason(sid)
     supervisor_abort=cached_abort or durable_abort
-    infrastructure_reason=abort_reason or supervisor_abort
+    compaction_abort=(
+        "opencode-compaction-template"
+        if compaction_failure(sid)=="compaction.failed"
+        else ""
+    )
+    infrastructure_reason=abort_reason or supervisor_abort or compaction_abort
 
     if infrastructure_reason and not ready_info(did):
         finalized=False
@@ -4429,8 +4528,18 @@ def reconcile_idle_implementation_session(sid,agent):
 
 
 def reconcile_compaction_event(sid,agent,comps):
-    prev=compaction_seen.get(sid,0)
-    if comps<=prev:
+    latest=latest_compaction_state(sid)
+    status=latest.get("status","")
+    seq=int(latest.get("seq") or 0)
+    error_type=latest.get("error_type","")
+    # Do not mark a newly-created/running compaction as seen. OpenCode updates
+    # the same DB row in place; New32 showed that count-only tracking can log an
+    # in-flight row as ALLOWED and then permanently miss its failed terminal
+    # update.
+    if not seq or status not in {"completed","failed"}:
+        return
+    transition=(seq,status,error_type)
+    if compaction_seen.get(sid)==transition:
         return
     did,_=session_task.get(
         sid,(parse_deliverable(first_user_text_db(sid)),0)
@@ -4440,15 +4549,15 @@ def reconcile_compaction_event(sid,agent,comps):
             f"COMPACTION_AFTER_DONE session={sid} agent={agent} "
             f"deliverable={did} compactions={comps}"
         )
-        compaction_seen[sid]=comps
+        compaction_seen[sid]=transition
         return
     if agent=="implementation-planner" and plan_ready():
         log(
             f"COMPACTION_AFTER_DONE session={sid} agent={agent} control_ready=1"
         )
-        compaction_seen[sid]=comps
+        compaction_seen[sid]=transition
         return
-    failed=compaction_failure(sid)
+    failed=error_type if status=="failed" else ""
     if failed:
         granted,detail=(False,"not-implementation-child")
         if failed=="compaction.failed" and did and agent in IMPLEMENTATION_AGENTS:
@@ -4467,7 +4576,7 @@ def reconcile_compaction_event(sid,agent,comps):
             f"{did or 'unknown'} type={failed} "
             f"infrastructure_credit={str(granted).lower()} detail={detail}"
         )
-        compaction_seen[sid]=comps
+        compaction_seen[sid]=transition
         return
 
     compaction_limit=(
@@ -4500,7 +4609,7 @@ def reconcile_compaction_event(sid,agent,comps):
             f"compactions={comps} limit={compaction_limit}"
         )
     # Seen only after the durable/logical transition succeeded.
-    compaction_seen[sid]=comps
+    compaction_seen[sid]=transition
 
 
 def persisted_reconcile_loop():
@@ -4536,9 +4645,12 @@ def persisted_reconcile_loop():
                     enforce_assignment(sid,agent,prompt)
                 if agent=="implementation-planner" and time_idle:
                     reconcile_planner_completion(sid)
+                # Compaction terminal state must be classified before an idle
+                # implementation session. Otherwise a failed compaction can be
+                # misrecorded as a genuine leaf failure.
+                reconcile_compaction_event(sid,agent,comps)
                 if agent in IMPLEMENTATION_AGENTS and time_idle:
                     reconcile_idle_implementation_session(sid,agent)
-                reconcile_compaction_event(sid,agent,comps)
         except Exception as e: log(f"PERSISTED_RECONCILE_ERROR {e!r}")
         time.sleep(0.5)
 

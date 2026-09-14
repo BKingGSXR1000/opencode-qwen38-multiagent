@@ -104,11 +104,15 @@ For child #1 emit exactly:
 - `"depends_on_sibling": ""`
 - `"verify_command": "SUPERVISOR_HANDOFF_PROGRESS"`
 
-Its scope must be a SMALL bounded stage such as one API-contract probe, one
-acquisition/format discovery, one reproducible failure diagnosis, or one set of
-concrete values the final writer needs. It must NOT attempt the final parent
-artifact. The supervisor replaces the sentinel with a safe Verify command and
-requires the worker's own progress file to contain:
+Its scope must be ONE SMALL bounded stage such as one API-contract probe, one
+acquisition/format discovery, one reproducible failure diagnosis, or one small
+set of concrete values the final writer needs. It must NOT attempt the final
+parent artifact. Keep the scope <=1200 characters and do not encode multiple
+numbered/ordered stages such as `(1) ... (2) ...`. A query matrix across many
+targets/times is not one probe merely because it uses one API. The supervisor
+deterministically rejects oversized/compound progress-handoff scopes. The
+supervisor replaces the sentinel with a safe Verify command and requires the
+worker's own progress file to contain:
 
 - `HANDOFF_READY: true`
 - `Findings:`

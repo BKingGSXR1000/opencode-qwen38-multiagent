@@ -89,15 +89,25 @@ function detectPurpose(j) {
   const messages = Array.isArray(j.messages) ? j.messages : [];
   const text = messages.map((m) => messageText(m?.content)).join("\n");
   const anchored =
-    text.includes("Create a new anchored summary from the conversation history") ||
-    text.includes("Update the anchored summary below using the conversation history") ||
+    text.includes("Create a new anchored summary") ||
+    text.includes("Update the anchored summary") ||
     text.includes("Here is the summary of the conversation before the <conversation>");
-  const structure =
-    text.includes("<conversation>") &&
+  const envelope = text.includes("<conversation>") && text.includes("</conversation>");
+  // OpenCode changed its anchored-summary template from Objective/Work State
+  // to Goal/Progress. Accept both known template families while still
+  // requiring the anchored-summary instruction + conversation envelope, so a
+  // normal coding turn that merely mentions one heading is not reclassified.
+  const legacyStructure =
     text.includes("## Objective") &&
     text.includes("## Work State") &&
     text.includes("## Relevant Files");
-  return anchored && structure ? "compaction" : "normal";
+  const currentStructure =
+    text.includes("## Goal") &&
+    text.includes("## Progress") &&
+    text.includes("## Relevant Files");
+  return anchored && envelope && (legacyStructure || currentStructure)
+    ? "compaction"
+    : "normal";
 }
 
 function enforceGenerationCap(j, policy, purpose) {
@@ -131,6 +141,55 @@ function enforceGenerationCap(j, policy, purpose) {
     j.max_completion_tokens = cap;
   }
   return { cap, source };
+}
+
+function runSelfTest() {
+  const current = {
+    messages: [{ role: "user", content: [
+      "Here is the conversation so far:",
+      "<conversation>",
+      "user: task",
+      "</conversation>",
+      "Create a new anchored summary from the conversation history in the <conversation> tags above so another coding agent can continue the work.",
+      "## Goal",
+      "## Progress",
+      "## Relevant Files",
+    ].join("\n") }],
+    v2_max_tokens: 2048,
+  };
+  const update = {
+    messages: [{ role: "user", content: [
+      "<conversation>", "recent", "</conversation>",
+      "Here is the summary of the conversation before the <conversation> above:",
+      "Update the anchored summary below using the conversation history above.",
+      "## Goal", "## Progress", "## Relevant Files",
+    ].join("\n") }],
+  };
+  const legacy = {
+    messages: [{ role: "user", content: [
+      "<conversation>", "old", "</conversation>",
+      "Create a new anchored summary from the conversation history.",
+      "## Objective", "## Work State", "## Relevant Files",
+    ].join("\n") }],
+  };
+  const normal = {
+    messages: [{ role: "user", content: "Read control-status.json and continue.\n## Goal\n## Progress\n## Relevant Files" }],
+  };
+  if (detectPurpose(current) !== "compaction") throw new Error("current compaction prompt not detected");
+  if (detectPurpose(update) !== "compaction") throw new Error("update compaction prompt not detected");
+  if (detectPurpose(legacy) !== "compaction") throw new Error("legacy compaction prompt not detected");
+  if (detectPurpose(normal) !== "normal") throw new Error("normal request misclassified as compaction");
+  const capped = JSON.parse(JSON.stringify(current));
+  const result = enforceGenerationCap(capped, "off", detectPurpose(capped));
+  if (result.cap !== COMPACTION_GENERATION_CAP || result.source !== "compaction-purpose") {
+    throw new Error(`compaction cap mismatch: ${JSON.stringify(result)}`);
+  }
+  console.log("v2-wire-proxy selftest: OK");
+}
+
+if (process.env.V2_PROXY_SELFTEST === "1") {
+  runSelfTest();
+  process.exit(0);
 }
 
 const server = http.createServer((req, res) => {

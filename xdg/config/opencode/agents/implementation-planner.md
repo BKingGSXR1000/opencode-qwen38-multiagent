@@ -149,9 +149,13 @@ hard maximum of 26 so the rendered machine plan remains inside protocol size.
 Hard ceilings:
 - S: <=2 owned artifact paths, <=2 Acceptance IDs, <=4 repeated operations.
 - M: <=3 owned artifact paths, <=4 Acceptance IDs, <=6 repeated operations.
+- `probe-builder` leaves MUST be complexity S. External discovery/acquisition
+  that exceeds S must be multiple bounded probe artifacts followed by a writer.
 
-`repeated_operations` is the truthful maximum count of substantially similar
-remote/tool operations expected in the leaf. Never under-count it to pass.
+`repeated_operations` counts INDIVIDUAL remote/tool operations, not conceptual
+categories. Example: querying 7 object IDs at 4 epochs is at least 28 operations,
+not one "vector-query" operation. Count Cartesian target/time combinations and
+separate observer/event/acquisition families too. Never under-count it to pass.
 
 Split before execution when work has multiple independently useful stages,
 multiple durable outputs, coarse-search + refinement, acquisition + assembly,

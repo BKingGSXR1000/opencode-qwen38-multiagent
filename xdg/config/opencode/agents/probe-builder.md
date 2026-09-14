@@ -126,7 +126,11 @@ patterns.
 
 The required probe artifact is more important than exhaustive investigation.
 
-- By tool turn 4 at the latest, WRITE/UPDATE the required primary owned probe
+- For a supervisor-created **progress-only handoff** (`Owned artifacts: none`),
+  `.opencode-v2/work/Dxxx.progress.md` IS the primary durable probe artifact.
+  Write/update it by tool turn 4 with partial Findings/Evidence/Next step; do not
+  postpone that write until every remote query succeeds.
+- Otherwise, by tool turn 4 at the latest, WRITE/UPDATE the required primary owned probe
   artifact with every fact known so far, even if some entries are still marked
   unknown.
 - After the primary artifact exists, use remaining turns only for facts needed

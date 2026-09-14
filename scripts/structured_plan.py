@@ -247,6 +247,12 @@ def normalize_document(raw):
                     errors.append({"key":key,"code":"dangling-dependency","message":f"{key}: {fld} references unknown key {dep!r}"})
 
         c=leaf["complexity"]
+        if leaf["role"]=="probe-builder" and c!="S":
+            errors.append({
+                "key":key,
+                "code":"probe-size",
+                "message":f"{key}: probe-builder leaves must be complexity S; split external discovery/acquisition into bounded probes and a downstream writer",
+            })
         if c in TASK_SHAPE_OWNED_LIMIT:
             if len(leaf["owned_artifacts"])>TASK_SHAPE_OWNED_LIMIT[c]:
                 errors.append({"key":key,"code":"task-shape","message":f"{key}: {c} leaf owns {len(leaf['owned_artifacts'])} paths; maximum is {TASK_SHAPE_OWNED_LIMIT[c]}"})
