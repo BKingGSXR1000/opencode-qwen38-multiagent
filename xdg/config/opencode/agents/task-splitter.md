@@ -167,6 +167,15 @@ In the verification-recovery case:
 - that read-only tester MUST be child #2 and MUST set
   `"depends_on_sibling": "first"`;
 - the tester's Verify command must independently validate child #1's result;
+- BOTH child Verify commands MUST differ from
+  `parent_contract.verify_command`, because that exact command has already
+  failed and recovery must escape the failed verification path;
+- child #1's writer Verify should be a corrected, bounded writer-side smoke
+  check; child #2's tester Verify must independently validate the full inherited
+  semantics and MUST differ from child #1's Verify command;
+- if the parent Verify failed because of an environmental collision such as an
+  occupied port, use a different isolated test resource/port in BOTH children;
+  do not spend turns identifying or depending on the already-occupied resource;
 - NEVER emit an empty string for `owned_artifacts`;
 - NEVER assign a file to role `tester` if that child is expected to create,
   repair, or rewrite that file. Use a writing role instead.

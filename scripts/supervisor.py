@@ -351,6 +351,12 @@ def _split_request_verification_recovery_allowed(request):
     )
 
 
+def _normalized_verify_for_recovery_compare(command):
+    # Whitespace-only edits must not bypass the failed-command equality check.
+    # Shell safety is still enforced separately by validate_verify_command().
+    return re.sub(r"\s+"," ",str(command or "").strip())
+
+
 def split_handoff_verify_command(child_id):
     path=f".opencode-v2/work/{child_id}.progress.md"
     # Keep the shell surface tiny. The child ID is supervisor-derived and
@@ -869,6 +875,35 @@ def validate_split_proposal(parent, proposals, request=None):
             raise ValueError(
                 "non-shrinking writer+tester split is only allowed after verification-related "
                 "failures; use progress-only probe -> writer or partition parent artifacts"
+            )
+
+        # Batch 15B: verification recovery must actually escape the failed
+        # verification path. New31 D007 produced a corrected tester but left
+        # child #1 with the exact failed parent Verify (occupied port 8123).
+        # Because child #2 depends on child #1, the useful verifier could never
+        # become reachable.
+        parent_contract=request.get("parent_contract") if isinstance(request,dict) else {}
+        parent_verify=(
+            parent_contract.get("verify_command","")
+            if isinstance(parent_contract,dict) else ""
+        ) or leaf.get("verify_command","")
+        failed_verify=_normalized_verify_for_recovery_compare(parent_verify)
+        writer_verify=_normalized_verify_for_recovery_compare(children[0].get("verify_command",""))
+        tester_verify=_normalized_verify_for_recovery_compare(children[1].get("verify_command",""))
+        if not failed_verify:
+            raise ValueError("verification-recovery split is missing the failed parent Verify command")
+        if writer_verify == failed_verify:
+            raise ValueError(
+                "verification-recovery writer must not reuse the failed parent Verify command"
+            )
+        if tester_verify == failed_verify:
+            raise ValueError(
+                "verification-recovery tester must not reuse the failed parent Verify command"
+            )
+        if tester_verify == writer_verify:
+            raise ValueError(
+                "verification-recovery tester must independently verify with a command "
+                "different from the writer Verify command"
             )
 
     if seen != parent_owned:
