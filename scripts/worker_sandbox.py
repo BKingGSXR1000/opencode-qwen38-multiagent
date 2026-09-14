@@ -38,6 +38,7 @@ EPHEMERAL_FILES = (".coverage",)
 SANDBOX_ROOT = Path.home() / ".local/share/v2-worker-sandbox"
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # V2.6.9 BATCH9A CONCURRENT-SHADOW-GUARD
+# V2.6.16 RESOLVER-SNAPSHOT-WITH-HOST-IPC-ISOLATION
 
 
 class SandboxError(RuntimeError):
@@ -666,6 +667,47 @@ def merge_owned(project: Path, shadow: Path, declared):
     return merged
 
 
+def _resolver_snapshot_bwrap_args(run_dir: Path):
+    """Preserve resolver configuration while /run remains private.
+
+    Ubuntu commonly makes /etc/resolv.conf a symlink into
+    /run/systemd/resolve. V2.6.15 masked all of /run to isolate host systemd,
+    DBus and Polkit sockets, which also made that resolver symlink dangling.
+
+    Copy only the resolver file contents into the command's private run
+    directory and bind that regular snapshot at the symlink target inside the
+    private /run. No host /run directory or socket is re-exposed.
+    """
+    resolv=Path("/etc/resolv.conf")
+    try:
+        payload=resolv.read_bytes()
+    except OSError as exc:
+        raise SandboxError(f"cannot snapshot host resolver configuration: {exc}") from exc
+
+    target=Path(os.path.realpath(str(resolv)))
+    try:
+        rel=target.relative_to("/run")
+    except ValueError:
+        # Resolver lives outside /run, so the read-only root bind already
+        # preserves it and masking /run cannot break it.
+        return []
+
+    if not rel.parts or target.name in ("", ".", ".."):
+        raise SandboxError(f"unsafe resolver target under /run: {target}")
+
+    snapshot=run_dir/"resolv.conf.snapshot"
+    snapshot.write_bytes(payload)
+    snapshot.chmod(0o644)
+
+    args=[]
+    current=Path("/run")
+    for part in rel.parts[:-1]:
+        current=current/part
+        args.extend(["--dir",str(current)])
+    args.extend(["--ro-bind",str(snapshot),str(target)])
+    return args
+
+
 def run_bash(project: Path, ctx, command: str):
     if not shutil.which("bwrap"):
         raise SandboxError("bubblewrap (bwrap) is required for implementation-worker shell isolation")
@@ -685,6 +727,7 @@ def run_bash(project: Path, ctx, command: str):
     # lower_alias exists on the host before the root is made read-only. That
     # gives bubblewrap a valid mount target without needing to mkdir anything
     # under the read-only namespace root.
+    resolver_args=_resolver_snapshot_bwrap_args(run_dir)
     args=[
         "bwrap","--die-with-parent","--new-session",
         "--unshare-pid","--unshare-ipc",
@@ -692,6 +735,9 @@ def run_bash(project: Path, ctx, command: str):
         "--proc","/proc",
         "--dev-bind","/dev","/dev",
         "--tmpfs","/run",
+    ]
+    args.extend(resolver_args)
+    args.extend([
         "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
         "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
         "--unsetenv","XDG_RUNTIME_DIR",
@@ -700,7 +746,7 @@ def run_bash(project: Path, ctx, command: str):
         "--tmpfs","/tmp",
         "--ro-bind",str(project.resolve()),lower_root,
         "--bind",str(shadow),str(project.resolve()),
-    ]
+    ])
     for kind,src,dst in _ephemeral_mounts(project,session,lower_root):
         args.extend(["--bind",str(src),str(dst)])
     home_scratch=_ephemeral_scratch(session)/"home"
@@ -805,6 +851,7 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
     shadow=run_dir/"project"
     _prepare_verify_shadow(project,shadow,lower_root)
 
+    resolver_args=_resolver_snapshot_bwrap_args(run_dir)
     args=[
         "bwrap","--die-with-parent","--new-session",
         "--unshare-pid","--unshare-ipc",
@@ -812,13 +859,16 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
         "--proc","/proc",
         "--dev-bind","/dev","/dev",
         "--tmpfs","/run",
+    ]
+    args.extend(resolver_args)
+    args.extend([
         "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
         "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
         "--unsetenv","XDG_RUNTIME_DIR",
         "--tmpfs","/tmp",
         "--ro-bind",str(project.resolve()),lower_root,
         "--bind",str(shadow),str(project.resolve()),
-    ]
+    ])
     for kind,src,dst in _ephemeral_mounts(project,session,lower_root):
         args.extend(["--bind",str(src),str(dst)])
     home_scratch=_ephemeral_scratch(session)/"home"
@@ -1056,6 +1106,46 @@ def selftest(require_bwrap=False):
             assert mutations==[], mutations
             assert (project/"src/owned.txt").read_text()=="shell-ok\n"
             assert not (project/"verify-only.tmp").exists()
+
+            # V2.6.16 RESOLVER REGRESSION: masking host /run must not
+            # break Ubuntu's /etc/resolv.conf -> /run/systemd/resolve/... link.
+            resolver_sha=hashlib.sha256(Path("/etc/resolv.conf").read_bytes()).hexdigest()
+            rc=run_bash(
+                project,ctx,
+                "test -r /etc/resolv.conf && "
+                f"test \"$(sha256sum /etc/resolv.conf | awk '{{print $1}}')\" = \"{resolver_sha}\""
+            )
+            assert rc==0, "worker resolver snapshot missing or changed"
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "test -r /etc/resolv.conf && "
+                f"test \"$(sha256sum /etc/resolv.conf | awk '{{print $1}}')\" = \"{resolver_sha}\""
+            )
+            assert checked.returncode==0, "Verify resolver snapshot missing or changed"
+            assert mutations==[], mutations
+
+            # If the host resolver can currently resolve a stable public name,
+            # the isolated worker/Verify namespaces must be able to resolve it
+            # too. Skip only when the host itself is offline/unresolved so the
+            # selftest does not turn an external outage into a harness failure.
+            host_dns_ok=subprocess.run(
+                ["getent","hosts","example.com"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).returncode==0
+            if host_dns_ok:
+                rc=run_bash(
+                    project,ctx,
+                    "getent hosts example.com >/dev/null 2>&1"
+                )
+                assert rc==0, "worker DNS failed while host DNS works"
+                checked,mutations=run_verify_bash(
+                    project,"ses_test",
+                    "getent hosts example.com >/dev/null 2>&1"
+                )
+                assert checked.returncode==0, "Verify DNS failed while host DNS works"
+                assert mutations==[], mutations
 
             # V2.6.15 HOST-IPC-ISOLATION REGRESSION: worker and Verify
             # sandboxes must not inherit the host systemd/system-bus sockets.
