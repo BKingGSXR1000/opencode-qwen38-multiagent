@@ -496,6 +496,20 @@ def _ephemeral_scratch(session: str):
     return base
 
 
+def _session_tmpdir(session: str):
+    """Private /tmp that persists for one worker session only.
+
+    OpenCode executes each shell tool as a separate Bubblewrap process. A fresh
+    --tmpfs /tmp on every process made ordinary multi-command workflows lose
+    downloads/probe state between tool calls. Keep the mount private per
+    session, but preserve it until supervisor terminal cleanup.
+    """
+    path=_ephemeral_scratch(session)/"tmp"
+    path.mkdir(parents=True,exist_ok=True)
+    os.chmod(path,0o1777)
+    return path
+
+
 def _seed_ephemeral_dir(project: Path, rel: str, dst: Path, lower_root="/v2-lower"):
     if dst.exists():
         return
@@ -741,9 +755,9 @@ def run_bash(project: Path, ctx, command: str):
         "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
         "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
         "--unsetenv","XDG_RUNTIME_DIR",
-        # Mount disposable /tmp before project/shadow binds so a later tmpfs
-        # cannot hide the project when a test project happens to live under /tmp.
-        "--tmpfs","/tmp",
+        # Mount session-private persistent /tmp before project/shadow binds so
+        # later binds still win when a test project happens to live under /tmp.
+        "--bind",str(_session_tmpdir(session)),"/tmp",
         "--ro-bind",str(project.resolve()),lower_root,
         "--bind",str(shadow),str(project.resolve()),
     ])
@@ -865,7 +879,7 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
         "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
         "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
         "--unsetenv","XDG_RUNTIME_DIR",
-        "--tmpfs","/tmp",
+        "--bind",str(_session_tmpdir(session)),"/tmp",
         "--ro-bind",str(project.resolve()),lower_root,
         "--bind",str(shadow),str(project.resolve()),
     ])
@@ -1106,6 +1120,33 @@ def selftest(require_bwrap=False):
             assert mutations==[], mutations
             assert (project/"src/owned.txt").read_text()=="shell-ok\n"
             assert not (project/"verify-only.tmp").exists()
+
+            # Batch 14A: /tmp persists across shell calls for this session,
+            # is visible to preserved-environment Verify, and remains isolated
+            # from a different session.
+            rc=run_bash(
+                project,ctx,
+                "mkdir -p /tmp/v2-persist && printf 'persist-ok\n' > /tmp/v2-persist/marker"
+            )
+            assert rc==0, rc
+            rc=run_bash(
+                project,ctx,
+                "grep -q '^persist-ok$' /tmp/v2-persist/marker"
+            )
+            assert rc==0, "worker /tmp did not persist across shell calls"
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "grep -q '^persist-ok$' /tmp/v2-persist/marker"
+            )
+            assert checked.returncode==0, "Verify did not reuse session /tmp"
+            assert mutations==[], mutations
+            other=dict(ctx); other["session"]="ses_other"
+            rc=run_bash(
+                project,other,
+                "test ! -e /tmp/v2-persist/marker"
+            )
+            assert rc==0, "session-private /tmp leaked into another worker"
+            cleanup_session("ses_other")
 
             # V2.6.16 RESOLVER REGRESSION: masking host /run must not
             # break Ubuntu's /etc/resolv.conf -> /run/systemd/resolve/... link.

@@ -1529,10 +1529,20 @@ def session_explicitly_mutated_path(sid,path):
     return False
 
 def overlapping_other_owned_paths(sid,did):
-    """Owned paths of implementation sessions whose lifetime overlapped sid."""
+    """Owned paths of sibling sessions active after this leaf was dispatched.
+
+    Finalization can be deferred until Verify dependencies become READY. Once a
+    worker session is idle it cannot make new mutations, but sibling workers may
+    legitimately commit their own artifacts before this leaf is finalized. Use
+    the dispatch-to-finalization attribution window rather than freezing the end
+    at this worker's idle timestamp. Bubblewrap/direct-tool containment remains
+    authoritative for proving this worker explicitly targeted a sibling path.
+    """
     win=session_window(sid)
     if not win or not PROJECT: return set()
-    start,end=win; result=set()
+    start,_idle=win
+    end=max(int(_idle or 0),int(time.time()*1000))
+    result=set()
     try:
         con=db_connect()
         rows=con.execute(
@@ -1579,10 +1589,11 @@ def supervisor_dynamic_control_path(path):
 def ownership_violations(did,sid=""):
     """Return changes attributable to this leaf outside declared ownership.
 
-    Whole-project snapshots are retained, but files owned by a genuinely
-    overlapping sibling are not blamed on this worker unless this worker's own
-    tool INPUT explicitly targeted that path. This preserves parallel waves
-    without the gametestNew4 cross-agent false-positive failure mode.
+    Whole-project snapshots are retained, but files owned by a sibling session
+    that ran after this leaf was dispatched and before finalization are not
+    blamed on an already-idle worker unless this worker's own tool INPUT
+    explicitly targeted that path. This covers both true overlap and deferred
+    Verify finalization while retaining fail-closed worker containment.
     """
     try:
         baseline=json.loads(ownership_baseline_path(did).read_text())
