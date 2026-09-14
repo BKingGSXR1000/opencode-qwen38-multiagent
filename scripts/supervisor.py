@@ -54,8 +54,8 @@ PLANNER_CONTEXT_INPUT_CEILING=45000
 # complete it until 391.903s. The bootstrap scaffold makes the phase restartable
 # immediately; this bounds *absence of model-created durable changes*, not file
 # existence, while leaving room for that observed Qwen latency.
-PLANNER_INITIAL_PROGRESS_GRACE_SECONDS=420
-PLANNER_PROGRESS_STALL_SECONDS=300
+PLANNER_INITIAL_PROGRESS_GRACE_SECONDS=300
+PLANNER_PROGRESS_STALL_SECONDS=120
 ROOT_CONTEXT_INPUT_CEILING=43000
 MAX_ROOT_RESTARTS=4
 MAX_PLANNER_RESTARTS=3
@@ -103,7 +103,7 @@ STOP.
 Read `.opencode-v2/control-status.json` for the authoritative derived scheduler state.
 Continue the ORIGINAL task from durable state only."""
 
-PLANNER_CONTINUATION_PROMPT="""Continue implementation planning for this project.
+PLANNER_CONTINUATION_PROMPT="""Continue structured implementation planning for this project.
 
 FIRST read .opencode-v2/ORIGINAL_TASK.md.
 It is the immutable authoritative original user request.
@@ -112,9 +112,11 @@ Never substitute this continuation message for the original task.
 Then read:
 - .opencode-v2/ACCEPTANCE.md
 - .opencode-v2/CONTROL_CONTRACT.md
-- .opencode-v2/IMPLEMENTATION_PLAN.md
+- .opencode-v2/IMPLEMENTATION_PLAN.structured.json
+- .opencode-v2/IMPLEMENTATION_PLAN.repair.json if present
 
-Continue from durable file state using your progressive planner protocol."""
+Edit only the structured source. Never edit generated IMPLEMENTATION_PLAN.md.
+Continue from durable structured state using your planner protocol."""
 
 def log(msg):
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True)
@@ -1326,23 +1328,42 @@ def plan_ready():
         "IMPLEMENTATION_PLAN_COMPLETE",
     )
 
-PLANNER_CHECKPOINT_RE=re.compile(
-    r"(?ms)(^##\s+Planner checkpoint\s*\nStatus:\s*)([^\n]*)(\n)"
-)
-PLAN_DELIVERABLE_RE=re.compile(r"(?m)^###\s+D\d{3}\s+[—-]\s+\S")
+STRUCTURED_PLAN_FILENAME="IMPLEMENTATION_PLAN.structured.json"
+STRUCTURED_PLAN_REPAIR_FILENAME="IMPLEMENTATION_PLAN.repair.json"
+
+def structured_plan_path():
+    return Path(PROJECT)/".opencode-v2"/STRUCTURED_PLAN_FILENAME
 
 def planner_plan_state(plan_path):
-    """Classify bootstrap, engagement, and actual durable plan structure."""
-    try: text=Path(plan_path).read_text(errors="replace")
-    except OSError: return {"full_signature":None,"meaningful_signature":None,"engaged":False}
-    full_signature=hashlib.sha256(text.encode()).hexdigest()
-    match=PLANNER_CHECKPOINT_RE.search(text)
-    engaged=bool(match and match.group(2).strip().upper()!="BOOTSTRAP")
-    # A checkpoint-status mutation proves the model reached its file tool, but
-    # cannot by itself reset the plan-progress timer.  Normalize that status so
-    # only real plan content can create a meaningful fingerprint.
-    normalized=PLANNER_CHECKPOINT_RE.sub(r"\1<checkpoint>\3",text)
-    meaningful=bool(PLAN_DELIVERABLE_RE.search(normalized))
+    """Classify durable structured-plan progress without Markdown bookkeeping."""
+    path=Path(plan_path)
+    try:
+        raw=path.read_text(errors="replace")
+    except OSError:
+        return {"full_signature":None,"meaningful_signature":None,"engaged":False}
+    full_signature=hashlib.sha256(raw.encode()).hexdigest()
+    engaged=bool(raw.strip())
+    try:
+        data=json.loads(raw)
+    except Exception:
+        return {
+            "full_signature":full_signature,
+            "meaningful_signature":None,
+            "engaged":engaged,
+        }
+    leaves=data.get("leaves") if isinstance(data,dict) else None
+    meaningful=bool(
+        isinstance(leaves,list)
+        and any(
+            isinstance(item,dict)
+            and (item.get("key") or item.get("name") or item.get("outcome"))
+            for item in leaves
+        )
+    )
+    normalized=(
+        json.dumps(data,sort_keys=True,separators=(",",":"))
+        if isinstance(data,dict) else raw
+    )
     return {
         "full_signature":full_signature,
         "meaningful_signature":(
@@ -1359,7 +1380,7 @@ def planner_progress_reason(sid,elapsed,plan_path=None):
     due within the initial grace. Thereafter only meaningful-plan fingerprints
     reset the 300-second stall timer.
     """
-    plan_path=Path(plan_path or (Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"))
+    plan_path=Path(plan_path or structured_plan_path())
     plan=planner_plan_state(plan_path)
     state=planner_checkpoints.setdefault(sid,{})
     if "baseline_full_signature" not in state:
@@ -2179,7 +2200,7 @@ def compaction_failure(sid):
 def durable_progress_signature(agent,did=""):
     paths=[]
     if agent=="implementation-planner":
-        paths=[Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"]
+        paths=[Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.structured.json"]
     elif agent=="reference-researcher":
         ctrl=Path(PROJECT)/".opencode-v2"
         paths=[
@@ -3862,12 +3883,37 @@ def control_guard(kind):
         log(f"CONTROL_GUARD_ERROR kind={kind} error={e!r}")
         return False
 
+def compile_structured_plan():
+    if not PROJECT:
+        return False
+    try:
+        r=subprocess.run(
+            [sys.executable,str(ROOT/"scripts"/"structured_plan.py"),
+             "--project",PROJECT],
+            capture_output=True,text=True,timeout=8
+        )
+        if r.returncode!=0:
+            detail=(r.stdout+r.stderr).strip().replace("\n"," | ")
+            log(f"STRUCTURED_PLAN_INVALID detail={detail[:1600]}")
+        return r.returncode==0
+    except Exception as e:
+        log(f"STRUCTURED_PLAN_COMPILE_ERROR error={e!r}")
+        return False
+
 def control_guard_loop():
     sigs={}
     while True:
         try:
             if PROJECT:
                 ctrl=Path(PROJECT)/".opencode-v2"
+                structured=ctrl/STRUCTURED_PLAN_FILENAME
+                if structured.exists():
+                    sig=(structured.stat().st_mtime_ns,structured.stat().st_size)
+                    if sigs.get(STRUCTURED_PLAN_FILENAME)!=sig:
+                        sigs[STRUCTURED_PLAN_FILENAME]=sig
+                        if compile_structured_plan():
+                            log("STRUCTURED_PLAN_COMPILED source=IMPLEMENTATION_PLAN.structured.json")
+                            csv("STRUCTURED_PLAN_COMPILED",detail="source=IMPLEMENTATION_PLAN.structured.json")
                 specs=(
                     ("ACCEPTANCE.md","<!-- ACCEPTANCE_COMPLETE -->","acceptance"),
                     ("IMPLEMENTATION_PLAN.md","<!-- IMPLEMENTATION_PLAN_COMPLETE -->","plan"),
@@ -4057,7 +4103,7 @@ def api_poll_loop():
                 planner_retired=False
 
                 if agent=="implementation-planner" and parent:
-                    existing_plan=Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
+                    existing_plan=structured_plan_path()
                     checkpoint=planner_checkpoints.setdefault(
                         sid,{"started":time.monotonic()}
                     )
@@ -4205,14 +4251,35 @@ def reconcile_planner_completion(sid):
     if sid in planner_completion_seen:
         return
     if not plan_ready():
-        current_plan=planner_plan_state(
-            Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.md"
-        )
-        if not current_plan.get("meaningful_signature"):
+        # Compile + guard synchronously when a planner goes idle. This avoids a
+        # race where the root launches another planner before valid structured
+        # output has been deterministically rendered/finalized.
+        if compile_structured_plan():
+            control_guard("plan")
+    if not plan_ready():
+        current_plan=planner_plan_state(structured_plan_path())
+        repair=Path(PROJECT)/".opencode-v2"/STRUCTURED_PLAN_REPAIR_FILENAME
+        if current_plan.get("meaningful_signature"):
+            reason=(
+                "planner_completed_with_invalid_structured_plan"
+                if repair.exists()
+                else "planner_completed_before_structured_plan_finalization"
+            )
+            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                record_planner_restart(sid,reason)
+            log(
+                f"PLANNER_COMPLETED_INVALID session={sid} "
+                f"reason={reason} restart_count={planner_restart_count()}"
+            )
+            csv(
+                "PLANNER_COMPLETED_INVALID",sid,"implementation-planner",
+                f"reason={reason} restart_count={planner_restart_count()}",
+            )
+        else:
             if planner_restart_count()<MAX_PLANNER_RESTARTS:
                 record_planner_restart(
                     sid,
-                    "planner_completed_without_meaningful_plan_progress",
+                    "planner_completed_without_meaningful_structured_plan",
                 )
             log(
                 f"PLANNER_COMPLETED_NO_PROGRESS session={sid} "
@@ -4222,7 +4289,6 @@ def reconcile_planner_completion(sid):
                 "PLANNER_COMPLETED_NO_PROGRESS",sid,"implementation-planner",
                 f"restart_count={planner_restart_count()}",
             )
-    # Mark only after all durable processing above succeeded.
     planner_completion_seen.add(sid)
 
 

@@ -558,6 +558,51 @@ def merge_split_leaf_overlay(project: Path, leaves: dict):
     return leaves
 
 
+PLAN_REPAIR_PROTOCOL = "v2-structured-plan-repair-v1"
+
+def _structured_plan_key_map(ctrl: Path):
+    path=ctrl/"IMPLEMENTATION_PLAN.structured-map.json"
+    try:
+        data=json.loads(path.read_text())
+    except Exception:
+        return {}
+    mapping=data.get("id_to_key") if isinstance(data,dict) else {}
+    return mapping if isinstance(mapping,dict) else {}
+
+def write_plan_repair_packet(ctrl: Path, errors, source="control-guard"):
+    mapping=_structured_plan_key_map(ctrl)
+    affected=[]
+    entries=[]
+    for raw in errors:
+        message=str(raw)
+        dids=list(dict.fromkeys(re.findall(r"\bD\d{3}\b",message)))
+        keys=[]
+        for did in dids:
+            key=mapping.get(did)
+            if isinstance(key,str) and key and key not in keys:
+                keys.append(key)
+                if key not in affected:
+                    affected.append(key)
+        entries.append({
+            "message":message,
+            "deliverables":dids,
+            "keys":keys,
+        })
+    atomic_write(
+        ctrl/"IMPLEMENTATION_PLAN.repair.json",
+        json.dumps(
+            {
+                "protocol":PLAN_REPAIR_PROTOCOL,
+                "source":source,
+                "whole_plan":not bool(affected),
+                "affected_keys":affected,
+                "errors":entries,
+            },
+            indent=2,
+            sort_keys=True,
+        )+"\n",
+    )
+
 def validate_plan(project: Path, finalize=False):
     ctrl = project / ".opencode-v2"
     path = ctrl / "IMPLEMENTATION_PLAN.md"
@@ -608,10 +653,12 @@ def validate_plan(project: Path, finalize=False):
 
     if errors:
         atomic_write(err, "\n".join(errors) + "\n")
+        write_plan_repair_packet(ctrl, errors, source="control-guard")
         return False, errors
 
     if err.exists():
         err.unlink()
+    (ctrl/"IMPLEMENTATION_PLAN.repair.json").unlink(missing_ok=True)
 
     atomic_write(
         manifest_path,

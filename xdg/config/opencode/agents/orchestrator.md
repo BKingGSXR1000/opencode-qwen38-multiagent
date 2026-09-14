@@ -49,10 +49,12 @@ explicit blocker once and stop.
 
 FRESH ROOT CONTINUATION
 When this is a continuation session, do not ask for or reconstruct any previous
-conversation. Read `.opencode-v2/CONTROL_CONTRACT.md`, `ACCEPTANCE.md`, and
-`IMPLEMENTATION_PLAN.md` when present, then run `.opencode-v2/control-status.json`.
-Continue from that durable state only. Never redispatch a ready Dxxx; the
-supervisor ledger remains the sole authority for attempt claims.
+conversation. Read `.opencode-v2/CONTROL_CONTRACT.md` and `ACCEPTANCE.md`.
+During planning, use `IMPLEMENTATION_PLAN.structured.json` and
+`IMPLEMENTATION_PLAN.repair.json`; read generated `IMPLEMENTATION_PLAN.md` only
+after its ready sentinel exists. Then read `.opencode-v2/control-status.json`.
+Continue from durable state only. Never redispatch a ready Dxxx; the supervisor
+ledger remains the sole authority for attempt claims.
 
 PHASE 0 — ACCEPTANCE
 Launch exactly one acceptance-planner with a SHORT prompt:
@@ -94,52 +96,57 @@ Read Reference policy from ACCEPTANCE.md.
   6. Never require top-level reference evidence `result=READY` before planning;
      that belongs to final validation. Require only foundation gate `ready`.
 
-PHASE 0.5 — IMPLEMENTATION PLAN
+PHASE 0.5 — STRUCTURED IMPLEMENTATION PLAN
 HARD PRECONDITION: if ACCEPTANCE.md says `Reference policy: external-required`,
 direct-read `.opencode-v2/reference-gate.json` immediately before EVERY
-implementation-planner launch. This is the FOUNDATION gate only. Its state must
-be exactly `ready`; full validation evidence is intentionally completed later.
+implementation-planner launch. Its foundation state must be exactly `ready`.
 If foundation state is `pending` or `blocked`, launch no planner and return
 exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
 
-Before launching ANY implementation-planner (initial, continuation, or repair),
-read `.opencode-v2/work/planner-restarts.json` when present and derive current
-state with `.opencode-v2/control-status.json`. This supervisor-owned ledger is
-durable project state: it does NOT reset when a root or supervisor session is
-replaced. If its count is already 3, or `control-status.json` reports
-`"resume_phase": "implementation-blocked"`, launch no planner and output
-exactly `IMPLEMENTATION_BLOCKED`.
+Before launching ANY implementation-planner, read
+`.opencode-v2/work/planner-restarts.json` when present and re-read
+`.opencode-v2/control-status.json`. If the durable planner restart count is
+already 3, or control status reports `"resume_phase": "implementation-blocked"`,
+launch no planner and output exactly `IMPLEMENTATION_BLOCKED`.
 
-Launch implementation-planner with a SHORT prompt:
-- include the ORIGINAL USER REQUEST
-- tell it to read ACCEPTANCE.md and the bootstrap-created incomplete
-  IMPLEMENTATION_PLAN.md scaffold, then follow its planner protocol
-- do not inline the whole acceptance contract
+The planner no longer edits Markdown. Its sole source artifact is:
+`.opencode-v2/IMPLEMENTATION_PLAN.structured.json`
 
-After it returns or is interrupted:
-- require actual `.opencode-v2/IMPLEMENTATION_PLAN.ready`
-- if the plan is absent/incomplete, launch a FRESH implementation-planner using
-  exactly this reference-based prompt (do not include the original request or
-  inline plan/acceptance content):
-  `Continue implementation planning for this project.`
-  `Read .opencode-v2/ACCEPTANCE.md.`
-  `Read .opencode-v2/CONTROL_CONTRACT.md.`
-  `Read .opencode-v2/IMPLEMENTATION_PLAN.md.`
-  `Continue from durable file state using your progressive planner protocol.`
-- if the completed plan was rejected, launch a FRESH implementation-planner
-  using exactly this repair prompt:
-  `Repair implementation planning for this project.`
-  `Read .opencode-v2/IMPLEMENTATION_PLAN.md.`
-  `Read .opencode-v2/IMPLEMENTATION_PLAN.guard-errors.txt.`
-  `Fix only the listed guard errors and follow your progressive planner protocol.`
-  `Never create or request IMPLEMENTATION_PLAN.ready.`
-- never request a shorter self-contained retry or an atomic end-of-session write
-- after three supervisor-recorded unsuccessful planner sessions, do not invent
-  or write a plan; when `.opencode-v2/control-status.json` reports
-  JSON `"resume_phase": "implementation-blocked"`, stop this phase with exact
-  `IMPLEMENTATION_BLOCKED`
-- wait for the deterministic control guard to create the real sentinel
-- NEVER proceed merely because IMPLEMENTATION_PLAN.md has its marker or the model says ready
+The supervisor/compiler deterministically assigns Dxxx IDs, computes waves and
+parallel metadata, renders `.opencode-v2/IMPLEMENTATION_PLAN.md`, then the
+control guard creates `.opencode-v2/IMPLEMENTATION_PLAN.ready`.
+
+Initial planner launch: use a SHORT prompt containing the ORIGINAL USER REQUEST
+verbatim plus:
+`Follow your structured implementation-planner protocol.`
+
+After every planner receipt, re-read `control-status.json` and require the real
+`.opencode-v2/IMPLEMENTATION_PLAN.ready`.
+
+If ready is missing and `.opencode-v2/IMPLEMENTATION_PLAN.repair.json` exists,
+launch one FRESH implementation-planner with exactly:
+`Repair structured implementation planning for this project.`
+`Read .opencode-v2/IMPLEMENTATION_PLAN.structured.json.`
+`Read .opencode-v2/IMPLEMENTATION_PLAN.repair.json.`
+`Edit only affected_keys unless whole_plan is true.`
+`Follow your structured implementation-planner protocol.`
+
+If ready is missing, the structured source exists, and no repair packet exists,
+launch one FRESH implementation-planner with exactly:
+`Continue structured implementation planning for this project.`
+`Read .opencode-v2/IMPLEMENTATION_PLAN.structured.json.`
+`Follow your structured implementation-planner protocol.`
+
+Never ask the planner to edit or reread generated `IMPLEMENTATION_PLAN.md`.
+Never inline the current plan or acceptance contract into a repair prompt.
+The repair packet is the deterministic error handoff.
+
+Every completed invalid planner session is counted by the supervisor. At three
+unsuccessful planner sessions the phase becomes `implementation-blocked`; do not
+invent a fourth repair or write plan state yourself.
+
+Never proceed merely because the structured JSON or rendered Markdown looks
+complete. The exact `IMPLEMENTATION_PLAN.ready` sentinel is authoritative.
 
 EXECUTION
 Read `.opencode-v2/IMPLEMENTATION_PLAN.guard.json`.

@@ -299,16 +299,16 @@
             "output": 1536
           },
           "body": {
-            "v2_max_tokens": 6144,
+            "v2_max_tokens": 7168,
             "chat_template_kwargs": {
               "enable_thinking": true,
               "preserve_thinking": false,
-              "reasoning_effort": "medium"
+              "reasoning_effort": "low"
             },
-            "reasoning_effort": "medium"
+            "reasoning_effort": "low"
           },
           "settings": {
-            "reasoningEffort": "medium"
+            "reasoningEffort": "low"
           }
         }
       }
