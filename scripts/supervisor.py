@@ -1035,11 +1035,35 @@ def normalized_state_snapshot(project):
         clean.append(item)
     data["execution_blockers"]=clean
 
-    # If the only reason for execution-blocked was the contradictory blocker
-    # list and at least one leaf is legally eligible, execution can continue.
-    if data.get("resume_phase")=="execution-blocked" and not clean:
-        if active_ids or any(isinstance(v,dict) and v.get("eligible") for v in leaves.values()):
+    # Leaf-local terminal failures must not globally stop independent work.
+    # Keep each blocker visible, but continue while another leaf is legally
+    # eligible. Global/state-corruption blockers remain fail-closed.
+    leaf_local_blocker_reasons={
+        "attempt_limit_reached",
+        "parent-finalize-failed",
+        "split-validation-failed",
+        "splitter-failed",
+        "split-unavailable-read-only-parent",
+    }
+    eligible_exists=any(
+        isinstance(v,dict) and v.get("eligible")
+        for v in leaves.values()
+    )
+    local_blockers_only=bool(clean) and all(
+        str(item.get("deliverable") or "").startswith("D")
+        and str(item.get("reason") or "") in leaf_local_blocker_reasons
+        for item in clean
+    )
+
+    if data.get("resume_phase")=="execution-blocked":
+        if not clean and (active_ids or eligible_exists):
             data["resume_phase"]="execution"
+        elif eligible_exists and local_blockers_only:
+            data["resume_phase"]="execution"
+            log(
+                "STATE_LOCAL_BLOCKER_CONTINUE "
+                f"blockers={','.join(str(x.get('deliverable') or '') for x in clean)}"
+            )
     return data
 # V2.6.9 NORMALIZED SCHEDULER STATE END
 
@@ -1538,7 +1562,18 @@ SUPERVISOR_DYNAMIC_CONTROL_PATHS={
 }
 
 def supervisor_dynamic_control_path(path):
-    return path in SUPERVISOR_DYNAMIC_CONTROL_PATHS
+    if path in SUPERVISOR_DYNAMIC_CONTROL_PATHS:
+        return True
+    # Supervisor atomic writes use same-directory temporary names such as
+    # .opencode-v2/.control-status.json.geel2cvt.tmp. They can appear/disappear
+    # while a worker ownership baseline is live and are not worker mutations.
+    # Explicit worker targeting is still checked by ownership_violations(), and
+    # Bubblewrap remains the shell/direct-write containment boundary.
+    for canonical in SUPERVISOR_DYNAMIC_CONTROL_PATHS:
+        parent,name=canonical.rsplit("/",1)
+        if path.startswith(f"{parent}/.{name}.") and path.endswith(".tmp"):
+            return True
+    return False
 # V2.6.9 SUPERVISOR DYNAMIC OWNERSHIP EXEMPTION END
 
 def ownership_violations(did,sid=""):
