@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Shared deterministic leaf-contract rules for initial plans and split children."""
 import re
+import shlex
 
 IMPLEMENTATION_ROLES = frozenset({
     "probe-builder", "implementer", "core-builder", "feature-builder",
@@ -9,12 +10,39 @@ IMPLEMENTATION_ROLES = frozenset({
 READ_ONLY_ROLES = frozenset({"tester"})
 WRITE_ROLES = frozenset(IMPLEMENTATION_ROLES - READ_ONLY_ROLES)
 NON_VERIFYING_COMMANDS = frozenset({"true", ":", "echo ok", "echo pass"})
-VERIFY_MASKING_PATTERNS = (
-    (re.compile(r"\|\|"), "Verify command uses ||, which can mask a failed check"),
-    (re.compile(r";\s*(?:true|:)\s*$"), "Verify command masks failure with trailing ; true/:"),
-    (re.compile(r"\bset\s+\+e\b"), "Verify command disables fail-fast shell behavior"),
-    (re.compile(r"\bexit\s+0\b"), "Verify command forces a successful exit"),
-)
+VERIFY_MASKING_MESSAGES = {
+    "or": "Verify command uses ||, which can mask a failed check",
+    "trailing-success": "Verify command masks failure with trailing ; true/:",
+    "set-plus-e": "Verify command disables fail-fast shell behavior",
+    "exit-zero": "Verify command forces a successful exit",
+}
+
+def _shell_tokens(command: str):
+    """Tokenize shell syntax while preserving operators outside quoted payloads.
+
+    A JavaScript/Python expression such as `node -e "a || b"` must not be
+    mistaken for shell-level `cmd || true`. Nested shell `sh -c` / `bash -c`
+    payloads are validated recursively by validate_verify_command().
+    """
+    lexer=shlex.shlex(command,posix=True,punctuation_chars=";&|")
+    lexer.whitespace_split=True
+    lexer.commenters=""
+    return list(lexer)
+
+def _masking_errors_from_tokens(tokens):
+    errors=[]
+    if "||" in tokens:
+        errors.append(VERIFY_MASKING_MESSAGES["or"])
+    if len(tokens)>=2 and tokens[-2:]==[";","true"]:
+        errors.append(VERIFY_MASKING_MESSAGES["trailing-success"])
+    if len(tokens)>=2 and tokens[-2:]==[";",":"]:
+        errors.append(VERIFY_MASKING_MESSAGES["trailing-success"])
+    for i in range(len(tokens)-1):
+        if tokens[i]=="set" and tokens[i+1]=="+e":
+            errors.append(VERIFY_MASKING_MESSAGES["set-plus-e"])
+        if tokens[i]=="exit" and tokens[i+1]=="0":
+            errors.append(VERIFY_MASKING_MESSAGES["exit-zero"])
+    return errors
 SUPERVISOR_RESERVED_PREFIXES = (".opencode-v2/work/", ".opencode-v2/bin/")
 SUPERVISOR_RESERVED_EXACT = frozenset({
     ".opencode-v2/control-status.json",
@@ -67,10 +95,25 @@ def validate_verify_command(verify_command: str):
         return errors
     if command in NON_VERIFYING_COMMANDS:
         errors.append("Verify command is non-verifying")
-    for pattern,message in VERIFY_MASKING_PATTERNS:
-        if pattern.search(command):
-            errors.append(message)
-    return errors
+    try:
+        tokens=_shell_tokens(command)
+    except ValueError as exc:
+        errors.append(f"Verify command has invalid shell quoting: {exc}")
+        return errors
+
+    errors.extend(_masking_errors_from_tokens(tokens))
+
+    # A quoted node/python payload is data to the shell and may legitimately
+    # contain ||. But a nested shell -c payload is shell syntax again, so
+    # recursively apply the same policy.
+    shell_names={"sh","bash","dash","zsh","ksh"}
+    for i,tok in enumerate(tokens[:-2]):
+        base=tok.rsplit("/",1)[-1]
+        if base in shell_names and tokens[i+1] in ("-c","-lc"):
+            nested=validate_verify_command(tokens[i+2])
+            errors.extend(f"nested shell: {e}" for e in nested)
+    # Stable de-duplication.
+    return list(dict.fromkeys(errors))
 
 
 def validate_leaf_contract(role: str, owned_paths, verify_command: str):

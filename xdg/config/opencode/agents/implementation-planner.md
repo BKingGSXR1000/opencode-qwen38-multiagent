@@ -158,6 +158,9 @@ Every `### Dxxx — Name` MUST contain these exact fields, one per line:
 - Verify deps:
 - Acceptance IDs:
 - Complexity: S|M
+- Independent stages: 1
+- Expected compactions: 0
+- Repeated operations: <non-negative integer>
 - Deep reasoning: yes|no
 - Role:
 - Parallel-safe with:
@@ -388,6 +391,51 @@ split cleanly during initial planning.
 Before completing IMPLEMENTATION_PLAN.md, re-check every implementation leaf
 against this rule and split any violating leaf before the plan is finalized.
 <!-- V2.6.13 GENERIC MINIMAL LEAF PLANNING END -->
+
+<!-- V2.6.16 MACHINE-ENFORCED TASK SHAPE BEGIN -->
+## Machine-enforced initial leaf budget
+
+The deterministic plan guard now rejects oversized initial leaves. Every Dxxx
+must truthfully declare:
+
+- `Independent stages: 1`
+- `Expected compactions: 0`
+- `Repeated operations: N`
+
+`Repeated operations` is the largest count of substantially similar remote/tool
+operations the worker is expected to perform (for example 11 HTTP requests,
+8 entity lookups, 6 repeated build/probe cycles). Do not under-count merely to
+pass the guard.
+
+Hard ceilings:
+- `Complexity: S`: at most 2 owned artifact paths, 2 Acceptance IDs, and
+  4 repeated operations.
+- `Complexity: M`: at most 3 owned artifact paths, 4 Acceptance IDs, and
+  6 repeated operations.
+
+If the work exceeds a ceiling, split it into fresh-context leaves connected by
+durable artifacts and Launch/Contract/Verify dependencies.
+
+External acquisition/research is its own work class. If a leaf must fetch,
+download, vendor, or research authoritative external material, use a bounded
+`probe-builder` leaf to freeze that evidence first. Product implementation must
+consume the durable frozen evidence in a later fresh worker. Do not combine
+"find/fetch the source" with "implement the feature from it".
+
+`probe-builder` is observational/acquisitional, not a host administrator. It
+may inspect prerequisites and record exact failures, but MUST NOT repair the
+host with `sudo`, `systemctl restart`, package installation, daemon reloads, or
+equivalent service remediation. If a prerequisite is unavailable, persist the
+evidence and let the supervisor re-plan.
+
+Explicit staged prose such as `(a) ... (b) ...`, `(1) ... (2) ...`, or
+"first ... then ..." is evidence that the proposed leaf is compound and must be
+split before finalization.
+
+The intended normal leaf finishes in one fresh context without compaction.
+Recursive runtime splitting remains recovery for surprises, not a substitute
+for initial decomposition.
+<!-- V2.6.16 MACHINE-ENFORCED TASK SHAPE END -->
 
 <!-- V2.6.12 CONTEXT-BOUNDED LEAF PLANNING BEGIN -->
 ## Context-bounded leaves — fresh context beats repeated compaction

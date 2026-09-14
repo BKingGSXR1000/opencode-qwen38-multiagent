@@ -19,8 +19,27 @@ AGENTS = ROOT / "xdg" / "config" / "opencode" / "agents"
 
 PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
 ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
-PLAN_MAX_LINES = 400
+PLAN_MAX_LINES = 500
 RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
+TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
+TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
+TASK_SHAPE_REPEAT_LIMIT = {"S": 4, "M": 6}
+EXPLICIT_STAGE_SEQUENCE_RE = re.compile(
+    r"(?:\([a-z]\)|\(\d+\)|\b(?:first|second|third|then|followed\s+by)\b)",
+    re.I,
+)
+EXTERNAL_ACQUISITION_RE = re.compile(
+    r"(?:\b(?:fetch(?:ed|ing)?|download(?:ed|ing)?|vendor(?:ed|ing)?|research(?:ed|ing)?)\b"
+    r".{0,100}\b(?:https?://|external|public\s+source|authoritative|cdn|jpl|horizons|unpkg|jsdelivr)\b"
+    r"|\b(?:curl|wget)\s+https?://)",
+    re.I,
+)
+HOST_REMEDIATION_RE = re.compile(
+    r"\b(?:sudo|systemctl|service\s+\w+|daemon-reload|apt(?:-get)?\s+install|"
+    r"dnf\s+install|yum\s+install|pacman\s+-S|restart\s+(?:the\s+)?(?:service|daemon)|"
+    r"enable\s+(?:the\s+)?(?:service|daemon))\b",
+    re.I,
+)
 INTERNAL_EXTERNAL_REFERENCE_RE = re.compile(
     r"\b(?:external(?:ly)?\s+(?:authoritative|maintained|scientific|reference)\s+"
     r"(?:data|source|truth|reference|interface)|authoritative\s+(?:external\s+)?"
@@ -50,6 +69,9 @@ ALIASES = {
     "verify_deps": ("Verify deps",),
     "acceptance_ids": ("Acceptance IDs", "Acceptance IDs / acceptance", "Acceptance"),
     "complexity": ("Complexity", "Complexity / size"),
+    "independent_stages": ("Independent stages",),
+    "expected_compactions": ("Expected compactions",),
+    "repeated_operations": ("Repeated operations",),
     "role": ("Role", "Role / role", "Preferred role"),
     "parallel": ("Parallel-safe with", "Parallel-safe"),
     "verify_command": ("Verify command", "Verify command / verify", "Verify"),
@@ -241,6 +263,9 @@ def parse_plan(text: str):
             "verify_deps": deps(vals["verify_deps"]),
             "verify_command": vals["verify_command"].strip().strip("`"),
             "complexity": cm.group(1).upper() if cm else "",
+            "independent_stages": vals["independent_stages"].strip(),
+            "expected_compactions": vals["expected_compactions"].strip(),
+            "repeated_operations": vals["repeated_operations"].strip(),
             "role": re.split(r"[\s,;]+", vals["role"])[0] if vals["role"] else "",
             "done_when": vals["done_when"],
             "acceptance_ids": re.findall(r"\bA\d{3}\b", vals["acceptance_ids"]),
@@ -260,6 +285,9 @@ def parse_plan(text: str):
             ("Launch deps", vals["launch_deps"]),
             ("Contract deps", vals["contract_deps"]),
             ("Verify deps", vals["verify_deps"]),
+            ("Independent stages", leaf["independent_stages"]),
+            ("Expected compactions", leaf["expected_compactions"]),
+            ("Repeated operations", leaf["repeated_operations"]),
             ("Verify command", leaf["verify_command"]),
             ("Done when", leaf["done_when"]),
         )
@@ -271,6 +299,60 @@ def parse_plan(text: str):
             errors.append(
                 f"{did}: final complexity must be S/M, got {leaf['complexity'] or 'missing'}"
             )
+
+        if leaf["independent_stages"] and leaf["independent_stages"] != "1":
+            errors.append(
+                f"{did}: Independent stages must be exactly 1; split compound work before execution"
+            )
+        if leaf["expected_compactions"] and leaf["expected_compactions"] != "0":
+            errors.append(
+                f"{did}: Expected compactions must be exactly 0; use a durable handoff and a fresh worker"
+            )
+        repeated=None
+        if leaf["repeated_operations"]:
+            if not re.fullmatch(r"\d+", leaf["repeated_operations"]):
+                errors.append(f"{did}: Repeated operations must be a non-negative integer")
+            else:
+                repeated=int(leaf["repeated_operations"])
+        if leaf["complexity"] in TASK_SHAPE_OWNED_LIMIT:
+            owned_count=len(leaf.get("owned_artifact_paths",[]))
+            owned_limit=TASK_SHAPE_OWNED_LIMIT[leaf["complexity"]]
+            if owned_count>owned_limit:
+                errors.append(
+                    f"{did}: {leaf['complexity']} leaf owns {owned_count} artifact paths; "
+                    f"maximum is {owned_limit}; split into smaller durable handoffs"
+                )
+            acceptance_limit=TASK_SHAPE_ACCEPTANCE_LIMIT[leaf["complexity"]]
+            if len(leaf["acceptance_ids"])>acceptance_limit:
+                errors.append(
+                    f"{did}: {leaf['complexity']} leaf covers {len(leaf['acceptance_ids'])} Acceptance IDs; "
+                    f"maximum is {acceptance_limit}; split independent acceptance work"
+                )
+            if repeated is not None:
+                repeat_limit=TASK_SHAPE_REPEAT_LIMIT[leaf["complexity"]]
+                if repeated>repeat_limit:
+                    errors.append(
+                        f"{did}: {leaf['complexity']} leaf declares {repeated} repeated operations; "
+                        f"maximum is {repeat_limit}; split the batch into fresh-context leaves"
+                    )
+
+        shape_text=" ".join((leaf.get("outcome",""),leaf.get("done_when","")))
+        # Two or more explicit stage markers are strong evidence of a bundled leaf.
+        if len(EXPLICIT_STAGE_SEQUENCE_RE.findall(shape_text))>=2:
+            errors.append(
+                f"{did}: Outcome/Done when describes multiple explicit stages; split them into separate leaves"
+            )
+        if leaf.get("role")!="probe-builder" and EXTERNAL_ACQUISITION_RE.search(leaf.get("outcome","")):
+            errors.append(
+                f"{did}: external acquisition/research is bundled into a non-probe leaf; "
+                "freeze external evidence in a separate probe-builder leaf and hand it off durably"
+            )
+        if leaf.get("role")=="probe-builder" and HOST_REMEDIATION_RE.search(shape_text):
+            errors.append(
+                f"{did}: probe-builder may observe and record host prerequisites but must not remediate "
+                "host services/packages; record the blocker and re-plan instead"
+            )
+
         if not leaf["role"]:
             errors.append(f"{did}: missing Role")
         if not leaf["acceptance_ids"]:
@@ -590,6 +672,9 @@ Status: COMPLETE
 - Verify deps: (none)
 - Acceptance IDs / acceptance: A001
 - Complexity / size: S
+- Independent stages: 1
+- Expected compactions: 0
+- Repeated operations: 1
 - Deep reasoning: no
 - Role / role: implementer
 - Parallel-safe with: D002
@@ -603,6 +688,9 @@ Status: COMPLETE
 - Verify deps: [D001]
 - Acceptance IDs / acceptance: A001
 - Complexity / size: S
+- Independent stages: 1
+- Expected compactions: 0
+- Repeated operations: 1
 - Deep reasoning: no
 - Role / role: test-builder
 - Parallel-safe with: (none)
@@ -621,6 +709,10 @@ Status: COMPLETE
                 "- Owned artifacts / files: `app.js`,\n"
                 "  `server/index.js`,\n"
                 "  `public/index.html`",
+                1,
+            ).replace(
+                "- Complexity / size: S",
+                "- Complexity / size: M",
                 1,
             )
             multi_leaves, _, multi_errors = parse_plan(multiline)
@@ -671,6 +763,9 @@ Status: COMPLETE
 - Verify deps: (none)
 - Acceptance IDs / acceptance: A001
 - Complexity / size: S
+- Independent stages: 1
+- Expected compactions: 0
+- Repeated operations: 1
 - Deep reasoning: no
 - Role / role: implementer
 - Parallel-safe with: (none)
@@ -733,6 +828,59 @@ Status: COMPLETE
             )
             _, _, contract_wave_errors = parse_plan(contract_wave)
             assert any("Contract dep D001" in e for e in contract_wave_errors), contract_wave_errors
+
+            # V2.6.16 MACHINE-ENFORCED TASK-SHAPE REGRESSION
+            compound = valid.replace(
+                "- Outcome: scaffold",
+                "- Outcome: (a) acquire source; (b) implement scaffold; (c) validate it",
+                1,
+            )
+            _, _, compound_errors = parse_plan(compound)
+            assert any("multiple explicit stages" in e for e in compound_errors), compound_errors
+
+            compaction = valid.replace("- Expected compactions: 0", "- Expected compactions: 1", 1)
+            _, _, compaction_errors = parse_plan(compaction)
+            assert any("Expected compactions must be exactly 0" in e for e in compaction_errors), compaction_errors
+
+            repeats = valid.replace("- Repeated operations: 1", "- Repeated operations: 9", 1)
+            _, _, repeat_errors = parse_plan(repeats)
+            assert any("repeated operations" in e for e in repeat_errors), repeat_errors
+
+            too_many_s_paths = valid.replace(
+                "- Owned artifacts / files: `app.js`",
+                "- Owned artifacts / files: `app.js`, `app.css`, `app.html`",
+                1,
+            )
+            _, _, path_errors = parse_plan(too_many_s_paths)
+            assert any("S leaf owns 3 artifact paths" in e for e in path_errors), path_errors
+
+            too_many_s_acceptance = valid.replace(
+                "- Acceptance IDs / acceptance: A001",
+                "- Acceptance IDs / acceptance: A001, A002, A003",
+                1,
+            )
+            _, _, acceptance_errors = parse_plan(too_many_s_acceptance)
+            assert any("S leaf covers 3 Acceptance IDs" in e for e in acceptance_errors), acceptance_errors
+
+            external_bundle = valid.replace(
+                "- Outcome: scaffold",
+                "- Outcome: implement scaffold using coefficients fetched from a public source URL",
+                1,
+            )
+            _, _, external_errors = parse_plan(external_bundle)
+            assert any("external acquisition/research" in e for e in external_errors), external_errors
+
+            probe_host_fix = valid.replace(
+                "- Outcome: scaffold",
+                "- Outcome: probe environment and systemctl restart snapd.apparmor if needed",
+                1,
+            ).replace(
+                "- Role / role: implementer",
+                "- Role / role: probe-builder",
+                1,
+            )
+            _, _, probe_host_errors = parse_plan(probe_host_fix)
+            assert any("must not remediate host" in e for e in probe_host_errors), probe_host_errors
         finally:
             AGENTS = old
     print("control-guard selftest: OK")

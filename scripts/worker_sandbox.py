@@ -687,9 +687,14 @@ def run_bash(project: Path, ctx, command: str):
     # under the read-only namespace root.
     args=[
         "bwrap","--die-with-parent","--new-session",
+        "--unshare-pid","--unshare-ipc",
         "--ro-bind","/","/",
         "--proc","/proc",
         "--dev-bind","/dev","/dev",
+        "--tmpfs","/run",
+        "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
+        "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
+        "--unsetenv","XDG_RUNTIME_DIR",
         # Mount disposable /tmp before project/shadow binds so a later tmpfs
         # cannot hide the project when a test project happens to live under /tmp.
         "--tmpfs","/tmp",
@@ -802,9 +807,14 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
 
     args=[
         "bwrap","--die-with-parent","--new-session",
+        "--unshare-pid","--unshare-ipc",
         "--ro-bind","/","/",
         "--proc","/proc",
         "--dev-bind","/dev","/dev",
+        "--tmpfs","/run",
+        "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
+        "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
+        "--unsetenv","XDG_RUNTIME_DIR",
         "--tmpfs","/tmp",
         "--ro-bind",str(project.resolve()),lower_root,
         "--bind",str(shadow),str(project.resolve()),
@@ -1046,6 +1056,32 @@ def selftest(require_bwrap=False):
             assert mutations==[], mutations
             assert (project/"src/owned.txt").read_text()=="shell-ok\n"
             assert not (project/"verify-only.tmp").exists()
+
+            # V2.6.15 HOST-IPC-ISOLATION REGRESSION: worker and Verify
+            # sandboxes must not inherit the host systemd/system-bus sockets.
+            rc=run_bash(
+                project,ctx,
+                "test ! -S /run/systemd/private && "
+                "test ! -S /run/dbus/system_bus_socket && "
+                "test -z \"${DBUS_SYSTEM_BUS_ADDRESS-}\" && "
+                "test -z \"${DBUS_SESSION_BUS_ADDRESS-}\""
+            )
+            assert rc==0, rc
+            if shutil.which("systemctl"):
+                rc=run_bash(
+                    project,ctx,
+                    "systemctl --no-ask-password daemon-reload >/dev/null 2>&1"
+                )
+                assert rc!=0, "systemctl unexpectedly reached a system manager"
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "test ! -S /run/systemd/private && "
+                "test ! -S /run/dbus/system_bus_socket && "
+                "test -z \"${DBUS_SYSTEM_BUS_ADDRESS-}\" && "
+                "test -z \"${DBUS_SESSION_BUS_ADDRESS-}\""
+            )
+            assert checked.returncode==0, checked.returncode
+            assert mutations==[], mutations
 
             cleanup_session("ses_test")
             assert not session_used_sandbox("ses_test")
