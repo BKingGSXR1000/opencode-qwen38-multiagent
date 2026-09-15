@@ -35,6 +35,17 @@ EXTERNAL_ACQUISITION_RE = re.compile(
     r"|\b(?:curl|wget)\s+https?://)",
     re.I,
 )
+PREEXISTING_EXTERNAL_STATE_RE = re.compile(
+    r"\b(?:already|previously|preexisting|pre-existing|pre)\s*[- ]?\s*"
+    r"(?:fetched|downloaded|vendored|researched)\b",
+    re.I,
+)
+
+def external_acquisition_match(text):
+    # Explicitly pre-existing/frozen artifacts are inputs, not acquisition
+    # performed by this leaf. Unqualified/active acquisition remains fail-closed.
+    scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",str(text or ""))
+    return EXTERNAL_ACQUISITION_RE.search(scrubbed)
 HOST_REMEDIATION_RE = re.compile(
     r"\b(?:sudo|systemctl|service\s+\w+|daemon-reload|apt(?:-get)?\s+install|"
     r"dnf\s+install|yum\s+install|pacman\s+-S|restart\s+(?:the\s+)?(?:service|daemon)|"
@@ -340,7 +351,7 @@ def parse_plan(text: str):
             errors.append(
                 f"{did}: Outcome/Done when describes multiple explicit stages; split them into separate leaves"
             )
-        if leaf.get("role")!="probe-builder" and EXTERNAL_ACQUISITION_RE.search(leaf.get("outcome","")):
+        if leaf.get("role")!="probe-builder" and external_acquisition_match(leaf.get("outcome","")):
             errors.append(
                 f"{did}: external acquisition/research is bundled into a non-probe leaf; "
                 "freeze external evidence in a separate probe-builder leaf and hand it off durably"

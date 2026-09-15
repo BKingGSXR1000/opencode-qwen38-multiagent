@@ -44,6 +44,17 @@ EXTERNAL_ACQUISITION_RE = re.compile(
     r"|\b(?:curl|wget)\s+https?://)",
     re.I,
 )
+PREEXISTING_EXTERNAL_STATE_RE = re.compile(
+    r"\b(?:already|previously|preexisting|pre-existing|pre)\s*[- ]?\s*"
+    r"(?:fetched|downloaded|vendored|researched)\b",
+    re.I,
+)
+
+def external_acquisition_match(text):
+    # Explicitly pre-existing/frozen artifacts are inputs, not acquisition
+    # performed by this leaf. Unqualified/active acquisition remains fail-closed.
+    scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",str(text or ""))
+    return EXTERNAL_ACQUISITION_RE.search(scrubbed)
 HOST_REMEDIATION_RE = re.compile(
     r"\b(?:sudo|systemctl|service\s+\w+|daemon-reload|apt(?:-get)?\s+install|"
     r"dnf\s+install|yum\s+install|pacman\s+-S|restart\s+(?:the\s+)?(?:service|daemon)|"
@@ -281,7 +292,7 @@ def normalize_document(raw):
         shape=f"{leaf['outcome']} {leaf['done_when']}"
         if len(EXPLICIT_STAGE_SEQUENCE_RE.findall(shape))>=2:
             errors.append({"key":key,"code":"compound-stage","message":f"{key}: Outcome/Done when describes multiple explicit stages"})
-        if leaf["role"]!="probe-builder" and EXTERNAL_ACQUISITION_RE.search(leaf["outcome"]):
+        if leaf["role"]!="probe-builder" and external_acquisition_match(leaf["outcome"]):
             errors.append({"key":key,"code":"external-acquisition","message":f"{key}: external acquisition/research must be a separate probe-builder leaf"})
         if leaf["role"]=="probe-builder" and HOST_REMEDIATION_RE.search(shape):
             errors.append({"key":key,"code":"host-remediation","message":f"{key}: probe-builder may observe host prerequisites but must not remediate services/packages"})
