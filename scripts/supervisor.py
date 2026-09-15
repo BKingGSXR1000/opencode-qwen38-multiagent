@@ -2063,6 +2063,11 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
     if not leaf or ready_info(did):
         clear_verify_wait(did)
         return False,"not-applicable"
+    split_parent_without_session=bool(
+        not sid
+        and isinstance(leaf.get("split_children"),list)
+        and leaf.get("split_children")
+    )
     if sid:
         sandbox_violation=worker_sandbox_violation_path(Path(PROJECT),did,sid)
         if sandbox_violation.exists() and sandbox_violation.stat().st_size:
@@ -2092,10 +2097,15 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
             return False,"durable-progress-incomplete"
         return False,"owned-artifacts-missing"
 
-    violations=ownership_violations(did,sid)
-    if violations:
-        clear_verify_wait(did)
-        return False,"ownership-violation:"+",".join(violations[:4])
+    # A split parent has no executing worker session at collapse time. Its
+    # original whole-project ownership baseline can span unrelated concurrent
+    # leaves and therefore cannot attribute later project changes to the parent.
+    # Each child has already passed its own session-bound ownership checks.
+    if not split_parent_without_session:
+        violations=ownership_violations(did,sid)
+        if violations:
+            clear_verify_wait(did)
+            return False,"ownership-violation:"+",".join(violations[:4])
 
     missing=missing_verify_dependencies(did)
     if missing:
@@ -2120,15 +2130,32 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
 
     after_verify=project_fingerprints()
     changed=_paths_changed(before_verify,after_verify)
-    owned_changed=sorted(path for path in changed if _inside_any(path,paths))
-    if owned_changed:
-        clear_verify_wait(did)
-        return False,"verify-mutated-owned-artifacts:"+",".join(owned_changed[:4])
+    if split_parent_without_session:
+        # Split-parent collapse has no worker session to blame for historical
+        # project changes, so enforce ownership transactionally around Verify:
+        # the parent Verify itself must be read-only across the project. Ignore
+        # only supervisor-owned dynamic control files that may change
+        # concurrently while the verification command runs.
+        verify_changed=sorted(
+            path for path in changed
+            if not supervisor_dynamic_control_path(path)
+        )
+        if verify_changed:
+            clear_verify_wait(did)
+            return (
+                False,
+                "verify-mutated-project-artifacts:"+",".join(verify_changed[:4]),
+            )
+    else:
+        owned_changed=sorted(path for path in changed if _inside_any(path,paths))
+        if owned_changed:
+            clear_verify_wait(did)
+            return False,"verify-mutated-owned-artifacts:"+",".join(owned_changed[:4])
 
-    violations=ownership_violations(did,sid)
-    if violations:
-        clear_verify_wait(did)
-        return False,"ownership-violation-after-verify:"+",".join(violations[:4])
+        violations=ownership_violations(did,sid)
+        if violations:
+            clear_verify_wait(did)
+            return False,"ownership-violation-after-verify:"+",".join(violations[:4])
 
     if sid and command==RUN_CHECKS_COMMAND:
         try:
