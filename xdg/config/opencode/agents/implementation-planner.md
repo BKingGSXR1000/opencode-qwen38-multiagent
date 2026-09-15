@@ -137,6 +137,42 @@ and updating dependency references.
 `owned_artifacts` is an array of raw project-relative paths, not Markdown.
 Use `[]` only for a genuinely read-only `tester`.
 
+### Supervisor-reserved ownership boundary — HARD RULE
+
+Worker-owned artifacts MUST NOT use supervisor control-state paths.
+
+Never place any `owned_artifacts` entry under:
+- `.opencode-v2/work/`
+- `.opencode-v2/bin/`
+
+Also never own these exact supervisor/control artifacts:
+- `.opencode-v2/control-status.json`
+- `.opencode-v2/IMPLEMENTATION_PLAN.guard.json`
+- `.opencode-v2/root-rollovers.json`
+- `.opencode-v2/reference-gate.json`
+- `.opencode-v2/reference-validation-gate.json`
+- `.opencode-v2/ACCEPTANCE.ready`
+- `.opencode-v2/IMPLEMENTATION_PLAN.ready`
+
+`.opencode-v2/work/Dxxx.progress.md` is a supervisor-managed retry/handoff
+location, not a planner-owned deliverable artifact.
+
+For durable `probe-builder` outputs, prefer a non-reserved project path such as
+`.opencode-v2/probes/<semantic-name>.json` or another ordinary project-relative
+artifact path owned only by that leaf.
+
+BAD:
+`".opencode-v2/work/env_probe_result.json"`
+
+GOOD:
+`".opencode-v2/probes/env_probe_result.json"`
+
+Repair rule: when a repair packet says an owned path is supervisor-reserved,
+move that artifact to a non-reserved project path and update the same leaf's
+`verify_command`, `outcome`, and `done_when` references consistently. Do NOT
+repair this by deleting ownership from a write-capable role; a write-capable
+role still requires at least one durable owned artifact.
+
 Allowed roles:
 - `probe-builder`
 - `implementer`
