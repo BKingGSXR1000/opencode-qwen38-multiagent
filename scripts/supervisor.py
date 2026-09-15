@@ -190,6 +190,38 @@ def implementation_prompt(did):
         "Continue from actual filesystem state and execute the deliverable."
     )
 
+def implementation_runtime_prompt(did,agent):
+    # Deterministically enrich probe workers after canonical dispatch preclaim.
+    base=implementation_prompt(did)
+    if agent!="probe-builder":
+        return base
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    handoff_only=bool(isinstance(leaf,dict) and leaf.get("split_handoff_only"))
+    if handoff_only:
+        deadline=(
+            "\n\nDURABILITY DEADLINE:\n"
+            "This is a progress-only probe handoff. Your primary durable artifact is "
+            f".opencode-v2/work/{did}.progress.md.\n"
+            "By your fourth completed tool-bearing turn at the latest, create or update "
+            "that file with the concrete facts known so far using the labels HANDOFF_READY, "
+            "Findings, Evidence, and Next step. Set HANDOFF_READY: true only when the "
+            "handoff is sufficient for the downstream leaf.\n"
+            "Do not continue discovery merely to improve completeness before this first "
+            "durable write. Temporary files do not satisfy this deliverable.\n"
+            "After durable progress exists, continue only bounded discovery required by scope."
+        )
+    else:
+        deadline=(
+            "\n\nDURABILITY DEADLINE:\n"
+            "By your fourth completed tool-bearing turn at the latest, create or update "
+            "at least one owned project artifact with the concrete facts known so far.\n"
+            "Partial or unknown fields are allowed; do not postpone the first durable write "
+            "merely to improve completeness. Files under /tmp or other temporary locations "
+            "do not count as owned durable progress.\n"
+            "After durable progress exists, continue only bounded discovery required by scope."
+        )
+    return base+deadline
+
 def recursive_split_enabled():
     return load_manifest().get("recursive_split_protocol") == RECURSIVE_SPLIT_PROTOCOL
 
@@ -237,6 +269,18 @@ def implementation_prompt_violation(text):
         return "missing_exact_DELIVERABLE_Dxxx"
     if text!=implementation_prompt(did):
         return "noncanonical_or_model_derived_handoff"
+    return ""
+
+def implementation_runtime_prompt_violation(agent,text):
+    # Validate deterministic post-preclaim prompt seen by a materialized child.
+    if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
+        return f"oversized_first_user_prompt chars={len(text)} max={MAX_IMPLEMENTATION_PROMPT_CHARS}"
+    text=normalize_implementation_prompt(text)
+    did=parse_deliverable(text)
+    if not did:
+        return "missing_exact_DELIVERABLE_Dxxx"
+    if text!=implementation_runtime_prompt(did,agent):
+        return "noncanonical_runtime_handoff"
     return ""
 
 def split_leaf_overlay_path():
@@ -2550,10 +2594,13 @@ def attempt_lock():
     with exclusive_file_lock(path,timeout=5.0):
         yield
 
-def validate_dispatch(agent,text):
+def validate_dispatch(agent,text,runtime=False):
     """Validate a planned Dxxx dispatch before the child model can start."""
     normalized=normalize_implementation_prompt(text)
-    violation=implementation_prompt_violation(normalized)
+    violation=(
+        implementation_runtime_prompt_violation(agent,normalized)
+        if runtime else implementation_prompt_violation(normalized)
+    )
     if violation: return "",violation
     did=parse_deliverable(normalized)
     if not PROJECT or not plan_ready(): return did,"plan_not_ready"
@@ -3543,7 +3590,7 @@ def enforce_assignment(sid,agent,first_user):
     if not text:
         return
 
-    did,violation=validate_dispatch(agent,text)
+    did,violation=validate_dispatch(agent,text,runtime=True)
     if violation:
         if abort_session(sid,f"dispatch_protocol_violation {violation}",agent):
             dispatch_seen.add(sid)
@@ -4936,10 +4983,30 @@ def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
+    ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     args,unknown=ap.parse_known_args()
+    if args.render_runtime_prompt:
+        if unknown or not args.project or not args.agent:
+            raise SystemExit("runtime prompt render requires --project --agent --render-runtime-prompt")
+        PROJECT=args.project
+        did=args.render_runtime_prompt
+        if not valid_deliverable_id(did):
+            raise SystemExit(f"RUNTIME_PROMPT_DENY invalid_deliverable={did}")
+        leaf=(load_manifest().get("leaves") or {}).get(did)
+        if not isinstance(leaf,dict):
+            raise SystemExit(f"RUNTIME_PROMPT_DENY unknown_deliverable={did}")
+        if leaf.get("split_children"):
+            raise SystemExit(f"RUNTIME_PROMPT_DENY split_parent={did}")
+        expected=leaf.get("role","")
+        if expected!=args.agent:
+            raise SystemExit(
+                f"RUNTIME_PROMPT_DENY role_mismatch expected={expected} actual={args.agent}"
+            )
+        print(implementation_runtime_prompt(did,args.agent))
+        return
     if args.claim_dispatch:
         if unknown or not args.project or not args.agent or args.prompt is None:
             raise SystemExit("dispatch claim requires --project --agent --prompt --claim-dispatch")

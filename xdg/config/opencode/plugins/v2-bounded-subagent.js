@@ -231,9 +231,22 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     const hasDeliverable = typeof prompt === "string" && /^DELIVERABLE:\s*D\d{3}(?:-[AB](?:[12])?)?\s*$/m.test(prompt);
     const implementationAgents = new Set(["probe-builder", "implementer", "core-builder", "feature-builder", "reasoning-builder", "integrator", "tester", "test-builder"]);
     if (!implementationAgents.has(agent) && !hasDeliverable) return;
+    // Render the exact post-preclaim runtime prompt before reserving an attempt.
+    // Rendering is read-only; the canonical five-line parent prompt remains the
+    // only text authorized to reserve an attempt.
+    const did = exactDeliverable(args);
+    const runtimePrompt = implementationAgents.has(agent) && did !== "unknown"
+      ? supervisor(directory, ["--agent", String(agent || ""), "--render-runtime-prompt", did]).replace(/\r?\n$/, "")
+      : null;
+
     // This deterministic supervisor claim occurs before OpenCode materializes
     // the child session or sends a provider request.
     supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", hookCallID(event)]);
+
+    // Only after a successful canonical preclaim may deterministic supervisor
+    // text replace the child-visible prompt. No model/root-authored suffix is
+    // accepted here.
+    if (runtimePrompt !== null) args.prompt = runtimePrompt;
   });
   const after = await api.tool.hook("execute.after", async (event, output) => {
     const result = event?.result || output;
