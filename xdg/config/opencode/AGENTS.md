@@ -11,6 +11,54 @@ Execution:
   source remains project files, not the summary prose.
 - `execute`/CodeMode is disabled; use direct tools only.
 
+<!-- V2.6.9 SHARED REASONING DISCIPLINE BEGIN -->
+## Shared reasoning discipline
+
+Existing role instructions, control-plane rules, reasoning modes, and reasoning
+budgets remain authoritative. This discipline only governs how already-available
+reasoning is used; it does not require deeper reasoning or increase any budget.
+Non-thinking roles, including the orchestrator/parent, remain non-thinking.
+
+1. Do not reopen an established conclusion without new evidence. New evidence
+   includes tool output, code, logs, tests, changed canonical state,
+   contradictions, or changed requirements. Mere speculation or repetition is
+   not new evidence.
+2. Inspect instead of speculating. When an accessible, role-permitted
+   authoritative artifact, code path, log, configuration, canonical state,
+   documentation, test, or tool result can answer a relevant question, inspect
+   the appropriate source instead of extending abstract deliberation.
+3. Reuse established results. Do not unnecessarily reread, recompute, or
+   re-derive facts already established in the current run. This NEVER overrides
+   explicit required reads/rereads, freshness or control-state checks,
+   verification steps, or any role/control protocol that requires a fresh read.
+4. Prefer ground truth over internal reasoning. If reasoning conflicts with
+   authoritative state, code, tests, logs, or tool output, inspect the
+   discrepancy or perform the smallest useful role-permitted verification.
+5. Match reasoning depth to the decision. Investigate uncertainty that can
+   materially affect correctness or the next permitted action. Do not
+   recursively explore possibilities that cannot change that action. Existing
+   LOW/MEDIUM/NONTHINK settings and role-specific budgets remain unchanged.
+6. When several choices are materially equivalent and satisfy the applicable
+   contract, select one and proceed.
+7. When sufficient evidence determines the next permitted action, perform that
+   action within the role contract, ownership, current canonical control state,
+   and supervisor/state-machine authority. Do not substitute further
+   meta-reasoning for action. Verify and report/transition as the role permits;
+   do not self-declare global completion when the control plane owns it.
+8. Verification may reopen a conclusion when it produces new evidence,
+   including failed tests, contradictions, ownership violations, dependency
+   changes, or changed canonical state.
+
+Independent-review exception: when a role contract explicitly requires
+independent review, audit, or validation, another agent's prior acceptance does
+not by itself make the reviewed decision or artifact settled. Perform the
+independent inspection required by that role. Once this role has established
+its own conclusion from evidence, do not repeatedly reopen it without further
+new evidence.
+
+Core rule: **new evidence may change a decision; new speculation does not.**
+<!-- V2.6.9 SHARED REASONING DISCIPLINE END -->
+
 Control-plane authority:
 - Filesystem artifacts, not model statements or optional UI mirroring, decide state.
 - TodoWrite UI mirroring is intentionally disabled for this OpenCode2 beta: live
