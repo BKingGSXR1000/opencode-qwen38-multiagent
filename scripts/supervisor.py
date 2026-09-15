@@ -4587,6 +4587,11 @@ def reconcile_planner_completion(sid):
     planner_completion_seen.add(sid)
 
 
+def probe_progress_abort_reason(reason):
+    """Return the bounded probe-discipline failure, never an infrastructure fault."""
+    reason=str(reason or "")
+    return reason if reason.startswith("probe_research_loop_no_owned_progress") else ""
+
 def reconcile_idle_implementation_session(sid,agent):
     if sid in post_finalize_seen:
         return
@@ -4607,9 +4612,52 @@ def reconcile_idle_implementation_session(sid,agent):
         if compaction_failure(sid)=="compaction.failed"
         else ""
     )
-    infrastructure_reason=abort_reason or supervisor_abort or compaction_abort
+    probe_behavior_reason=probe_progress_abort_reason(supervisor_abort)
+    infrastructure_reason=(
+        abort_reason
+        or ("" if probe_behavior_reason else supervisor_abort)
+        or compaction_abort
+    )
 
-    if infrastructure_reason and not ready_info(did):
+    if probe_behavior_reason and not ready_info(did):
+        # New37: this is not an infrastructure outage. The model successfully
+        # executed several read/probe tool turns but violated the probe's
+        # durable-progress contract. Count it as a genuine leaf failure so the
+        # normal bounded retry -> recursive-split recovery can activate.
+        finalized=False
+        detail="not-attempted"
+        if durable_worker_execution(did,sid):
+            finalized,detail=post_session_finalize(did,sid=sid)
+            if detail.startswith("verify-deps-pending:"):
+                note_verify_wait_once(did,sid,agent,detail)
+                return
+            verify_wait_log_state.pop(did,None)
+            log(
+                f"POST_SESSION_VERIFY_AFTER_PROBE_ABORT session={sid} "
+                f"deliverable={did} result={detail}"
+            )
+            csv(
+                "POST_SESSION_VERIFY_AFTER_PROBE_ABORT",sid,agent,
+                f"{did} {detail}"
+            )
+        if not finalized and not ready_info(did):
+            recorded,outcome=record_leaf_failure(
+                did,probe_behavior_reason,"genuine"
+            )
+            release_operator_reservation(
+                sid,did,probe_behavior_reason
+            )
+            log(
+                f"LEAF_PROBE_PROGRESS_FAILURE session={sid} "
+                f"deliverable={did} recorded={str(recorded).lower()} "
+                f"outcome={outcome} reason={probe_behavior_reason}"
+            )
+            csv(
+                "LEAF_PROBE_PROGRESS_FAILURE",sid,agent,
+                f"{did} recorded={str(recorded).lower()} "
+                f"outcome={outcome} reason={probe_behavior_reason}"
+            )
+    elif infrastructure_reason and not ready_info(did):
         finalized=False
         detail="not-attempted"
         if durable_worker_execution(did,sid):
@@ -4713,6 +4761,8 @@ def reconcile_idle_implementation_session(sid,agent):
     if durable_abort:
         resolve_abort_intent(
             sid,
+            "genuine-probe-progress-failure"
+            if probe_behavior_reason else
             "infrastructure-classified"
             if infrastructure_reason else
             "completed-without-observed-abort"
