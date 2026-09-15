@@ -73,9 +73,9 @@ def external_acquisition_match(text):
     scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",str(text or ""))
     return EXTERNAL_ACQUISITION_RE.search(scrubbed)
 HOST_REMEDIATION_RE = re.compile(
-    r"\b(?:sudo|systemctl|service\s+\w+|daemon-reload|apt(?:-get)?\s+install|"
-    r"dnf\s+install|yum\s+install|pacman\s+-S|restart\s+(?:the\s+)?(?:service|daemon)|"
-    r"enable\s+(?:the\s+)?(?:service|daemon))\b",
+    r"\b(?:sudo|systemctl|service\s+[-\w.@:]+\s+(?:start|stop|restart|reload|force-reload)|"
+    r"daemon-reload|apt(?:-get)?\s+install|dnf\s+install|yum\s+install|pacman\s+-S|"
+    r"restart\s+(?:the\s+)?(?:service|daemon)|enable\s+(?:the\s+)?(?:service|daemon))\b",
     re.I,
 )
 
