@@ -199,16 +199,20 @@ def implementation_runtime_prompt(did,agent):
     handoff_only=bool(isinstance(leaf,dict) and leaf.get("split_handoff_only"))
     if handoff_only:
         deadline=(
-            "\n\nDURABILITY DEADLINE:\n"
+            "\n\nDURABILITY DEADLINE — HARD CONTRACT:\n"
             "This is a progress-only probe handoff. Your primary durable artifact is "
             f".opencode-v2/work/{did}.progress.md.\n"
-            "By your fourth completed tool-bearing turn at the latest, create or update "
-            "that file with the concrete facts known so far using the labels HANDOFF_READY, "
-            "Findings, Evidence, and Next step. Set HANDOFF_READY: true only when the "
-            "handoff is sufficient for the downstream leaf.\n"
-            "Do not continue discovery merely to improve completeness before this first "
-            "durable write. Temporary files do not satisfy this deliverable.\n"
-            "After durable progress exists, continue only bounded discovery required by scope."
+            "By your fourth completed tool-bearing turn at the latest, you MUST create or "
+            "update that file with the concrete facts known so far using the labels "
+            "HANDOFF_READY, Findings, Evidence, and Next step.\n"
+            "You MUST NOT begin a fifth tool-bearing turn before making this durable write. "
+            "At tool-bearing turn 4, stop discovery and write the progress file before any "
+            "further read, shell, web, grep, glob, list, or other tool call.\n"
+            "If the handoff is not yet sufficient, write the partial facts anyway with "
+            "HANDOFF_READY: false; incomplete findings are acceptable. Set HANDOFF_READY: "
+            "true only when the handoff is sufficient for the downstream leaf.\n"
+            "Temporary files do not satisfy this deliverable. After durable progress exists, "
+            "continue only bounded discovery required by scope."
         )
     else:
         deadline=(
