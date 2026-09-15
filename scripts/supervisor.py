@@ -198,22 +198,27 @@ def implementation_runtime_prompt(did,agent):
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     handoff_only=bool(isinstance(leaf,dict) and leaf.get("split_handoff_only"))
     if handoff_only:
-        deadline=(
-            "\n\nDURABILITY DEADLINE — HARD CONTRACT:\n"
-            "This is a progress-only probe handoff. Your primary durable artifact is "
-            f".opencode-v2/work/{did}.progress.md.\n"
-            "By your fourth completed tool-bearing turn at the latest, you MUST create or "
-            "update that file with the concrete facts known so far using the labels "
-            "HANDOFF_READY, Findings, Evidence, and Next step.\n"
-            "You MUST NOT begin a fifth tool-bearing turn before making this durable write. "
-            "At tool-bearing turn 4, stop discovery and write the progress file before any "
-            "further read, shell, web, grep, glob, list, or other tool call.\n"
-            "If the handoff is not yet sufficient, write the partial facts anyway with "
-            "HANDOFF_READY: false; incomplete findings are acceptable. Set HANDOFF_READY: "
-            "true only when the handoff is sufficient for the downstream leaf.\n"
-            "Temporary files do not satisfy this deliverable. After durable progress exists, "
-            "continue only bounded discovery required by scope."
+        lines=base.splitlines()
+        action_order=(
+            "MANDATORY ACTION ORDER — PROGRESS-ONLY HANDOFF:\n"
+            "1. FIRST tool-bearing response: read ONLY the authoritative scope file "
+            f".opencode-v2/work/{did}.scope.md and, if it exists, the current progress file "
+            f".opencode-v2/work/{did}.progress.md. Do not inspect CONTROL_CONTRACT or project "
+            "artifacts yet.\n"
+            "2. SECOND tool-bearing response: you MUST create or update "
+            f".opencode-v2/work/{did}.progress.md using the exact labels HANDOFF_READY, "
+            "Findings, Evidence, and Next step. Use HANDOFF_READY: false unless the handoff "
+            "is already sufficient. This response MUST contain a write/edit of that exact "
+            "progress file and MUST NOT contain read, list, grep, glob, shell, webfetch, "
+            "websearch, or other discovery tool calls.\n"
+            "3. ONLY AFTER that second-response durable write may you inspect "
+            "CONTROL_CONTRACT or project artifacts and continue bounded discovery. Update "
+            "the progress file as concrete evidence improves; set HANDOFF_READY: true only "
+            "when the downstream writer has enough evidence to proceed.\n"
+            "This action order is mandatory even when almost nothing is known yet. A partial "
+            "scope-derived checkpoint is required; temporary files do not count."
         )
+        return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])
     else:
         deadline=(
             "\n\nDURABILITY DEADLINE:\n"
