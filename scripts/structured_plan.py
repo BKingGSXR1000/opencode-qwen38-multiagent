@@ -34,10 +34,27 @@ PATH_RE = re.compile(r"^[^\s`]+$")
 TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
 TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
 TASK_SHAPE_REPEAT_LIMIT = {"S": 4, "M": 6}
-EXPLICIT_STAGE_SEQUENCE_RE = re.compile(
-    r"(?:\([a-z]\)|\(\d+\)|\b(?:first|second|third|then|followed\s+by)\b)",
+EXPLICIT_STAGE_WORD_RE = re.compile(
+    r"\b(?:first|second|third|then|followed\s+by)\b",
     re.I,
 )
+EXPLICIT_PAREN_STAGE_SEQUENCE_RE = re.compile(
+    r"(?:\(1\).*?\(2\)|\(a\).*?\(b\))",
+    re.I | re.S,
+)
+EXPLICIT_MIXED_STAGE_SEQUENCE_RE = re.compile(
+    r"(?:\(1\)|\(a\)).*?\b(?:then|followed\s+by)\b",
+    re.I | re.S,
+)
+
+def has_compound_stage_sequence(text):
+    """Detect explicit staged work without treating arbitrary IDs as stages."""
+    text=str(text or "")
+    return bool(
+        len(EXPLICIT_STAGE_WORD_RE.findall(text))>=2
+        or EXPLICIT_PAREN_STAGE_SEQUENCE_RE.search(text)
+        or EXPLICIT_MIXED_STAGE_SEQUENCE_RE.search(text)
+    )
 EXTERNAL_ACQUISITION_RE = re.compile(
     r"(?:\b(?:fetch(?:ed|ing)?|download(?:ed|ing)?|vendor(?:ed|ing)?|research(?:ed|ing)?)\b"
     r".{0,100}\b(?:https?://|external|public\s+source|authoritative|cdn|jpl|horizons|unpkg|jsdelivr)\b"
@@ -290,7 +307,7 @@ def normalize_document(raw):
             if leaf["repeated_operations"]>TASK_SHAPE_REPEAT_LIMIT[c]:
                 errors.append({"key":key,"code":"task-shape","message":f"{key}: {c} leaf declares {leaf['repeated_operations']} repeated operations; maximum is {TASK_SHAPE_REPEAT_LIMIT[c]}"})
         shape=f"{leaf['outcome']} {leaf['done_when']}"
-        if len(EXPLICIT_STAGE_SEQUENCE_RE.findall(shape))>=2:
+        if has_compound_stage_sequence(shape):
             errors.append({"key":key,"code":"compound-stage","message":f"{key}: Outcome/Done when describes multiple explicit stages"})
         if leaf["role"]!="probe-builder" and external_acquisition_match(leaf["outcome"]):
             errors.append({"key":key,"code":"external-acquisition","message":f"{key}: external acquisition/research must be a separate probe-builder leaf"})
