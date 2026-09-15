@@ -1090,13 +1090,35 @@ def complete_splitter(parent, session="", dispatch_token="", output_text=""):
         if not dispatch_token or status.get("dispatch_token")!=dispatch_token:
             return False,"stale-splitter-completion"
         if not split_request_path(parent).exists(): return False,"split-request-missing"
-        payload=parse_splitter_final_json(output_text) if output_text else (parse_splitter_final_json(last_assistant_text_db(session)) if session else None)
+
+        # New35: Tool.Result may carry subagent text only in result.content.
+        # The plugin now forwards that synchronously. Keep a short DB fallback
+        # for older adapters/persistence-order races without immediately burning
+        # a splitter attempt on the first not-yet-committed DB read.
+        payload=parse_splitter_final_json(output_text)
+        source="hook-output" if isinstance(payload,dict) else ""
+        if not isinstance(payload,dict) and session:
+            for attempt in range(10):
+                payload=parse_splitter_final_json(last_assistant_text_db(session))
+                if isinstance(payload,dict):
+                    source="session-db"
+                    break
+                if attempt < 9:
+                    time.sleep(0.05)
+
         if not isinstance(payload,dict):
-            _,state=record_splitter_failure(parent,"splitter-completed-without-json-proposal",session=session,validation=False)
+            _,state=record_splitter_failure(
+                parent,"splitter-completed-without-json-proposal",
+                session=session,validation=False,
+            )
             return False,state
         atomic_write_json(split_proposal_path(parent),payload)
-        log(f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} session={session} token={dispatch_token}")
+        log(
+            f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} "
+            f"session={session} token={dispatch_token} source={source or 'unknown'}"
+        )
         return process_split_proposal(parent,session,require_proposal=True)
+
 
 def reconcile_split_proposals():
     """Crash recovery for prepared transactions and proposal/request state."""
@@ -1106,34 +1128,39 @@ def reconcile_split_proposals():
     reconcile_split_transactions()
     for request in (Path(PROJECT)/".opencode-v2"/"work").glob("D*.split-request.json"):
         did=request.name.removesuffix(".split-request.json")
-        status=load_split_status(did)
-        state=status.get("state")
-        if state in {
-            "split-validation-failed","splitter-failed",
-            "split-unavailable-read-only-parent",
-        }:
-            continue
-        if state=="splitter-active":
-            try:
-                expired=float(status.get("lease_until_epoch") or 0) <= time.time()
-            except (TypeError,ValueError):
-                expired=True
-            if expired:
-                claims=int(status.get("claim_count") or 0)
-                if claims >= MAX_SPLITTER_ATTEMPTS:
-                    save_split_status(
-                        did,"splitter-failed",claim_count=claims,
-                        reason="splitter lease expired and claim budget is exhausted",
-                        lease_until_epoch=0,
-                    )
-                else:
-                    save_split_status(
-                        did,"split-retryable",claim_count=claims,
-                        reason="splitter lease expired",
-                        lease_until_epoch=0,
-                    )
-        if split_proposal_path(did).exists():
-            process_split_proposal(did)
+        # Claim, completion, lease expiry, and proposal recovery mutate the same
+        # per-parent state machine. Serialize all cross-process transitions on
+        # the same durable parent lock.
+        with splitter_state_lock(did):
+            status=load_split_status(did)
+            state=status.get("state")
+            if state in {
+                "split-validation-failed","splitter-failed",
+                "split-unavailable-read-only-parent",
+            }:
+                continue
+            if state=="splitter-active":
+                try:
+                    expired=float(status.get("lease_until_epoch") or 0) <= time.time()
+                except (TypeError,ValueError):
+                    expired=True
+                if expired:
+                    claims=int(status.get("claim_count") or 0)
+                    if claims >= MAX_SPLITTER_ATTEMPTS:
+                        save_split_status(
+                            did,"splitter-failed",claim_count=claims,
+                            reason="splitter lease expired and claim budget is exhausted",
+                            lease_until_epoch=0,
+                        )
+                    else:
+                        save_split_status(
+                            did,"split-retryable",claim_count=claims,
+                            reason="splitter lease expired",
+                            lease_until_epoch=0,
+                        )
+            if split_proposal_path(did).exists():
+                process_split_proposal(did)
+
 
 
 def record_leaf_failure(did, reason, classification="genuine"):

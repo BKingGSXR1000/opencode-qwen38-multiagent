@@ -92,29 +92,50 @@ function messageText(value, depth = 0) {
     .join("\n");
 }
 
-function detectPurpose(j) {
+function detectPurpose(j, explicitPurpose = "") {
+  // Batch16E/New35: OpenCode V2 exposes request kind deterministically through
+  // session.model.request. The plugin stamps only real compaction requests with
+  // x-v2-request-purpose=compaction. Trust that source marker first and keep
+  // prompt recognition only as a compatibility fallback.
+  if (String(explicitPurpose).toLowerCase() === "compaction") {
+    return "compaction";
+  }
+
   const messages = Array.isArray(j.messages) ? j.messages : [];
   const text = messageText(messages);
+
   const anchored =
     text.includes("Create a new anchored summary") ||
     text.includes("Update the anchored summary") ||
     text.includes("Here is the summary of the conversation before the <conversation>");
   const envelope = text.includes("<conversation>") && text.includes("</conversation>");
-  // OpenCode changed its anchored-summary template from Objective/Work State
-  // to Goal/Progress. Accept both known template families while still
-  // requiring the anchored-summary instruction + conversation envelope, so a
-  // normal coding turn that merely mentions one heading is not reclassified.
   const legacyStructure =
     text.includes("## Objective") &&
     text.includes("## Work State") &&
     text.includes("## Relevant Files");
-  const currentStructure =
+  const goalProgressStructure =
     text.includes("## Goal") &&
     text.includes("## Progress") &&
     text.includes("## Relevant Files");
-  return anchored && envelope && (legacyStructure || currentStructure)
-    ? "compaction"
-    : "normal";
+
+  // OpenCode V2 beta-19242/current V2 local-summary family used in New35.
+  const v2SummaryInstruction =
+    text.includes("Summarize only what the user and the assistant said and did.") &&
+    (
+      text.includes("You MUST summarize the conversation above into a structured summary") ||
+      text.includes("Update the existing checkpoint in the conversation above into one consolidated summary.")
+    );
+  const v2Structure =
+    text.includes("## Objective") &&
+    text.includes("## Requirements") &&
+    text.includes("## Decisions") &&
+    text.includes("## Work State") &&
+    text.includes("## Relevant Files");
+
+  return (
+    (anchored && envelope && (legacyStructure || goalProgressStructure)) ||
+    (v2SummaryInstruction && v2Structure)
+  ) ? "compaction" : "normal";
 }
 
 function enforceGenerationCap(j, policy, purpose) {
@@ -205,15 +226,43 @@ function runSelfTest() {
     tools: [{}, {}],
     v2_max_tokens: 2048,
   };
+  const liveV2Compaction = {
+    messages: [{ role: "user", content: [
+      "You MUST summarize the conversation above into a structured summary that will be given to another agent to resume the work.",
+      "Summarize only what the user and the assistant said and did.",
+      "## Objective",
+      "## Requirements",
+      "## Decisions",
+      "## Work State",
+      "## Relevant Files",
+    ].join("\n") }],
+    v2_max_tokens: 2048,
+  };
+  const opaqueMarkedCompaction = {
+    messages: [{ role: "user", content: "opaque provider-transformed request" }],
+    v2_max_tokens: 2048,
+  };
   if (detectPurpose(current) !== "compaction") throw new Error("current compaction prompt not detected");
   if (detectPurpose(update) !== "compaction") throw new Error("update compaction prompt not detected");
   if (detectPurpose(legacy) !== "compaction") throw new Error("legacy compaction prompt not detected");
   if (detectPurpose(normal) !== "normal") throw new Error("normal request misclassified as compaction");
   if (detectPurpose(nestedCompaction) !== "compaction") throw new Error("nested compaction request not detected");
+  if (detectPurpose(liveV2Compaction) !== "compaction") throw new Error("OpenCode V2 compaction prompt not detected");
+  if (detectPurpose(opaqueMarkedCompaction, "compaction") !== "compaction") throw new Error("source-marked compaction not detected");
   const nestedCapped = JSON.parse(JSON.stringify(nestedCompaction));
   const nestedResult = enforceGenerationCap(nestedCapped, "off", detectPurpose(nestedCapped));
   if (nestedResult.cap !== COMPACTION_GENERATION_CAP || nestedResult.source !== "compaction-purpose") {
     throw new Error("nested compaction did not override inherited role cap");
+  }
+  const marked = JSON.parse(JSON.stringify(opaqueMarkedCompaction));
+  const markedResult = enforceGenerationCap(marked, "off", detectPurpose(marked, "compaction"));
+  if (markedResult.cap !== COMPACTION_GENERATION_CAP || markedResult.source !== "compaction-purpose") {
+    throw new Error("source-marked compaction did not override inherited role cap");
+  }
+  const v2Capped = JSON.parse(JSON.stringify(liveV2Compaction));
+  const v2Result = enforceGenerationCap(v2Capped, "off", detectPurpose(v2Capped));
+  if (v2Result.cap !== COMPACTION_GENERATION_CAP || v2Result.source !== "compaction-purpose") {
+    throw new Error("OpenCode V2 compaction did not receive dedicated cap");
   }
   const capped = JSON.parse(JSON.stringify(current));
   const result = enforceGenerationCap(capped, "off", detectPurpose(capped));
@@ -320,7 +369,8 @@ const server = http.createServer((req, res) => {
         }
 
         j.chat_template_kwargs = ctk;
-        const purpose = detectPurpose(j);
+        const explicitPurpose = String(req.headers["x-v2-request-purpose"] || "");
+        const purpose = detectPurpose(j, explicitPurpose);
         const generation = enforceGenerationCap(j, policy, purpose);
 
         const after = meta(j);
@@ -329,6 +379,7 @@ const server = http.createServer((req, res) => {
           kind: "request",
           policy,
           purpose,
+          purpose_source: explicitPurpose.toLowerCase() === "compaction" ? "source-header" : "prompt-fallback",
           generation,
           before,
           after,
@@ -349,6 +400,8 @@ const server = http.createServer((req, res) => {
     };
 
     delete headers["transfer-encoding"];
+    // Private control-plane marker; the inference backend does not need it.
+    delete headers["x-v2-request-purpose"];
 
     if (body.length) {
       headers["content-length"] = String(body.length);

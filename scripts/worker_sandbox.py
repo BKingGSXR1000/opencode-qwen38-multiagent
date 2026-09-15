@@ -1015,10 +1015,16 @@ def run_validator_bash(project: Path, session: str, command: str, timeout=240):
     args=["bwrap","--die-with-parent","--new-session","--unshare-pid","--unshare-ipc","--ro-bind","/","/","--proc","/proc","--dev-bind","/dev","/dev","--tmpfs","/run"]
     args.extend(resolver_args)
     args.extend(["--unsetenv","DBUS_SYSTEM_BUS_ADDRESS","--unsetenv","DBUS_SESSION_BUS_ADDRESS","--unsetenv","XDG_RUNTIME_DIR","--tmpfs","/tmp","--ro-bind",str(project.resolve()),lower_root,"--bind",str(shadow),str(project.resolve()),"--tmpfs","/var/tmp","--chdir",str(project.resolve()),"--setenv","V2_ACCEPTANCE_SANDBOX","1","/bin/bash","-euo","pipefail","-c",command])
-    started=time.time(); proc=subprocess.run(args,text=True,timeout=timeout)
-    if proc.returncode==0 and "acceptance-browser.mjs" in command:
-        _copy_validator_browser_evidence(project,shadow,started)
-    return proc.returncode
+    started=time.time()
+    try:
+        proc=subprocess.run(args,text=True,timeout=timeout)
+        if proc.returncode==0 and "acceptance-browser.mjs" in command:
+            _copy_validator_browser_evidence(project,shadow,started)
+        return proc.returncode
+    finally:
+        # Remove every disposable validator snapshot on success, command
+        # failure, and timeout; trusted evidence has already been copied out.
+        shutil.rmtree(run_dir,ignore_errors=True)
 
 def replacement_validator_command(project: Path, session: str, command: str):
     encoded=base64.b64encode(command.encode()).decode()

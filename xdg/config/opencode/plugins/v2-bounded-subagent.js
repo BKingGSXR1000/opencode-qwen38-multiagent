@@ -31,6 +31,30 @@ function hookCallID(event) {
   return String(event?.callID || event?.callId || event?.id || "");
 }
 
+export function toolResultText(result) {
+  if (!result || typeof result !== "object") return "";
+  if (typeof result.output === "string" && result.output.length) return result.output;
+  if (typeof result.content === "string") return result.content;
+  if (Array.isArray(result.content)) {
+    return result.content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item?.type === "text" && typeof item.text === "string") return item.text;
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return typeof result.output === "string" ? result.output : "";
+}
+
+export function markRequestPurpose(event) {
+  if (event?.kind !== "compaction") return false;
+  if (!event.headers || typeof event.headers !== "object") return false;
+  event.headers["x-v2-request-purpose"] = "compaction";
+  return true;
+}
+
 function shellQuote(value) {
   return "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
 }
@@ -177,6 +201,11 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
 }
 
 export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
+  // Stamp OpenCode V2's deterministic request kind before provider dispatch.
+  const modelRequest = await api.session.hook("model.request", async (event) => {
+    markRequestPurpose(event);
+  });
+
   const before = await api.tool.hook("execute.before", async (event, output) => {
     guardWorkerMutation(directory, event, output);
     if (event.tool !== "subagent" && event.tool !== "task") return;
@@ -210,6 +239,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     const result = event?.result || output;
     if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
     const args = hookArgs(event, output);
+    const rawResult = toolResultText(result);
     const splitterParent = args?.agent === "task-splitter" ? splitParent(args) : "";
     if (splitterParent) {
       // The completion event is the deterministic validation trigger. The
@@ -217,7 +247,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       // explicit failure if it is absent or invalid; no root cycle is needed.
       const session = String(result.metadata?.sessionID || "");
       const token = hookCallID(event);
-      const encoded = Buffer.from(String(result.output || ""), "utf8").toString("base64");
+      const encoded = Buffer.from(rawResult, "utf8").toString("base64");
       try {
         supervisor(directory, ["--complete-splitter", splitterParent, "--prompt", session, "--dispatch-token", token, "--splitter-output-b64", encoded]);
       } catch {
@@ -226,7 +256,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     }
     let receipt;
     if (args?.agent === "acceptance-validator") {
-      const raw = String(result.output || "").trim();
+      const raw = rawResult.trim();
       const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
       if (!modelPass) {
         receipt = "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS";
@@ -240,7 +270,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
         }
       }
     } else {
-      receipt = boundedChildResult({ directory, args, metadata: result.metadata, original: result.output || "" });
+      receipt = boundedChildResult({ directory, args, metadata: result.metadata, original: rawResult });
     }
     // The beta constructs the parent-visible tool response from `content`.
     // Updating `output` alone only changed hook metadata, not the text the root
@@ -257,10 +287,29 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     // ephemeral runtime environment. Terminal cleanup is supervisor-owned.
   });
   return () => {
+    modelRequest.dispose();
     before.dispose();
     after.dispose();
   };
 };
+
+if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
+  const proposal = "{\"protocol\":\"v2-task-split-proposal-v1\",\"parent_id\":\"D009\"}";
+  const contentOnly = { content: [{ type: "text", text: proposal }], metadata: { sessionID: "ses-test" } };
+  if (toolResultText(contentOnly) !== proposal) throw new Error("content-only tool result was not extracted");
+  if (toolResultText({ content: "ACCEPTANCE_PASS" }) !== "ACCEPTANCE_PASS") {
+    throw new Error("string content tool result was not extracted");
+  }
+  const event = { kind: "compaction", headers: {} };
+  if (!markRequestPurpose(event) || event.headers["x-v2-request-purpose"] !== "compaction") {
+    throw new Error("compaction source marker was not stamped");
+  }
+  const primary = { kind: "primary", headers: {} };
+  if (markRequestPurpose(primary) || primary.headers["x-v2-request-purpose"]) {
+    throw new Error("normal request was marked as compaction");
+  }
+  console.log("v2-bounded-subagent selftest: OK");
+}
 
 export default {
   id: "v2-bounded-subagent",
