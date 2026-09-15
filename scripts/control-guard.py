@@ -26,7 +26,7 @@ TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
 TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
 TASK_SHAPE_REPEAT_LIMIT = {"S": 4, "M": 6}
 EXPLICIT_STAGE_WORD_RE = re.compile(
-    r"\b(?:first|second|third|then|followed\s+by)\b",
+    r"(?<!-)\b(?:first|second|third)\b(?!-)|\b(?:then|followed\s+by)\b",
     re.I,
 )
 EXPLICIT_PAREN_STAGE_SEQUENCE_RE = re.compile(
