@@ -76,13 +76,14 @@ SPLIT_HANDOFF_VERIFY_SENTINEL="SUPERVISOR_HANDOFF_PROGRESS"
 SPLIT_HANDOFF_MARKER="HANDOFF_READY: true"
 RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
 ROOT_SESSION_PROTOCOL="v2-root-session-v1"
+ROOT_CONTINUATION_BLOCK_PROTOCOL="v2-root-continuation-block-v1"
 MAX_SPLIT_HANDOFF_SCOPE_CHARS=1200
 SPLIT_HANDOFF_STAGE_RE=re.compile(
     r"(?:\([a-z]\)|\(\d+\)|\b(?:first|second|third|then|followed\s+by)\b)",
     re.I,
 )
 lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
-event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock()
+event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock(); planner_restart_lock=threading.RLock()
 state_blocker_exempt_active_seen=set()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
 verify_wait_log_state={}
@@ -1320,7 +1321,7 @@ def normalized_state_snapshot(project):
                 "STATE_LOCAL_BLOCKER_CONTINUE "
                 f"blockers={','.join(str(x.get('deliverable') or '') for x in clean)}"
             )
-    return data
+    return apply_root_continuation_block(data)
 # V2.6.9 NORMALIZED SCHEDULER STATE END
 
 # V2.6.9 DURABLE CONTROL STATUS SNAPSHOT BEGIN
@@ -1418,23 +1419,41 @@ def planner_plan_state(plan_path):
         "engaged":engaged,
     }
 
-def planner_progress_reason(sid,elapsed,plan_path=None):
+def planner_progress_reason(sid,elapsed,plan_path=None,paused=False):
     """Apply the one planner-owned durable-progress policy.
 
     Bootstrap is immediately restartable. A checkpoint mutation proves tool
     engagement but does not buy more time: the first actual Dxxx structure is
     due within the initial grace. Thereafter only meaningful-plan fingerprints
-    reset the 300-second stall timer.
+    reset the configured stall timer.
+
+    OpenCode compaction is infrastructure work, not planner deliberation. While
+    the newest compaction row is non-terminal, freeze both the initial-progress
+    and post-progress watchdog clocks instead of charging that time to the
+    planner.
     """
+    state=planner_checkpoints.setdefault(sid,{})
+    if paused:
+        state.setdefault("pause_started",float(elapsed))
+        return ""
+
+    pause_started=state.pop("pause_started",None)
+    if pause_started is not None:
+        paused_for=max(0.0,float(elapsed)-float(pause_started))
+        state["paused_total"]=float(state.get("paused_total") or 0.0)+paused_for
+    effective_elapsed=max(
+        0.0,
+        float(elapsed)-float(state.get("paused_total") or 0.0),
+    )
+
     plan_path=Path(plan_path or structured_plan_path())
     plan=planner_plan_state(plan_path)
-    state=planner_checkpoints.setdefault(sid,{})
     if "baseline_full_signature" not in state:
         has_meaningful=bool(plan["meaningful_signature"])
         state.update(
             baseline_full_signature=plan["full_signature"],
             last_meaningful_signature=plan["meaningful_signature"],
-            last_progress=elapsed, model_progress=has_meaningful,
+            last_progress=effective_elapsed, model_progress=has_meaningful,
             engagement=plan["engaged"],
         )
         return ""
@@ -1444,21 +1463,24 @@ def planner_progress_reason(sid,elapsed,plan_path=None):
             state.update(
                 model_progress=True,
                 last_meaningful_signature=plan["meaningful_signature"],
-                last_progress=elapsed,
+                last_progress=effective_elapsed,
             )
             return ""
-        if elapsed<PLANNER_INITIAL_PROGRESS_GRACE_SECONDS: return ""
+        if effective_elapsed<PLANNER_INITIAL_PROGRESS_GRACE_SECONDS: return ""
         if plan["full_signature"] is None:
-            return f"planner_bootstrap_missing no_durable_progress={int(elapsed)}s"
+            return f"planner_bootstrap_missing no_durable_progress={int(effective_elapsed)}s"
         return (
-            f"planner_no_meaningful_plan_progress elapsed={int(elapsed)}s "
+            f"planner_no_meaningful_plan_progress elapsed={int(effective_elapsed)}s "
             f"limit={PLANNER_INITIAL_PROGRESS_GRACE_SECONDS}s "
             f"engagement={str(state['engagement']).lower()}"
         )
     if plan["meaningful_signature"]!=state.get("last_meaningful_signature"):
-        state.update(last_meaningful_signature=plan["meaningful_signature"],last_progress=elapsed)
+        state.update(
+            last_meaningful_signature=plan["meaningful_signature"],
+            last_progress=effective_elapsed,
+        )
         return ""
-    waited=elapsed-state.get("last_progress",elapsed)
+    waited=effective_elapsed-state.get("last_progress",effective_elapsed)
     if waited<PLANNER_PROGRESS_STALL_SECONDS: return ""
     return f"planner_plan_progress_stalled elapsed={int(waited)}s limit={PLANNER_PROGRESS_STALL_SECONDS}s"
 
@@ -1476,15 +1498,56 @@ def planner_restart_count():
         raise StateCorruptionError("planner restart ledger count is negative")
     return count
 
-def record_planner_restart(sid,reason):
-    data={"owner":"supervisor","count":planner_restart_count()+1,"retired_session":sid,"reason":reason}
-    atomic_write_json(planner_restart_path(),data)
+def planner_restart_counted_sessions(data):
+    raw=data.get("counted_sessions")
+    if raw is None:
+        legacy=str(data.get("retired_session") or "")
+        return [legacy] if legacy else []
+    if (
+        not isinstance(raw,list)
+        or any(not isinstance(item,str) or not item for item in raw)
+        or len(set(raw))!=len(raw)
+    ):
+        raise StateCorruptionError("planner restart counted_sessions is invalid")
+    return list(raw)
 
-def planner_retirement_reason(sid,elapsed,plan_path=None):
+def record_planner_restart(sid,reason):
+    """Charge at most one restart slot to one concrete planner session."""
+    if not isinstance(sid,str) or not sid:
+        raise StateCorruptionError("planner restart session is invalid")
+    with planner_restart_lock:
+        data=load_json_object(
+            planner_restart_path(),
+            default_missing={"owner":"supervisor","count":0,"counted_sessions":[]},
+            label="planner restart ledger",
+        )
+        try:
+            count=int(data.get("count") or 0)
+        except (ValueError,TypeError) as exc:
+            raise StateCorruptionError("planner restart ledger count is invalid") from exc
+        if count < 0:
+            raise StateCorruptionError("planner restart ledger count is negative")
+        counted=planner_restart_counted_sessions(data)
+        if sid in counted or count>=MAX_PLANNER_RESTARTS:
+            return False
+        counted.append(sid)
+        atomic_write_json(
+            planner_restart_path(),
+            {
+                "owner":"supervisor",
+                "count":count+1,
+                "retired_session":sid,
+                "reason":str(reason)[:1000],
+                "counted_sessions":counted,
+            },
+        )
+        return True
+
+def planner_retirement_reason(sid,elapsed,plan_path=None,paused=False):
     """One shared planner invariant for fresh and replacement sessions."""
     if planner_restart_count()>=MAX_PLANNER_RESTARTS and not plan_ready():
         return f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
-    return planner_progress_reason(sid,elapsed,plan_path)
+    return planner_progress_reason(sid,elapsed,plan_path,paused=paused)
 
 def _strict_owned_artifact_text(raw):
     return shared_strict_owned_artifact_paths(raw)
@@ -3627,6 +3690,84 @@ def root_orchestrator_id():
     except Exception: return ""
 
 def root_rollover_path(): return Path(PROJECT)/".opencode-v2"/"root-rollovers.json"
+def root_continuation_block_path(): return Path(PROJECT)/".opencode-v2"/"root-continuation-blocked.json"
+
+def load_root_continuation_block():
+    path=root_continuation_block_path()
+    if not path.exists():
+        return {}
+    data=load_json_object(path,label="root continuation blocker")
+    if (
+        data.get("owner")!="supervisor"
+        or data.get("protocol")!=ROOT_CONTINUATION_BLOCK_PROTOCOL
+        or data.get("reason")!="root_continuation_limit"
+    ):
+        raise StateCorruptionError("root continuation blocker is invalid")
+    try:
+        count=int(data.get("count"))
+        limit=int(data.get("limit"))
+    except (ValueError,TypeError) as exc:
+        raise StateCorruptionError("root continuation blocker counters are invalid") from exc
+    if count < limit or limit != MAX_ROOT_RESTARTS:
+        raise StateCorruptionError("root continuation blocker limit is inconsistent")
+    return data
+
+def apply_root_continuation_block(data):
+    block=load_root_continuation_block()
+    if not block or data.get("resume_phase")=="complete":
+        return data
+    blockers=[
+        item for item in (
+            data.get("execution_blockers",[])
+            if isinstance(data.get("execution_blockers"),list) else []
+        )
+        if not (
+            isinstance(item,dict)
+            and item.get("reason")=="root_continuation_limit"
+        )
+    ]
+    blockers.append({
+        "deliverable":"",
+        "reason":"root_continuation_limit",
+        "detail":(
+            f"fresh root continuation limit reached "
+            f"({block.get('count')}/{block.get('limit')}) "
+            f"during {block.get('phase')}"
+        ),
+        "latest_session":str(block.get("latest_session") or ""),
+    })
+    data["execution_blockers"]=blockers
+    data["root_continuation"]={
+        "blocked":True,
+        "reason":"root_continuation_limit",
+        "count":int(block["count"]),
+        "limit":int(block["limit"]),
+        "phase":str(block.get("phase") or ""),
+        "latest_session":str(block.get("latest_session") or ""),
+    }
+    data["resume_phase"]="execution-blocked"
+    return data
+
+def record_root_continuation_limit(sid,phase):
+    count=root_restart_count()
+    payload={
+        "owner":"supervisor",
+        "protocol":ROOT_CONTINUATION_BLOCK_PROTOCOL,
+        "reason":"root_continuation_limit",
+        "count":count,
+        "limit":MAX_ROOT_RESTARTS,
+        "phase":str(phase or ""),
+        "latest_session":str(sid or ""),
+        "recorded_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    }
+    existing=load_root_continuation_block()
+    if existing and all(
+        existing.get(key)==payload.get(key)
+        for key in ("owner","protocol","reason","count","limit","phase","latest_session")
+    ):
+        return False
+    atomic_write_json(root_continuation_block_path(),payload)
+    return True
 
 def root_restart_count():
     data=load_json_object(
@@ -3646,6 +3787,9 @@ def record_root_restart(sid,phase):
         root_rollover_path(),
         {"owner":"supervisor","count":count,"latest_session":sid,"phase":phase},
     )
+    # A successful fresh-root launch supersedes any stale blocker left after an
+    # operator/manual recovery that reset the rollover budget.
+    root_continuation_block_path().unlink(missing_ok=True)
 
 
 # V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
@@ -3984,7 +4128,17 @@ def maybe_continue_root(active_sids,child_active):
     if root_idle_since is None: root_idle_since=time.time(); return False
     if time.time()-root_idle_since<5: return False
     if root_restart_count()>=MAX_ROOT_RESTARTS:
-        log(f"ROOT_CONTINUATION_LIMIT phase={phase} count={root_restart_count()}")
+        count=root_restart_count()
+        newly_blocked=record_root_continuation_limit(root,phase)
+        if newly_blocked:
+            log(f"ROOT_CONTINUATION_LIMIT phase={phase} count={count}")
+            csv(
+                "ROOT_CONTINUATION_LIMIT",
+                root,
+                "orchestrator",
+                f"phase={phase} count={count} limit={MAX_ROOT_RESTARTS}",
+            )
+        sync_control_status_snapshot()
         return False
     ok,detail=http.start_agent_session("orchestrator",ROOT_CONTINUATION_PROMPT)
     if not ok:
@@ -4216,8 +4370,16 @@ def api_poll_loop():
                 # unfinished assistant message is actually visible.
                 live_observable=bool(live and live.get("connected"))
                 tool_running=shape["tool_running"] or bool(live and live.get("tool_running"))
+                planner_compaction_active=False
+                if agent=="implementation-planner" and parent:
+                    compaction_state=latest_compaction_state(sid)
+                    planner_compaction_active=bool(
+                        compaction_state.get("seq")
+                        and compaction_state.get("status") not in {"completed","failed"}
+                    )
                 can_watch=(bool(parent) and not shape.get("assistant_completed")
                            and not tool_running
+                           and not planner_compaction_active
                            and (shape.get("observable") or live_observable))
 
                 progress_marker=visible_progress_marker(shape,live)
@@ -4229,7 +4391,7 @@ def api_poll_loop():
                 fallback_reason=effective_fallback_reason(
                     sid,agent,did,shape.get("observable") or live_observable,
                     backend_snapshot=backend_snapshot,
-                ) if parent else ""
+                ) if parent and not planner_compaction_active else ""
                 planner_retired=False
 
                 if agent=="implementation-planner" and parent:
@@ -4239,7 +4401,10 @@ def api_poll_loop():
                     )
                     checkpoint.setdefault("started",time.monotonic())
                     progress_reason=planner_retirement_reason(
-                        sid,time.monotonic()-checkpoint["started"],existing_plan
+                        sid,
+                        time.monotonic()-checkpoint["started"],
+                        existing_plan,
+                        paused=planner_compaction_active,
                     )
                     if progress_reason and not checkpoint.get("aborted"):
                         checkpoint["aborted"]=True
