@@ -45,6 +45,7 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
+EARLY_WRITE_COMPLETED_TURNS=3
 MAX_REFERENCE_FOUNDATION_SESSIONS=3
 MAX_REFERENCE_VALIDATION_SESSIONS=8
 MAX_REFERENCE_STAGNANT_SESSIONS=2
@@ -66,7 +67,7 @@ MAX_PLANNER_RESTARTS=3
 # Existing historical `V2.6.7` ledgers remain readable; newly created ledgers
 # use this unambiguous schema name without a destructive migration.
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
-SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v1"
+SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v2"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
@@ -195,13 +196,12 @@ def implementation_prompt(did):
     )
 
 def implementation_runtime_prompt(did,agent):
-    # Deterministically enrich probe workers after canonical dispatch preclaim.
+    """Deterministically enrich the canonical child-visible prompt."""
     base=implementation_prompt(did)
-    if agent!="probe-builder":
-        return base
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     handoff_only=bool(isinstance(leaf,dict) and leaf.get("split_handoff_only"))
-    if handoff_only:
+
+    if agent=="probe-builder" and handoff_only:
         lines=base.splitlines()
         action_order=(
             "MANDATORY ACTION ORDER — PROGRESS-ONLY HANDOFF:\n"
@@ -227,17 +227,21 @@ def implementation_runtime_prompt(did,agent):
             "persist the result, and return. Temporary files do not count."
         )
         return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])
-    else:
-        deadline=(
-            "\n\nDURABILITY DEADLINE:\n"
-            "By your fourth completed tool-bearing turn at the latest, create or update "
-            "at least one owned project artifact with the concrete facts known so far.\n"
-            "Partial or unknown fields are allowed; do not postpone the first durable write "
-            "merely to improve completeness. Files under /tmp or other temporary locations "
-            "do not count as owned durable progress.\n"
-            "After durable progress exists, continue only bounded discovery required by scope."
+
+    owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
+    if agent not in READ_ONLY_SPLIT_ROLES and owned:
+        gate=(
+            "\n\nEARLY WRITE GATE — EXACT:\n"
+            "At the END of your THIRD completed tool-bearing assistant turn, at least one "
+            "owned project artifact MUST differ from its dispatch baseline. The progress file "
+            "does NOT satisfy this gate. If the owned artifact was already correct, use at "
+            "most those three turns to run the exact Verify command and return normally. "
+            "Do not make a fourth tool-bearing turn. Any fourth tool call while no owned "
+            "artifact delta exists is deterministically denied."
         )
-    return base+deadline
+        return base+gate
+
+    return base
 
 def recursive_split_enabled():
     return load_manifest().get("recursive_split_protocol") == RECURSIVE_SPLIT_PROTOCOL
@@ -488,6 +492,42 @@ def split_handoff_verify_command(child_id):
     )
 
 
+def _split_artifact_inventory(paths):
+    root=Path(PROJECT)
+    result={}
+    for rel in paths:
+        path=root/rel
+        kind="missing"
+        if path.is_file(): kind="file"
+        elif path.is_dir(): kind="directory"
+        elif path.exists(): kind="other"
+        result[rel]={"exists":path.exists(),"kind":kind}
+    return result
+
+
+def _canonical_split_path_list(raw, field):
+    if not isinstance(raw,list):
+        raise ValueError(f"{field} must be a JSON array")
+    result=[]; seen=set()
+    for item in raw:
+        if not isinstance(item,str) or not item.strip():
+            raise ValueError(f"{field} entries must be non-empty strings")
+        value=item.strip().replace("\\","/")
+        path=Path(value)
+        if path.is_absolute() or ".." in path.parts or value.startswith("./"):
+            raise ValueError(f"{field} contains non-canonical path: {item}")
+        canonical=path.as_posix()
+        if canonical in ("",".",".git") or canonical.startswith(".git/"):
+            raise ValueError(f"{field} contains forbidden path: {item}")
+        if canonical in seen:
+            raise ValueError(f"{field} contains duplicate path: {canonical}")
+        seen.add(canonical); result.append(canonical)
+    return result
+
+
+def _path_inside_any(path, roots):
+    return any(path==root or path.startswith(root.rstrip("/")+"/") for root in roots)
+
 def split_request(did):
     """Materialize a durable split request from an already-durable ledger marker."""
     if not recursive_split_enabled() or split_depth(did) >= MAX_SPLIT_DEPTH:
@@ -568,7 +608,8 @@ def split_request(did):
             "path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),
             "contents":progress_text,
         },
-        "existing_artifacts":parent_owned,
+        "existing_artifacts":[item for item in parent_owned if (Path(PROJECT)/item).exists()],
+        "artifact_inventory":_split_artifact_inventory(parent_owned),
         "ownership_items":parent_owned,
         "failed_attempts":compact,
         "decomposition_policy":{
@@ -918,12 +959,22 @@ def validate_split_proposal(parent, proposals, request=None):
     for index, proposal in enumerate(proposals):
         if not isinstance(proposal,dict):
             raise ValueError("child proposal must be an object")
-        allowed={"scope","owned_artifacts","verify_command","role","depends_on_sibling","done_when"}
+        allowed={
+            "scope","owned_artifacts","verify_command","role","depends_on_sibling",
+            "done_when","reads_existing","creates_or_updates",
+        }
         if set(proposal)-allowed or not all(
             isinstance(proposal.get(k),str) and proposal[k].strip()
             for k in ("scope","owned_artifacts","verify_command","role","done_when")
         ):
             raise ValueError("child proposal has missing or unsupported fields")
+        if "reads_existing" not in proposal or "creates_or_updates" not in proposal:
+            raise ValueError("child proposal requires reads_existing and creates_or_updates arrays")
+        reads_existing=_canonical_split_path_list(proposal.get("reads_existing"),"reads_existing")
+        creates_or_updates=_canonical_split_path_list(proposal.get("creates_or_updates"),"creates_or_updates")
+        missing_reads=[rel for rel in reads_existing if not (Path(PROJECT)/rel).exists()]
+        if missing_reads:
+            raise ValueError("reads_existing path does not exist: "+", ".join(missing_reads))
 
         owned_list,owned_error=_strict_owned_artifact_text(proposal["owned_artifacts"])
         if owned_error:
@@ -966,6 +1017,16 @@ def validate_split_proposal(parent, proposals, request=None):
                 raise ValueError("; ".join(contract_errors))
 
         read_only_role=role in READ_ONLY_SPLIT_ROLES
+        if handoff_only or read_only_role:
+            if creates_or_updates:
+                raise ValueError("progress-only/read-only child must have empty creates_or_updates")
+        else:
+            if not creates_or_updates:
+                raise ValueError("writing child requires non-empty creates_or_updates")
+            outside=[rel for rel in creates_or_updates if not _path_inside_any(rel,owned)]
+            if outside:
+                raise ValueError("creates_or_updates path is outside child ownership: "+", ".join(outside))
+
         if not handoff_only:
             if read_only_role and owned:
                 raise ValueError(
@@ -1012,6 +1073,8 @@ def validate_split_proposal(parent, proposals, request=None):
             "split_children":[],
             "split_handoff_only":handoff_only,
             "split_handoff_source":"",
+            "split_reads_existing":reads_existing,
+            "split_creates_or_updates":creates_or_updates,
         })
         child["launch_deps"]=list(leaf.get("launch_deps",[])) + ([expected[0]] if sibling=="first" else [])
         if handoff_only:
@@ -2310,6 +2373,61 @@ def persisted_completed_tool_turns(sid):
         if completed:
             turns+=1
     return turns
+
+def _session_agent_db(sid):
+    try:
+        con=db_connect(); row=con.execute("SELECT agent FROM session_v2 WHERE id=?",(sid,)).fetchone(); con.close()
+        return str(row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def _owned_artifact_changed_since_execution_baseline(did,attempt):
+    if not attempt: return False,"attempt-missing"
+    path=execution_baseline_path(did,attempt)
+    try:
+        baseline=load_json_object(path,label=f"execution baseline {did} attempt {attempt}")
+    except Exception:
+        return False,"baseline-missing"
+    before=baseline.get("files") if isinstance(baseline,dict) else None
+    if not isinstance(before,dict): return False,"baseline-invalid"
+    roots=owned_artifact_paths((load_manifest().get("leaves") or {}).get(did,{}))
+    if not roots: return False,"no-owned-artifacts"
+    after=execution_scope_fingerprints(did)
+    def pick(data):
+        return {key:value for key,value in data.items() if _path_inside_any(key,roots)}
+    changed=pick(before)!=pick(after)
+    return changed,"changed" if changed else "unchanged"
+
+
+def early_write_gate_state(sid):
+    """Fail closed before a fourth tool-bearing turn for writing leaves."""
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return "na","not-implementation-worker"
+    did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if not did or not isinstance(leaf,dict):
+        return "na","no-canonical-leaf"
+    if agent in READ_ONLY_SPLIT_ROLES or not owned_artifact_paths(leaf):
+        return "na","read-only-or-progress-only"
+    turns=persisted_completed_tool_turns(sid)
+    if turns < EARLY_WRITE_COMPLETED_TURNS:
+        return "allow",f"completed_tool_turns={turns}"
+    if ready_info(did):
+        return "satisfied","leaf-ready"
+    attempt=attempt_sequence_for_session(sid,did)
+    if not attempt:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+    changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
+    if changed:
+        return "satisfied",f"owned-artifact-delta attempt={attempt}"
+    return "deny",(
+        f"early_write_gate completed_tool_turns={turns} "
+        f"required={EARLY_WRITE_COMPLETED_TURNS} detail={detail}"
+    )
+
 
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
     """Require recurring durable progress during bounded probe discovery.
@@ -5326,10 +5444,20 @@ def main():
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
     ap.add_argument("--render-runtime-prompt")
+    ap.add_argument("--early-write-check")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     args,unknown=ap.parse_known_args()
+    if args.early_write_check:
+        if unknown or not args.project:
+            raise SystemExit("early-write check requires --project --early-write-check")
+        PROJECT=args.project
+        state,detail=early_write_gate_state(args.early_write_check)
+        if state=="deny":
+            raise SystemExit(f"EARLY_WRITE_DENY session={args.early_write_check} {detail}")
+        print(f"EARLY_WRITE_{state.upper()} session={args.early_write_check} {detail}")
+        return
     if args.render_runtime_prompt:
         if unknown or not args.project or not args.agent:
             raise SystemExit("runtime prompt render requires --project --agent --render-runtime-prompt")

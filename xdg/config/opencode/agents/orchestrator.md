@@ -131,22 +131,28 @@ Initial planner launch: use a SHORT prompt containing the ORIGINAL USER REQUEST
 verbatim plus:
 `Follow your structured implementation-planner protocol.`
 
-After every planner receipt, direct-read `.opencode-v2/query/decision.json` and require the real
-`.opencode-v2/IMPLEMENTATION_PLAN.ready`.
+After EVERY planner tool receipt — including cancellation/interruption — immediately
+direct-read `.opencode-v2/query/decision.json`. Do not infer planner state from
+the task receipt, session prose, or file-existence guesses.
 
-If ready is missing and `.opencode-v2/IMPLEMENTATION_PLAN.repair.json` exists,
-launch one FRESH implementation-planner with exactly:
-`Repair structured implementation planning for this project.`
-`Read .opencode-v2/IMPLEMENTATION_PLAN.structured.json.`
-`Read .opencode-v2/IMPLEMENTATION_PLAN.repair.json.`
-`Edit only affected_keys unless whole_plan is true.`
-`Follow your structured implementation-planner protocol.`
+`decision.json.plan.next_action` is the ONLY authority for the next planner action:
+- `ready`: launch no planner; continue from the reported `resume_phase`.
+- `blocked`: launch no planner; output exactly `IMPLEMENTATION_BLOCKED`.
+- `repair`: launch one FRESH implementation-planner with exactly:
+  `Repair structured implementation planning for this project.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.structured.json.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.repair.json.`
+  `Edit only affected_keys unless whole_plan is true.`
+  `Follow your structured implementation-planner protocol.`
+- `continue`: launch one FRESH implementation-planner with exactly:
+  `Continue structured implementation planning for this project.`
+  `Read .opencode-v2/IMPLEMENTATION_PLAN.structured.json.`
+  `Follow your structured implementation-planner protocol.`
+- `fresh`: use the initial SHORT planner prompt only when no structured source
+  or repair packet exists.
 
-If ready is missing, the structured source exists, and no repair packet exists,
-launch one FRESH implementation-planner with exactly:
-`Continue structured implementation planning for this project.`
-`Read .opencode-v2/IMPLEMENTATION_PLAN.structured.json.`
-`Follow your structured implementation-planner protocol.`
+Never substitute one planner mode for another, even when a preceding subagent
+tool says `cancelled`.
 
 Never ask the planner to edit or reread generated `IMPLEMENTATION_PLAN.md`.
 Never inline the current plan or acceptance contract into a repair prompt.

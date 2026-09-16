@@ -201,6 +201,11 @@ def build_leaf_contexts(project, manifest):
             continue
 
         acceptance_ids = _as_string_list(leaf.get("acceptance_ids"))
+        parent_id = str(leaf.get("parent") or "")
+        parent_leaf = leaves.get(parent_id) if parent_id else None
+        parent_acceptance_ids = _as_string_list(
+            parent_leaf.get("acceptance_ids") if isinstance(parent_leaf, dict) else []
+        )
         packet = {
             "protocol": LEAF_CONTEXT_PROTOCOL,
             "deliverable": did,
@@ -219,6 +224,13 @@ def build_leaf_contexts(project, manifest):
                 {"id": aid, "text": acceptance["musts"].get(aid, "")}
                 for aid in acceptance_ids
             ],
+            "parent_acceptance_ids": parent_acceptance_ids,
+            "parent_acceptance_musts": [
+                {"id": aid, "text": acceptance["musts"].get(aid, "")}
+                for aid in parent_acceptance_ids
+            ],
+            "reads_existing": _as_string_list(leaf.get("split_reads_existing")),
+            "creates_or_updates": _as_string_list(leaf.get("split_creates_or_updates")),
             "complexity": str(leaf.get("complexity") or ""),
             "repeated_operations": int(leaf.get("repeated_operations") or 0),
             "deep_reasoning": bool(leaf.get("deep_reasoning")),
@@ -248,7 +260,7 @@ def build_leaf_contexts(project, manifest):
     return contexts
 
 
-def build_query_views(snapshot, manifest, source_rendered):
+def build_query_views(snapshot, manifest, source_rendered, project=None):
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     manifest = manifest if isinstance(manifest, dict) else {}
     leaves = snapshot.get("leaves") if isinstance(snapshot.get("leaves"), dict) else {}
@@ -289,6 +301,26 @@ def build_query_views(snapshot, manifest, source_rendered):
 
     plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
     reference = snapshot.get("reference") if isinstance(snapshot.get("reference"), dict) else {}
+
+    plan_complete=bool(plan.get("complete"))
+    plan_blocked=bool(plan.get("blocked"))
+    plan_next_action="ready" if plan_complete else ("blocked" if plan_blocked else "fresh")
+    repair_whole_plan=False
+    repair_affected_keys=[]
+    if not plan_complete and not plan_blocked and project:
+        control=Path(project)/".opencode-v2"
+        repair_path=control/"IMPLEMENTATION_PLAN.repair.json"
+        structured_path=control/"IMPLEMENTATION_PLAN.structured.json"
+        if repair_path.exists():
+            plan_next_action="repair"
+            try: repair=json.loads(repair_path.read_text())
+            except Exception: repair={}
+            if isinstance(repair,dict):
+                repair_whole_plan=bool(repair.get("whole_plan"))
+                repair_affected_keys=[str(item) for item in (repair.get("affected_keys") or []) if isinstance(item,str)][:32]
+        elif structured_path.exists():
+            plan_next_action="continue"
+
     decision = {
         **base,
         "acceptance_complete": bool((snapshot.get("acceptance") or {}).get("complete")),
@@ -301,9 +333,12 @@ def build_query_views(snapshot, manifest, source_rendered):
             "stagnant_tail": int(reference.get("stagnant_tail") or 0),
         },
         "plan": {
-            "complete": bool(plan.get("complete")),
-            "blocked": bool(plan.get("blocked")),
+            "complete": plan_complete,
+            "blocked": plan_blocked,
             "planner_failures": int(plan.get("planner_failures") or 0),
+            "next_action": plan_next_action,
+            "repair_whole_plan": repair_whole_plan,
+            "repair_affected_keys": repair_affected_keys,
         },
         "scheduler": _scheduler(snapshot.get("scheduler")),
         "eligible": eligible,
@@ -355,7 +390,7 @@ def materialize_control_query_views(project, snapshot, manifest, source_rendered
     root.mkdir(parents=True, exist_ok=True)
     leaf_root.mkdir(parents=True, exist_ok=True)
 
-    views, leaf_views = build_query_views(snapshot, manifest, source_rendered)
+    views, leaf_views = build_query_views(snapshot, manifest, source_rendered, project=project)
     leaf_contexts = build_leaf_contexts(project, manifest)
 
     # Publish leaf state + contract packets before decision.json. Therefore any

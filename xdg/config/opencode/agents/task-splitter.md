@@ -23,7 +23,7 @@ Your FINAL RESPONSE must be exactly one JSON object, with no Markdown fence and
 no prose before or after it:
 
 {
-  "protocol": "v2-task-split-proposal-v1",
+  "protocol": "v2-task-split-proposal-v2",
   "parent_id": "D001",
   "depth": 0,
   "generation": 1,
@@ -34,7 +34,9 @@ no prose before or after it:
       "verify_command": "...",
       "role": "implementer",
       "depends_on_sibling": "",
-      "done_when": "..."
+      "done_when": "...",
+      "reads_existing": ["path/that/already/exists"],
+      "creates_or_updates": ["owned/path/to/write"]
     },
     {
       "scope": "...",
@@ -42,7 +44,9 @@ no prose before or after it:
       "verify_command": "...",
       "role": "tester",
       "depends_on_sibling": "first",
-      "done_when": "..."
+      "done_when": "...",
+      "reads_existing": ["existing/input/path"],
+      "creates_or_updates": []
     }
   ]
 }
@@ -77,6 +81,29 @@ merely to make the child fail in the same way. The supervisor may use such an
 already-READY read-only tester as a narrowly-scoped recovery verifier only after
 the original parent Verify fails; it will re-run the tester command itself before
 creating parent readiness.
+
+
+### Structured filesystem intent — mandatory
+
+The split request contains `artifact_inventory` for every parent ownership item.
+Each entry reports the supervisor-observed `exists` state and file kind. Treat
+that inventory as authoritative input; never describe a parent artifact with
+`exists: false` as an existing file to read.
+
+Every proposal MUST include:
+- `reads_existing`: project-relative paths the child expects to read as
+  pre-existing inputs. Every listed path must exist when the supervisor validates
+  the proposal or the proposal is rejected.
+- `creates_or_updates`: project-relative paths the child will create or modify.
+  A writing child must list at least one path and every listed path must be
+  inside that child's canonical ownership. A progress-only probe or read-only
+  tester must use an empty array.
+
+A path may appear in both arrays only when it already exists and the writing
+child will update it. Future sibling output is NOT `reads_existing`; represent
+that dependency only with `depends_on_sibling`. Do not use absolute paths, `..`,
+`.git`, guessed paths, or a missing path in `reads_existing`. The supervisor
+validates these fields against the real filesystem; prose cannot override them.
 
 Child ownership sets must be disjoint,
 together cover the parent's owned artifacts, and stay inside parent ownership.

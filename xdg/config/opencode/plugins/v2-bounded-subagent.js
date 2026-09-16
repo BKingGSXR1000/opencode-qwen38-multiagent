@@ -121,6 +121,25 @@ function supervisor(directory, args) {
   ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
+const earlyWriteSatisfiedSessions = new Set();
+
+function guardEarlyWrite(directory, event) {
+  const tool = String(event?.tool || "");
+  if (tool === "subagent" || tool === "task") return;
+  const sessionID = hookSessionID(event);
+  if (!sessionID || earlyWriteSatisfiedSessions.has(sessionID)) return;
+  let raw;
+  try {
+    raw = supervisor(directory, ["--early-write-check", sessionID]);
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    throw new Error(detail || `EARLY_WRITE_DENY session=${sessionID}`);
+  }
+  if (/^EARLY_WRITE_(?:NA|SATISFIED)\b/.test(String(raw || "").trim())) {
+    earlyWriteSatisfiedSessions.add(sessionID);
+  }
+}
+
 export function proposalFromOutput(output, parent, directory) {
   if (typeof output !== "string") return null;
   // The task-splitter is instructed to use its second tool turn for a write.
@@ -132,7 +151,7 @@ export function proposalFromOutput(output, parent, directory) {
   try {
     const proposal = JSON.parse(match[1]);
     const request = JSON.parse(readFileSync(join(directory, ".opencode-v2", "work", `${parent}.split-request.json`), "utf8"));
-    if (proposal?.protocol !== "v2-task-split-proposal-v1" ||
+    if (proposal?.protocol !== "v2-task-split-proposal-v2" ||
         proposal?.parent_id !== parent || proposal?.depth !== request?.depth ||
         proposal?.generation !== request?.generation || !Array.isArray(proposal?.proposals) ||
         proposal.proposals.length !== 2) return null;
@@ -216,6 +235,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   });
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
+    guardEarlyWrite(directory, event);
     guardWorkerMutation(directory, event, output);
     if (event.tool !== "subagent" && event.tool !== "task") return;
     // Support both the beta combined event shape and the newer split
