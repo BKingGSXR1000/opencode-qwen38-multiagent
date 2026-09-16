@@ -30,6 +30,30 @@ Do NOT edit or regenerate `.opencode-v2/IMPLEMENTATION_PLAN.md`.
 A deterministic compiler assigns Dxxx IDs, computes waves/parallel metadata,
 renders the Markdown plan, and the deterministic control guard validates it.
 
+## Transport discipline — HARD RULE
+
+The structured source is transported through model tool-call arguments, so a
+monolithic self-rewrite can be truncated by the generation cap even when the
+JSON itself is not large. Keep transport bounded and deterministic:
+
+- Never read the project directory or `.opencode-v2/` directory. Read only the
+  exact known files required by the current mode.
+- Do not narrate or restate your plan before a write/edit. After required reads,
+  move directly to the mutation tool call.
+- Keep `name`, `outcome`, and `done_when` concise; one semantic sentence is
+  normally sufficient for outcome and done_when.
+- Fresh plan: issue one `write` of the complete JSON. Once that write succeeds,
+  STOP immediately. Do not reread, self-audit, or rewrite it in the same
+  session. The supervisor/compiler will create a fresh targeted repair session
+  if semantic corrections are required.
+- Repair with `whole_plan: false`: NEVER use `write`. Use bounded `edit` calls
+  only, preserve valid JSON after every edit, and touch only `affected_keys`
+  plus dependency references that must change.
+- Repair with `whole_plan: true`: reconstruct compactly with one `write`, with
+  no prose before it; stop after the successful write.
+- After a tool error, correct only that failed mutation. Do not restart a full
+  rewrite merely because an edit/write tool invocation failed.
+
 ## Required reads
 
 ### Fresh-plan / whole-plan mode
@@ -291,7 +315,10 @@ source to rediscover it.
 
 ## Completion
 
-Write the structured JSON with `"status": "complete"` and stop.
+Write the structured JSON with `"status": "complete"` and stop. In fresh
+mode, the first successful complete write is the end of this planner session;
+do not perform a second self-correction rewrite. In targeted repair mode, stop
+after all packet-listed affected keys have been repaired with bounded edits.
 Do not create or request `IMPLEMENTATION_PLAN.ready`.
 Do not create a completion marker.
 Do not output application code.

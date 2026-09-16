@@ -81,34 +81,38 @@ After it returns or is interrupted:
 - NEVER proceed merely because ACCEPTANCE.md has its marker or the model says ready
 
 REFERENCE STAGE — FOUNDATION ONLY
-Read Reference policy from ACCEPTANCE.md.
-- `internal` or `none`: skip external reference research.
-- `external-required`: implementation planning waits only for the COMPACT
-  external foundation, not the complete validation fixture library.
-  1. Direct-read `.opencode-v2/query/decision.json`, then direct-read
-     `.opencode-v2/reference-gate.json`.
-  2. If state is `ready`, immediately proceed to implementation planning.
-  3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
-  4. If state is `pending`, launch exactly ONE `reference-researcher`.
-     The child prompt MUST contain only these lines plus the project root:
-     `REFERENCE_MODE: FOUNDATION`
-     `Build/resume only the compact external reference foundation.`
-     `Read .opencode-v2/acceptance/reference-work.json if present and resume its valid in-progress item.`
-     Do NOT append task-specific research requirements, body names, epochs,
-     fixture counts, API parameter guesses, a "Context:" section, or the
-     acceptance evidence strategy. The reference-researcher protocol defines
-     FOUNDATION scope and is authoritative.
-  5. After it ends, re-read `reference-gate.json`. Repeat only while `pending`.
-     The supervisor permits at most three completed FOUNDATION sessions total.
-  6. Never require top-level reference evidence `result=READY` before planning;
-     that belongs to final validation. Require only foundation gate `ready`.
+Reference-foundation routing is supervisor-owned and is surfaced directly in
+`.opencode-v2/query/decision.json` as `reference`. Do not rely on remembering
+or re-interpreting ACCEPTANCE prose to decide whether this stage is required.
+
+When `resume_phase` is `reference-foundation`:
+1. Inspect `reference.policy` and `reference.foundation_state` from that SAME
+   decision snapshot.
+2. If foundation state is `blocked`, return exactly
+   `IMPLEMENTATION_BLOCKED REFERENCE`.
+3. If foundation state is `pending`, launch exactly ONE `reference-researcher`.
+   The child prompt MUST contain only these lines plus the project root:
+   `REFERENCE_MODE: FOUNDATION`
+   `Build/resume only the compact external reference foundation.`
+   `Read .opencode-v2/acceptance/reference-work.json if present and resume its valid in-progress item.`
+   Do NOT append task-specific research requirements, body names, epochs,
+   fixture counts, API parameter guesses, a "Context:" section, or the
+   acceptance evidence strategy. The reference-researcher protocol defines
+   FOUNDATION scope and is authoritative.
+4. After it ends, direct-read `.opencode-v2/query/decision.json` again. Repeat
+   only while `resume_phase` remains `reference-foundation` and state is
+   `pending`. The supervisor permits at most three FOUNDATION sessions total.
+5. When the next decision says `implementation-plan`, the foundation
+   precondition is satisfied. Never require top-level reference evidence
+   `result=READY` before planning; that belongs to final validation.
 
 PHASE 0.5 — STRUCTURED IMPLEMENTATION PLAN
-HARD PRECONDITION: if ACCEPTANCE.md says `Reference policy: external-required`,
-direct-read `.opencode-v2/reference-gate.json` immediately before EVERY
-implementation-planner launch. Its foundation state must be exactly `ready`.
-If foundation state is `pending` or `blocked`, launch no planner and return
-exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
+HARD PRECONDITION: before EVERY implementation-planner launch, use the latest
+`.opencode-v2/query/decision.json`. If `reference.policy` is
+`external-required`, `reference.foundation_state` must be exactly `ready` and
+`resume_phase` must be `implementation-plan`. Otherwise launch no planner; if
+state is blocked output exactly `IMPLEMENTATION_BLOCKED REFERENCE`, and if it
+is pending run the reference-foundation stage above.
 
 Before launching ANY implementation-planner, read
 `.opencode-v2/work/planner-restarts.json` when present and direct-read

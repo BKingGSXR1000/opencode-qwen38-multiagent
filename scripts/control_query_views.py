@@ -139,9 +139,18 @@ def build_query_views(snapshot, manifest, source_rendered):
     blockers = _blockers(snapshot.get("execution_blockers"))
 
     plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
+    reference = snapshot.get("reference") if isinstance(snapshot.get("reference"), dict) else {}
     decision = {
         **base,
         "acceptance_complete": bool((snapshot.get("acceptance") or {}).get("complete")),
+        "reference": {
+            "policy": str(reference.get("policy") or "unknown"),
+            "foundation_state": str(reference.get("foundation_state") or "not-applicable"),
+            "attempts": int(reference.get("attempts") or 0),
+            "max_attempts": int(reference.get("max_attempts") or 0),
+            "productive_sessions": int(reference.get("productive_sessions") or 0),
+            "stagnant_tail": int(reference.get("stagnant_tail") or 0),
+        },
         "plan": {
             "complete": bool(plan.get("complete")),
             "blocked": bool(plan.get("blocked")),
@@ -228,6 +237,14 @@ def _selftest():
         "state_error": False,
         "resume_phase": "execution",
         "acceptance": {"complete": True},
+        "reference": {
+            "policy": "external-required",
+            "foundation_state": "ready",
+            "attempts": 1,
+            "max_attempts": 3,
+            "productive_sessions": 1,
+            "stagnant_tail": 0,
+        },
         "plan": {"complete": True, "blocked": False, "planner_failures": 1},
         "scheduler": {
             "max_concurrent_workers": 3,
@@ -264,6 +281,14 @@ def _selftest():
     views, leaves = build_query_views(snapshot, manifest, source)
     assert views["decision.json"]["eligible"] == ["D003"]
     assert views["decision.json"]["eligible_roles"] == {"D003": "feature-builder"}
+    assert views["decision.json"]["reference"] == {
+        "policy": "external-required",
+        "foundation_state": "ready",
+        "attempts": 1,
+        "max_attempts": 3,
+        "productive_sessions": 1,
+        "stagnant_tail": 0,
+    }
     assert views["decision.json"]["scheduler"]["available_worker_slots"] == 2
     assert leaves["D004"]["eligible"] is False
     assert "launch_deps_missing" in leaves["D004"]["ineligibility_reasons"]

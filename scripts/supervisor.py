@@ -1445,6 +1445,45 @@ def normalized_state_snapshot(project):
                 "STATE_LOCAL_BLOCKER_CONTINUE "
                 f"blockers={','.join(str(x.get('deliverable') or '') for x in clean)}"
             )
+
+    # Reference foundation is a scheduler precondition, not a root-model memory
+    # exercise. Surface it in the canonical snapshot so every transport
+    # selects the same next phase.
+    acceptance_complete=bool(
+        isinstance(data.get("acceptance"),dict)
+        and data["acceptance"].get("complete")
+    )
+    plan_state=data.get("plan") if isinstance(data.get("plan"),dict) else {}
+    if acceptance_complete:
+        policy=acceptance_reference_policy()
+        gate=reference_gate_snapshot()
+        data["reference"]={
+            "policy":policy,
+            "foundation_state":str(gate.get("state") or "not-applicable"),
+            "attempts":int(gate.get("attempts") or 0),
+            "max_attempts":int(gate.get("max_attempts") or 0),
+            "productive_sessions":int(gate.get("productive_sessions") or 0),
+            "stagnant_tail":int(gate.get("stagnant_tail") or 0),
+        }
+        if (
+            policy=="external-required"
+            and not plan_state.get("complete")
+            and not plan_state.get("blocked")
+        ):
+            ref_state=data["reference"]["foundation_state"]
+            if ref_state=="pending":
+                data["resume_phase"]="reference-foundation"
+            elif ref_state=="blocked":
+                data["resume_phase"]="implementation-blocked"
+    else:
+        data["reference"]={
+            "policy":"unknown",
+            "foundation_state":"not-applicable",
+            "attempts":0,
+            "max_attempts":0,
+            "productive_sessions":0,
+            "stagnant_tail":0,
+        }
     return apply_root_continuation_block(data)
 # V2.6.9 NORMALIZED SCHEDULER STATE END
 
@@ -1549,6 +1588,43 @@ def planner_plan_state(plan_path):
         ),
         "engaged":engaged,
     }
+
+def planner_session_mode(sid):
+    text=strip_subagent_prefix(first_user_text_db(sid)).strip()
+    if text.startswith("Repair structured implementation planning for this project."):
+        return "repair"
+    if text.startswith("Continue structured implementation planning for this project."):
+        return "continue"
+    return "fresh"
+
+def planner_fresh_candidate_outcome(sid,plan_path=None):
+    """Compile and retire the first syntactically valid fresh-plan candidate.
+
+    A fresh planner may write a complete parseable source and then destroy it
+    with a second monolithic self-rewrite that hits the generation cap. Hand
+    off the first valid JSON candidate to deterministic compilation/guarding;
+    repair/continue sessions remain free to perform bounded targeted edits.
+    """
+    if planner_session_mode(sid)!="fresh":
+        return ""
+    state=planner_checkpoints.setdefault(sid,{})
+    plan=planner_plan_state(plan_path or structured_plan_path())
+    signature=plan.get("meaningful_signature")
+    if not signature:
+        return ""
+    if state.get("fresh_candidate_signature")==signature:
+        return ""
+    compiled=compile_structured_plan()
+    if compiled and control_guard("plan") and plan_ready():
+        state["fresh_candidate_signature"]=signature
+        return "ready"
+    repair=Path(PROJECT)/".opencode-v2"/STRUCTURED_PLAN_REPAIR_FILENAME
+    if repair.exists():
+        state["fresh_candidate_signature"]=signature
+        return "invalid"
+    # No deterministic verdict yet: leave the planner running fail-closed and
+    # allow the same durable candidate to be retried on the next poll.
+    return ""
 
 def planner_progress_reason(sid,elapsed,plan_path=None,paused=False):
     """Apply the one planner-owned durable-progress policy.
@@ -4591,11 +4667,36 @@ def api_poll_loop():
                         sid,{"started":time.monotonic()}
                     )
                     checkpoint.setdefault("started",time.monotonic())
-                    progress_reason=planner_retirement_reason(
-                        sid,
-                        time.monotonic()-checkpoint["started"],
-                        existing_plan,
-                        paused=planner_compaction_active,
+
+                    candidate_outcome=planner_fresh_candidate_outcome(
+                        sid,existing_plan
+                    )
+                    if candidate_outcome and not checkpoint.get("aborted"):
+                        checkpoint["aborted"]=True
+                        if candidate_outcome=="invalid":
+                            reason="planner_fresh_candidate_invalid"
+                            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                                record_planner_restart(sid,reason)
+                        else:
+                            reason="planner_fresh_candidate_ready"
+                        abort_session(sid,reason,agent)
+                        log(
+                            f"PLANNER_FRESH_HANDOFF session={sid} "
+                            f"outcome={candidate_outcome}"
+                        )
+                        csv(
+                            "PLANNER_FRESH_HANDOFF",sid,agent,
+                            f"outcome={candidate_outcome}",
+                        )
+                        planner_retired=True
+
+                    progress_reason=(
+                        "" if planner_retired else planner_retirement_reason(
+                            sid,
+                            time.monotonic()-checkpoint["started"],
+                            existing_plan,
+                            paused=planner_compaction_active,
+                        )
                     )
                     if progress_reason and not checkpoint.get("aborted"):
                         checkpoint["aborted"]=True
@@ -4736,6 +4837,22 @@ def pending_ledger_session_ids():
 def reconcile_planner_completion(sid):
     if sid in planner_completion_seen:
         return
+
+    abort_reason=persisted_abort_reason(sid)
+    if re.match(r"^reference_gate_(?:pending|blocked)\b",abort_reason):
+        # A supervisor precondition abort is not a failed planning attempt.
+        log(
+            f"PLANNER_PRECONDITION_ABORT_NOT_COUNTED session={sid} "
+            f"reason={abort_reason}"
+        )
+        csv(
+            "PLANNER_PRECONDITION_ABORT_NOT_COUNTED",sid,
+            "implementation-planner",abort_reason,
+        )
+        resolve_abort_intent(sid,"planner-precondition-not-counted")
+        planner_completion_seen.add(sid)
+        return
+
     if not plan_ready():
         # Compile + guard synchronously when a planner goes idle. This avoids a
         # race where the root launches another planner before valid structured
