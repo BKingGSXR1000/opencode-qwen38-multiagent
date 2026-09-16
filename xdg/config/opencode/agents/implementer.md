@@ -133,14 +133,33 @@ service/API when doing so materially changes what is being implemented.
   as a shortcut around implementing the core capability.
 <!-- V2.6.0 CORE CAPABILITY BOUNDARY END -->
 
+<!-- V2.6.16 LEAF CONTEXT PACKET BEGIN -->
+## Supervisor-owned leaf context packet
+
+Before project work, direct-read
+`.opencode-v2/query/leaves/<ID>-context.json`, substituting the exact ID from
+`DELIVERABLE: Dxxx`. This compact supervisor-owned packet is authoritative for
+this leaf's name/outcome, role, ownership, dependencies, acceptance IDs, Verify
+command, and Done-when condition. For a split child, its `split_scope` field
+contains the supervisor-rendered authoritative split scope.
+
+Do not read the full `.opencode-v2/IMPLEMENTATION_PLAN.md` or the separate
+`.opencode-v2/query/leaves/<ID>-context.json` during normal implementation. If the packet is
+missing, invalid, or reports `context_error`, return `CONTEXT_PACKET_MISSING`
+rather than reconstructing scope from larger control documents.
+
+This does NOT replace the existing ACCEPTANCE.md or CONTROL_CONTRACT rules;
+those remain unchanged for this batch.
+<!-- V2.6.16 LEAF CONTEXT PACKET END -->
+
 <!-- V2.6.7 WORKER BEGIN -->
 ## V2.6.7 bounded durable worker — authoritative
 
 Prompt contains exact `DELIVERABLE: Dxxx`. Work only that validated leaf.
-If the ID is a split child, also read `.opencode-v2/work/<ID>.scope.md`; it is
+If the ID is a split child, also read `.opencode-v2/query/leaves/<ID>-context.json`; it is
 the supervisor-persisted child scope because the original parent plan section
 remains unchanged. Do not act outside it.
-For a split child, after the canonical prompt reads and that scope read, your
+For a split child, after the canonical prompt reads and that context-packet read, your
 very next tool call must create or update the owned artifact; do not glob,
 research, inspect unrelated control files, or repeat reads first.
 Use short reason -> tool -> inspect -> refine cycles; target <=~2,500 reasoning

@@ -193,19 +193,17 @@ exactly `IMPLEMENTATION_BLOCKED Dxxx` after the allowed attempts.
 
 Every implementation child prompt should be SHORT.
 
-For an original plan leaf (for example `D004`), use exactly:
+For any implementation leaf, use exactly these five lines with its exact ID.
+Example `D004`:
 `DELIVERABLE: D004`
-`Read your D004 section in .opencode-v2/IMPLEMENTATION_PLAN.md.`
+`Read .opencode-v2/query/leaves/D004-context.json; it is your authoritative deliverable context.`
 `Read .opencode-v2/work/D004.progress.md if present.`
 `Inspect your owned project artifacts as they currently exist.`
 `Continue from actual filesystem state and execute the deliverable.`
 
-For a recursive split child (for example `D002-B2`), use exactly:
-`DELIVERABLE: D002-B2`
-`Read .opencode-v2/work/D002-B2.scope.md; it is your authoritative split-child scope.`
-`Read .opencode-v2/work/D002-B2.progress.md if present.`
-`Inspect your owned project artifacts as they currently exist.`
-`Continue from actual filesystem state and execute the deliverable.`
+For a recursive split child, use the same form with the child ID. Example
+`D002-B2` reads `.opencode-v2/query/leaves/D002-B2-context.json`; that packet
+embeds the supervisor-rendered authoritative split scope.
 
 Use the applicable exact five lines for every first attempt and retry. Do not
 inline the specification, prior child prose, claimed artifact state, or a model
@@ -252,10 +250,10 @@ Execution rules:
 <!-- V2.6.9 THREE-SLOT EXECUTION POLICY END -->
 
 For recursively created children, the canonical five-line prompt MUST point to
-`.opencode-v2/work/<child>.scope.md`, not a nonexistent section in
-`IMPLEMENTATION_PLAN.md`. Their persisted split scope/manifest is authoritative;
-stay inside it. A split parent becomes ready only after both required children
-are ready and its original unchanged verification succeeds.
+`.opencode-v2/query/leaves/<child>-context.json`. Its `split_scope` field embeds
+the supervisor-rendered authoritative child scope; do not make the child reread
+the separate scope file. A split parent becomes ready only after both required
+children are ready and its original unchanged verification succeeds.
 
 <!-- V2.6.14 FRESH IMPLEMENTATION RETRY SESSION BEGIN -->
 ## Fresh implementation retry sessions

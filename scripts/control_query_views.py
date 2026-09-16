@@ -7,12 +7,15 @@ read without loading complete control-status/guard artifacts into context.
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from state_io import atomic_write_text
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
+LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
 MAX_DECISION_CHARS = 6000
+DID_RE = re.compile(r"^D\d{3}(?:-[AB](?:[12])?)?$")
 
 
 def _scheduler(raw):
@@ -97,6 +100,91 @@ def _leaf_projection(did, raw, role=""):
             reasons.append("not_currently_eligible")
     result["ineligibility_reasons"] = reasons
     return result
+
+
+
+def _acceptance_must_texts(project):
+    # Return exact one-line Axxx descriptions from the durable acceptance contract.
+    path = Path(project) / ".opencode-v2" / "ACCEPTANCE.md"
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return {}
+    result = {}
+    for match in re.finditer(
+        r"(?m)^\s*-\s*\[\s*\]\s*(A\d{3})\s*:\s*(.+?)\s*$",
+        text,
+    ):
+        result[match.group(1)] = match.group(2).strip()
+    return result
+
+
+def _as_string_list(raw):
+    if not isinstance(raw, list):
+        return []
+    return [str(item) for item in raw if isinstance(item, (str, int, float))]
+
+
+def build_leaf_contexts(project, manifest):
+    # Project canonical leaf contracts into compact worker-readable packets.
+    project = Path(project)
+    manifest = manifest if isinstance(manifest, dict) else {}
+    leaves = manifest.get("leaves") if isinstance(manifest.get("leaves"), dict) else {}
+    acceptance = _acceptance_must_texts(project)
+    contexts = {}
+
+    for did, leaf in sorted(leaves.items()):
+        if not DID_RE.fullmatch(str(did)) or not isinstance(leaf, dict):
+            continue
+        if isinstance(leaf.get("split_children"), list) and leaf.get("split_children"):
+            # A split parent is not executable; only terminal children need packets.
+            continue
+
+        acceptance_ids = _as_string_list(leaf.get("acceptance_ids"))
+        packet = {
+            "protocol": LEAF_CONTEXT_PROTOCOL,
+            "deliverable": did,
+            "source_kind": "split-child" if "-" in did else "plan-leaf",
+            "name": str(leaf.get("name") or ""),
+            "outcome": str(leaf.get("outcome") or leaf.get("name") or ""),
+            "role": str(leaf.get("role") or ""),
+            "owned_artifacts": leaf.get("owned_artifacts", ""),
+            "owned_artifact_paths": _as_string_list(leaf.get("owned_artifact_paths")),
+            "launch_deps": _as_string_list(leaf.get("launch_deps")),
+            "contract_deps": _as_string_list(leaf.get("contract_deps")),
+            "verify_deps": _as_string_list(leaf.get("verify_deps")),
+            "acceptance_ids": acceptance_ids,
+            "acceptance_musts": [
+                {"id": aid, "text": acceptance.get(aid, "")}
+                for aid in acceptance_ids
+            ],
+            "complexity": str(leaf.get("complexity") or ""),
+            "repeated_operations": int(leaf.get("repeated_operations") or 0),
+            "deep_reasoning": bool(leaf.get("deep_reasoning")),
+            "verify_command": str(leaf.get("verify_command") or ""),
+            "done_when": str(leaf.get("done_when") or ""),
+            "split_handoff_only": bool(leaf.get("split_handoff_only")),
+            "split_handoff_source": str(leaf.get("split_handoff_source") or ""),
+        }
+
+        if "-" in did:
+            scope_path = project / ".opencode-v2" / "work" / f"{did}.scope.md"
+            try:
+                packet["split_scope"] = scope_path.read_text(errors="replace")
+                packet["context_error"] = ""
+            except OSError:
+                packet["split_scope"] = ""
+                packet["context_error"] = "split_scope_missing"
+        else:
+            packet["context_error"] = ""
+
+        contract_material = json.dumps(packet, sort_keys=True, separators=(",", ":"))
+        packet["contract_version"] = hashlib.sha256(
+            contract_material.encode("utf-8")
+        ).hexdigest()[:16]
+        contexts[did] = packet
+
+    return contexts
 
 
 def build_query_views(snapshot, manifest, source_rendered):
@@ -207,15 +295,20 @@ def materialize_control_query_views(project, snapshot, manifest, source_rendered
     leaf_root.mkdir(parents=True, exist_ok=True)
 
     views, leaf_views = build_query_views(snapshot, manifest, source_rendered)
-    for name, payload in views.items():
-        atomic_write_text(
-            root / name,
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
-        )
+    leaf_contexts = build_leaf_contexts(project, manifest)
 
+    # Publish leaf state + contract packets before decision.json. Therefore any
+    # newly eligible leaf visible in the latest decision already has its packet.
     wanted = set()
     for did, payload in leaf_views.items():
         name = f"{did}.json"
+        wanted.add(name)
+        atomic_write_text(
+            leaf_root / name,
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+    for did, payload in leaf_contexts.items():
+        name = f"{did}-context.json"
         wanted.add(name)
         atomic_write_text(
             leaf_root / name,
@@ -225,9 +318,28 @@ def materialize_control_query_views(project, snapshot, manifest, source_rendered
         if path.name not in wanted:
             path.unlink(missing_ok=True)
 
+    # decision.json is the publication barrier for the current scheduler view.
+    for name, payload in views.items():
+        if name == "decision.json":
+            continue
+        atomic_write_text(
+            root / name,
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        )
+    atomic_write_text(
+        root / "decision.json",
+        json.dumps(views["decision.json"], sort_keys=True, separators=(",", ":")) + "\n",
+    )
+
+    context_chars = [
+        len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        for payload in leaf_contexts.values()
+    ]
     return {
         "decision_chars": len((root / "decision.json").read_text()),
         "leaf_count": len(leaf_views),
+        "leaf_context_count": len(leaf_contexts),
+        "max_leaf_context_chars": max(context_chars, default=0),
     }
 
 
@@ -294,6 +406,70 @@ def _selftest():
     assert "launch_deps_missing" in leaves["D004"]["ineligibility_reasons"]
     assert leaves["D003"]["role"] == "feature-builder"
     assert len(json.dumps(views["decision.json"], separators=(",", ":"))) < MAX_DECISION_CHARS
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        (project / ".opencode-v2" / "work").mkdir(parents=True)
+        (project / ".opencode-v2" / "ACCEPTANCE.md").write_text(
+            "# Acceptance Contract\n"
+            "Reference policy: internal\n"
+            "- [ ] A001: first required behavior\n"
+            "- [ ] A002: second required behavior\n"
+            "<!-- ACCEPTANCE_COMPLETE -->\n"
+        )
+        (project / ".opencode-v2" / "work" / "D004-A.scope.md").write_text(
+            "# D004-A split-child scope\n\nChild scope: bounded child work\n"
+        )
+        context_manifest = {
+            "leaves": {
+                "D003": {
+                    "name": "Feature leaf",
+                    "outcome": "Create the feature.",
+                    "role": "feature-builder",
+                    "owned_artifacts": "`app/feature.js`",
+                    "owned_artifact_paths": ["app/feature.js"],
+                    "launch_deps": [],
+                    "contract_deps": [],
+                    "verify_deps": [],
+                    "acceptance_ids": ["A001"],
+                    "complexity": "S",
+                    "repeated_operations": 1,
+                    "deep_reasoning": False,
+                    "verify_command": "node tests/feature.js",
+                    "done_when": "Feature verification passes.",
+                },
+                "D004-A": {
+                    "name": "Split child",
+                    "outcome": "Complete bounded child work.",
+                    "role": "core-builder",
+                    "owned_artifacts": "`app/core.js`",
+                    "owned_artifact_paths": ["app/core.js"],
+                    "launch_deps": ["D003"],
+                    "contract_deps": [],
+                    "verify_deps": [],
+                    "acceptance_ids": ["A002"],
+                    "complexity": "S",
+                    "repeated_operations": 1,
+                    "deep_reasoning": False,
+                    "verify_command": "node tests/core.js",
+                    "done_when": "Core verification passes.",
+                },
+                "D004": {
+                    "name": "Split parent",
+                    "split_children": ["D004-A", "D004-B"],
+                },
+            }
+        }
+        contexts = build_leaf_contexts(project, context_manifest)
+        assert set(contexts) == {"D003", "D004-A"}
+        assert contexts["D003"]["acceptance_musts"] == [
+            {"id": "A001", "text": "first required behavior"}
+        ]
+        assert contexts["D004-A"]["source_kind"] == "split-child"
+        assert "bounded child work" in contexts["D004-A"]["split_scope"]
+        assert contexts["D004-A"]["context_error"] == ""
+        assert contexts["D003"]["contract_version"]
     print("materialized control-query selftest: OK")
 
 

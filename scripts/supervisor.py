@@ -181,15 +181,9 @@ def parse_deliverable(text):
     return m.group(1) if m else ""
 
 def implementation_prompt(did):
-    split_child = split_depth(did) > 0
-    scope_line = (
-        f"Read .opencode-v2/work/{did}.scope.md; it is your authoritative split-child scope."
-        if split_child
-        else f"Read your {did} section in .opencode-v2/IMPLEMENTATION_PLAN.md."
-    )
     return (
         f"DELIVERABLE: {did}\n"
-        f"{scope_line}\n"
+        f"Read .opencode-v2/query/leaves/{did}-context.json; it is your authoritative deliverable context.\n"
         f"Read .opencode-v2/work/{did}.progress.md if present.\n"
         "Inspect your owned project artifacts as they currently exist.\n"
         "Continue from actual filesystem state and execute the deliverable."
@@ -206,8 +200,8 @@ def implementation_runtime_prompt(did,agent):
         lines=base.splitlines()
         action_order=(
             "MANDATORY ACTION ORDER — PROGRESS-ONLY HANDOFF:\n"
-            "1. FIRST tool-bearing response: read ONLY the authoritative scope file "
-            f".opencode-v2/work/{did}.scope.md and, if it exists, the current progress file "
+            "1. FIRST tool-bearing response: read ONLY the authoritative context packet "
+            f".opencode-v2/query/leaves/{did}-context.json and, if it exists, the current progress file "
             f".opencode-v2/work/{did}.progress.md. Do not inspect CONTROL_CONTRACT or project "
             "artifacts yet.\n"
             "2. SECOND tool-bearing response: you MUST create or update "
