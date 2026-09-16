@@ -62,7 +62,7 @@ command, and Done-when condition. For a split child, its `split_scope` field
 contains the supervisor-rendered authoritative split scope.
 
 Do not read the full `.opencode-v2/IMPLEMENTATION_PLAN.md` or the separate
-`.opencode-v2/query/leaves/<ID>-context.json` during normal implementation. If the packet is
+`.opencode-v2/work/<ID>.scope.md` during normal implementation. If the packet is
 missing, invalid, or reports `context_error`, return `CONTEXT_PACKET_MISSING`
 rather than reconstructing scope from larger control documents.
 

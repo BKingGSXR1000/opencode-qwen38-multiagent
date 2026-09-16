@@ -144,7 +144,7 @@ command, and Done-when condition. For a split child, its `split_scope` field
 contains the supervisor-rendered authoritative split scope.
 
 Do not read the full `.opencode-v2/IMPLEMENTATION_PLAN.md` or the separate
-`.opencode-v2/query/leaves/<ID>-context.json` during normal implementation. If the packet is
+`.opencode-v2/work/<ID>.scope.md` during normal implementation. If the packet is
 missing, invalid, or reports `context_error`, return `CONTEXT_PACKET_MISSING`
 rather than reconstructing scope from larger control documents.
 
@@ -156,12 +156,11 @@ those remain unchanged for this batch.
 ## V2.6.7 bounded durable worker — authoritative
 
 Prompt contains exact `DELIVERABLE: Dxxx`. Work only that validated leaf.
-If the ID is a split child, also read `.opencode-v2/query/leaves/<ID>-context.json`; it is
-the supervisor-persisted child scope because the original parent plan section
-remains unchanged. Do not act outside it.
-For a split child, after the canonical prompt reads and that context-packet read, your
-very next tool call must create or update the owned artifact; do not glob,
-research, inspect unrelated control files, or repeat reads first.
+If the ID is a split child, use the `split_scope` field from the SAME already-read
+context packet; do not reread the context packet or the separate scope file.
+For a split child, after the canonical prompt reads, your very next tool call must
+create or update the owned artifact; do not glob, research, inspect unrelated
+control files, or repeat reads first.
 Use short reason -> tool -> inspect -> refine cycles; target <=~2,500 reasoning
 characters before the next meaningful tool action. Inspect owned artifacts and
 Dxxx.progress.md before re-deriving on retries. Externalize numerical/algorithmic
