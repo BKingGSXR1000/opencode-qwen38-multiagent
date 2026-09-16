@@ -77,202 +77,94 @@ V2.4 SCOPE RULE:
 - Complete only the explicitly primary artifact, or return `SCOPE_TOO_BROAD`
   with a short proposed split.
 
-V2.5 ACCEPTANCE-AWARE IMPLEMENTATION:
-- If `.opencode-v2/ACCEPTANCE.md` exists, read it before implementing your
-  assigned deliverable.
-- Do not weaken, rewrite, or delete the acceptance contract.
-- Implement only your assigned scope, but ensure it can satisfy the relevant
-  Axxx checks.
-- For interactive browser/visual applications, expose a small serializable
-  machine-readable test hook when useful, preferably `window.__APP_TEST_STATE__`,
-  containing the state needed to validate requested behavior. Keep it diagnostic;
-  it must not replace the visible implementation.
+Acceptance is leaf-local: obey `acceptance_musts` and `reference_policy` from the authoritative context packet; never weaken those criteria.
 
-<!-- V2.5.6 CORE CAPABILITY BOUNDARY BEGIN -->
-## Core capability / external-service boundary
-
-Do not silently replace a core requested capability with an external runtime
-service/API when doing so materially changes what is being implemented.
-
-- External sources used for research, development, or independent validation
-  are NOT automatically permitted as production/runtime dependencies.
-- If the user's request or acceptance contract explicitly requires or permits
-  an external runtime service, using it is allowed.
-- If the user's request explicitly requires local/offline/self-contained
-  behavior, that is a hard implementation boundary.
-- If the boundary is not specified, do not invent an external dependency merely
-  as a shortcut around implementing the core capability.
-- A material new runtime dependency must be made explicit in the plan/contract;
-  it must never be introduced silently.
-- Follow the user's request and the acceptance contract. Do not reinterpret
-  "implement X" as "call a third-party service that implements X" unless that is
-  clearly consistent with the requested product.
-
-For acceptance-planning specifically:
-- Encode explicit local/offline/external-service requirements as MUST criteria.
-- Do not invent a local-only constraint when the user did not ask for one.
-- When runtime dependency boundaries are materially relevant but unspecified,
-  record that they are unspecified rather than silently choosing one.
-<!-- V2.5.6 CORE CAPABILITY BOUNDARY END -->
 
 <!-- V2.6.0 CORE CAPABILITY BOUNDARY BEGIN -->
 ## Core capability / external-service boundary
 
-Do not silently replace a core requested capability with an external runtime
-service/API when doing so materially changes what is being implemented.
-
-- Research/reference/validation sources are not automatically permitted as
-  production runtime dependencies.
-- Explicit user or acceptance requirements take precedence.
-- If local/offline/self-contained behavior is explicitly required, preserve it.
-- If an external runtime service is explicitly required/permitted, using it is
-  allowed.
-- If the boundary is unspecified, do not invent an external dependency merely
-  as a shortcut around implementing the core capability.
+Do not replace a requested core capability with a materially different external
+runtime service unless the user/acceptance contract permits it. Explicit
+local/offline or explicit external-service requirements take precedence. When
+unspecified, do not invent a new runtime dependency merely as a shortcut.
 <!-- V2.6.0 CORE CAPABILITY BOUNDARY END -->
 
 <!-- V2.6.16 LEAF CONTEXT PACKET BEGIN -->
-## Supervisor-owned leaf context packet
+## Authoritative leaf packet
 
-Before project work, direct-read
-`.opencode-v2/query/leaves/<ID>-context.json`, substituting the exact ID from
-`DELIVERABLE: Dxxx`. This compact supervisor-owned packet is authoritative for
-this leaf's name/outcome, role, ownership, dependencies, acceptance IDs, Verify
-command, and Done-when condition. For a split child, its `split_scope` field
-contains the supervisor-rendered authoritative split scope.
+First direct-read `.opencode-v2/query/leaves/<ID>-context.json` using the exact
+`DELIVERABLE: Dxxx` ID. Read it once per session. It is authoritative for this
+leaf's scope, ownership, dependencies, relevant `acceptance_musts`,
+`reference_policy`, Verify command, Done-when, and split-child `split_scope`.
 
-Do not read the full `.opencode-v2/IMPLEMENTATION_PLAN.md` or the separate
-`.opencode-v2/work/<ID>.scope.md` during normal implementation. If the packet is
-missing, invalid, or reports `context_error`, return `CONTEXT_PACKET_MISSING`
-rather than reconstructing scope from larger control documents.
-
-This does NOT replace the existing ACCEPTANCE.md or CONTROL_CONTRACT rules;
-those remain unchanged for this batch.
+Do not read full `IMPLEMENTATION_PLAN.md`, a separate split scope, or full
+`ACCEPTANCE.md` during normal implementation. If the packet is missing/invalid
+or has `context_error`, return `CONTEXT_PACKET_MISSING` rather than reconstructing
+scope. CONTROL_CONTRACT rules remain unchanged.
 <!-- V2.6.16 LEAF CONTEXT PACKET END -->
 
 <!-- V2.6.7 WORKER BEGIN -->
-## V2.6.7 bounded durable worker — authoritative
+## Bounded durable worker
 
-Prompt contains exact `DELIVERABLE: Dxxx`. Work only that validated leaf.
-For a split child, use the `split_scope` field from the SAME already-read context
-packet and stay inside its remaining owned artifacts and verification.
-Use short reason -> tool -> inspect -> refine cycles; target <=~2,500 reasoning
-characters before the next meaningful tool action. Inspect owned artifacts and
-Dxxx.progress.md before re-deriving on retries. Externalize numerical/algorithmic
-work into scripts/tests.
+Work only the exact validated `DELIVERABLE: Dxxx`. For split children, use the
+already-read packet's `split_scope` and stay inside it. Resume from owned
+artifacts/progress rather than re-deriving completed work.
 
-Do not invent or weaken verification. Run the exact Verify command, persist a compact result in Dxxx.progress.md when useful, then return normally. The supervisor alone finalizes readiness.
+Use short reason -> tool -> inspect -> refine cycles. Do not invent/weaken
+verification. Run the exact Verify command, persist a compact result in
+Dxxx.progress.md when useful, then return normally; the supervisor finalizes.
 <!-- V2.6.7 WORKER END -->
 
 <!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT BEGIN -->
 ## Project-local control protocol
 
-Read `.opencode-v2/CONTROL_CONTRACT.md` when control/test protocol matters.
-After one bounded inspection, create or update a meaningful owned artifact early.
-Do not spend repeated read-only rounds without an owned-artifact or progress-file change.
-Never read or inspect harness-repository source (including `run-checks.py`) to
-learn the protocol. Do not create a probe solely to discover it or guess a
-fallback TEST_CHECKS manifest schema.
+Read `.opencode-v2/CONTROL_CONTRACT.md` only when control/test protocol matters.
+Never inspect harness source such as `run-checks.py` to infer that protocol or
+guess a fallback TEST_CHECKS schema. After one bounded inspection, create/update
+durable owned work rather than repeating read-only rounds.
 <!-- V2.6.8 PROJECT-LOCAL CONTROL CONTRACT END -->
 
 <!-- V2.6.7c DOTDIR IO BEGIN -->
 ## `.opencode-v2` filesystem rule
 
-OpenCode `glob` may omit dot-directories even for explicit `.opencode-v2/*`
-patterns.
-
-- NEVER use `glob` to decide whether a known `.opencode-v2` file exists.
-- For a known control path, use direct `read`.
-- To discover files inside `.opencode-v2`, use `list`.
-- If `glob` says "No files found" but `read`/`list` succeeds, trust `read`/`list`
-  and do not spend more tool calls investigating the discrepancy.
+Known `.opencode-v2` paths use direct `read`; use `list` to discover control
+files. Do not use `glob` to decide whether a known dot-directory path exists.
+If glob disagrees with read/list, trust read/list and move on.
 <!-- V2.6.7c DOTDIR IO END -->
 
 <!-- V2.6.9 NO DETACHED DELIVERABLE JOBS BEGIN -->
 ## No detached deliverable jobs
 
-A worker session must own the complete lifecycle of every command it starts.
-
-- NEVER use `nohup`, `disown`, `setsid`, shell `&`, or a tool
-  `background: true` option for deliverable generation, downloads, builds,
-  tests, data acquisition, or verification.
-- Do not launch work that is expected to continue after this session returns,
-  compacts, reaches its step limit, or is recycled.
-- Long work must run in the foreground with a bounded timeout so success or
-  failure is observed before the next step.
-- A short-lived local server MAY be backgrounded only inside ONE shell command
-  that captures its PID and kills it before that same tool call returns.
-- If required foreground work cannot finish within the leaf budget, persist
-  progress and return a bounded blocker/split signal instead of orphaning a
-  process.
+Do not orphan deliverable work with `nohup`, `disown`, `setsid`, shell `&`, or
+background tools. Long work must be foreground and bounded. A temporary local
+server may be backgrounded only inside one shell call that kills it before
+return. If work cannot finish in budget, persist progress and return.
 <!-- V2.6.9 NO DETACHED DELIVERABLE JOBS END -->
 
 <!-- V2.6.9 SUPERVISOR-OWNED LEAF FINALIZATION BEGIN -->
 ## Supervisor-owned leaf finalization
 
-For implementation leaves, your responsibility ends after the owned artifacts
-are complete and the plan's exact Verify command has passed.
-
-- Persist the verification result in `.opencode-v2/work/Dxxx.progress.md`.
-- Then RETURN normally.
-- Do **not** invoke `.opencode-v2/bin/leaf-complete Dxxx` yourself.
-- Do not investigate/retry a leaf-complete ownership error.
-
-The supervisor has the session identity needed for concurrency-aware ownership
-attribution. It re-runs Verify after your session becomes idle and atomically
-creates `Dxxx.ready` only if ownership and verification both pass. This runtime
-policy supersedes the legacy project-contract line telling workers to call
-leaf-complete directly.
+After owned work is complete and exact Verify passes, persist a compact result
+in Dxxx.progress.md and return normally. Never call `leaf-complete`; the
+supervisor re-runs Verify and owns creation of Dxxx.ready.
 <!-- V2.6.9 SUPERVISOR-OWNED LEAF FINALIZATION END -->
 
 <!-- V2.6.9 EXTERNAL INTERFACE FRESHNESS BEGIN -->
 ## External-interface freshness policy
 
-Do **not** rely on model memory as authoritative for an externally maintained
-interface when its exact current contract affects correctness. This applies to
-HTTP/REST/GraphQL APIs, SDK/library APIs, CLI flags, configuration schemas,
-browser/provider interfaces, package-manager commands, and similar contracts.
-
-Before the first correctness-critical use of such an interface in this task:
-1. Locate a current authoritative source: official documentation, official
-   machine-readable schema/OpenAPI, installed `--help`, official type
-   declarations, or official source/docs shipped with the installed version.
-2. Read only the section needed for the intended operation.
-3. Establish the exact endpoint/command, parameter names, value formats,
-   version semantics, and expected response.
-4. Perform the smallest practical documented smoke test before scaling up.
-
-Model memory MAY help locate documentation or form a hypothesis. It MUST NOT be
-the sole evidence for the current interface contract.
-
-Error recovery:
-- On the **first** schema/argument/4xx/unknown-flag contract error, inspect the
-  error and authoritative documentation before altering the request.
-- Do not perform speculative parameter-name, quoting, encoding, endpoint,
-  method, or flag variations unsupported by documentation.
-- If a corrected documented request still fails, investigate the documented
-  contract/environment rather than guessing.
-- After **two contract-related failures**, stop speculative retries, preserve
-  the evidence, and report/record the interface as unresolved or blocking.
-
-Once the exact contract has been verified during the current task, reuse that
-verified contract without rereading the documentation before every call.
+For correctness-critical externally maintained APIs/SDKs/CLIs/config schemas,
+verify the current contract from an authoritative current source before first
+use; read only what is needed and smoke-test the documented operation. Model
+memory may locate docs but is not contract evidence. On the first contract
+error, inspect docs/error before changing the request. After two documented
+contract failures, preserve evidence and stop speculative variants.
 <!-- V2.6.9 EXTERNAL INTERFACE FRESHNESS END -->
 
 <!-- V2.6.12 FAIL-CLOSED VERIFY ARTIFACTS BEGIN -->
-## Fail-closed checker/probe/test artifacts
+## Fail-closed Verify artifacts
 
-If you own a script that is executed by this leaf's exact `Verify command`, its
-exit status is part of the deliverable:
-- every required Done-when/Verify sub-check must make the script exit nonzero
-  when it fails or remains unresolved;
-- never print `FAIL`, `probe failed`, or equivalent for a required check and
-  then exit 0;
-- optional diagnostics may be non-fatal only when they are explicitly optional
-  in the plan;
-- preserve useful partial artifacts/progress before returning nonzero so a
-  retry/fresh worker can resume.
-
-Before returning, run the exact Verify command and confirm that the success
-path really proves the required state rather than merely generating a report.
+Any owned script executed by the exact Verify command must exit nonzero when a
+required check fails or is unresolved; required failures must never print FAIL
+and exit 0. Optional diagnostics are non-fatal only when explicitly optional.
+Preserve useful partial progress, then run exact Verify before returning.
 <!-- V2.6.12 FAIL-CLOSED VERIFY ARTIFACTS END -->
