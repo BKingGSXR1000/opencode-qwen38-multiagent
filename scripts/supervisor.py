@@ -438,6 +438,23 @@ def _normalized_verify_for_recovery_compare(command):
     return re.sub(r"\s+"," ",str(command or "").strip())
 
 
+def split_handoff_progress_complete(text):
+    """Require one exact READY marker line plus exact section-label lines.
+
+    A progress checkpoint may legitimately contain prose such as
+    "set HANDOFF_READY: true after validation".  That prose must never promote a
+    HANDOFF_READY: false checkpoint to READY.
+    """
+    text=str(text or "")
+    if len(text.strip()) < 80:
+        return False
+    lines=[line.strip() for line in text.splitlines()]
+    markers=[line for line in lines if line.startswith("HANDOFF_READY:")]
+    if markers != [SPLIT_HANDOFF_MARKER]:
+        return False
+    return all(label in lines for label in ("Findings:","Evidence:","Next step:"))
+
+
 def split_handoff_verify_command(child_id):
     path=f".opencode-v2/work/{child_id}.progress.md"
     # Keep the shell surface tiny. The child ID is supervisor-derived and
@@ -446,9 +463,11 @@ def split_handoff_verify_command(child_id):
     return (
         "python3 -c \"from pathlib import Path; "
         f"t=Path('{path}').read_text(); "
-        "assert 'HANDOFF_READY: true' in t; "
-        "assert 'Findings:' in t; assert 'Evidence:' in t; "
-        "assert 'Next step:' in t; assert len(t.strip()) >= 80\""
+        "lines=[x.strip() for x in t.splitlines()]; "
+        "markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; "
+        "assert markers==['HANDOFF_READY: true']; "
+        "assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); "
+        "assert len(t.strip()) >= 80\""
     )
 
 
@@ -2140,8 +2159,7 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
             handoff_text=progress.read_text(errors="replace")
         except OSError:
             handoff_text=""
-        required=(SPLIT_HANDOFF_MARKER,"Findings:","Evidence:","Next step:")
-        if not handoff_text or any(marker not in handoff_text for marker in required):
+        if not split_handoff_progress_complete(handoff_text):
             return False,"split-handoff-progress-incomplete"
     elif not read_only_no_artifacts and (
         not paths or any(not (Path(PROJECT)/path).exists() for path in paths)
