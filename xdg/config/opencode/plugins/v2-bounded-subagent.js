@@ -31,6 +31,15 @@ function hookCallID(event) {
   return String(event?.callID || event?.callId || event?.id || "");
 }
 
+export function implementationDispatchToken(event, did) {
+  const callID = hookCallID(event);
+  if (!callID) return "";
+  const deliverable = String(did || "");
+  return deliverable && deliverable !== "unknown"
+    ? `${callID}:${deliverable}`
+    : callID;
+}
+
 export function toolResultText(result) {
   if (!result || typeof result !== "object") return "";
   if (typeof result.output === "string" && result.output.length) return result.output;
@@ -241,7 +250,12 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
 
     // This deterministic supervisor claim occurs before OpenCode materializes
     // the child session or sends a provider request.
-    supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", hookCallID(event)]);
+    // OpenCode2 beta can expose one shared hook call ID to multiple subagent
+    // calls emitted in the same assistant response. Namespace implementation
+    // reservations by canonical Dxxx so C3 batch preclaims remain unique while
+    // repeated delivery of the same call+Dxxx stays idempotent.
+    const dispatchToken = implementationDispatchToken(event, did);
+    supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", dispatchToken]);
 
     // Only after a successful canonical preclaim may deterministic supervisor
     // text replace the child-visible prompt. No model/root-authored suffix is
@@ -321,6 +335,22 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
   if (markRequestPurpose(primary) || primary.headers["x-v2-request-purpose"]) {
     throw new Error("normal request was marked as compaction");
   }
+
+  // OpenCode2 beta may share one event id across a batch. Different
+  // deliverables must still reserve distinct supervisor dispatch identities.
+  const shared = { id: "call-shared" };
+  const d1 = implementationDispatchToken(shared, "D001");
+  const d2 = implementationDispatchToken(shared, "D002");
+  if (d1 !== "call-shared:D001" || d2 !== "call-shared:D002" || d1 === d2) {
+    throw new Error("implementation batch dispatch tokens are not Dxxx-namespaced");
+  }
+  if (implementationDispatchToken(shared, "D001") !== d1) {
+    throw new Error("implementation dispatch token is not idempotent");
+  }
+  if (implementationDispatchToken({ callID: "split-call" }, "unknown") !== "split-call") {
+    throw new Error("unknown-deliverable dispatch token fallback changed");
+  }
+
   console.log("v2-bounded-subagent selftest: OK");
 }
 

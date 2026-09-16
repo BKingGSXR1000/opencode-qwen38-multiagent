@@ -196,7 +196,7 @@ Every implementation child prompt should be SHORT.
 For any implementation leaf, use exactly these five lines with its exact ID.
 Example `D004`:
 `DELIVERABLE: D004`
-`Read .opencode-v2/query/leaves/D004-context.json; it is your authoritative deliverable context.`
+`Read .opencode-v2/query/leaves/D004-context.json exactly once for this session; it is the complete authoritative deliverable contract. Do not read .opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope.`
 `Read .opencode-v2/work/D004.progress.md if present.`
 `Inspect your owned project artifacts as they currently exist.`
 `Continue from actual filesystem state and execute the deliverable.`
