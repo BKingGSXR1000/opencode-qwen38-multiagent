@@ -186,7 +186,9 @@ def parse_deliverable(text):
 def implementation_prompt(did):
     return (
         f"DELIVERABLE: {did}\n"
-        f"Read .opencode-v2/query/leaves/{did}-context.json; it is your authoritative deliverable context.\n"
+        f"Read .opencode-v2/query/leaves/{did}-context.json exactly once for this session; "
+        "it is the complete authoritative deliverable contract. Do not read "
+        ".opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope.\n"
         f"Read .opencode-v2/work/{did}.progress.md if present.\n"
         "Inspect your owned project artifacts as they currently exist.\n"
         "Continue from actual filesystem state and execute the deliverable."
@@ -204,21 +206,25 @@ def implementation_runtime_prompt(did,agent):
         action_order=(
             "MANDATORY ACTION ORDER — PROGRESS-ONLY HANDOFF:\n"
             "1. FIRST tool-bearing response: read ONLY the authoritative context packet "
-            f".opencode-v2/query/leaves/{did}-context.json and, if it exists, the current progress file "
+            f".opencode-v2/query/leaves/{did}-context.json exactly once for this session and, "
+            "if present, the current progress file "
             f".opencode-v2/work/{did}.progress.md. Do not inspect CONTROL_CONTRACT or project "
             "artifacts yet.\n"
-            "2. SECOND tool-bearing response: you MUST create or update "
-            f".opencode-v2/work/{did}.progress.md using the exact labels HANDOFF_READY, "
-            "Findings, Evidence, and Next step. Use HANDOFF_READY: false unless the handoff "
-            "is already sufficient. This response MUST contain a write/edit of that exact "
-            "progress file and MUST NOT contain read, list, grep, glob, shell, webfetch, "
-            "websearch, or other discovery tool calls.\n"
-            "3. ONLY AFTER that second-response durable write may you inspect "
-            "CONTROL_CONTRACT or project artifacts and continue bounded discovery. Update "
-            "the progress file as concrete evidence improves; set HANDOFF_READY: true only "
-            "when the downstream writer has enough evidence to proceed.\n"
-            "This action order is mandatory even when almost nothing is known yet. A partial "
-            "scope-derived checkpoint is required; temporary files do not count."
+            "2. SECOND tool-bearing response: write/edit exactly "
+            f".opencode-v2/work/{did}.progress.md with this plain-text shape:\n"
+            "HANDOFF_READY: false\n\n"
+            "Findings:\n<facts or none yet>\n\n"
+            "Evidence:\n<evidence or none yet>\n\n"
+            "Next step:\n<next bounded action>\n"
+            "Labels start at column 1. Do not prefix them with #/## and do not append text "
+            "after true/false. Use true only when the downstream writer has enough evidence. "
+            "This response MUST contain that write/edit and no discovery tool call.\n"
+            "3. AFTER that write, bounded discovery is allowed. After ANY meaningful new "
+            "fact/evidence, the NEXT tool-bearing response MUST update the same progress file "
+            "BEFORE another discovery call. Each durable update resets the five-turn "
+            "no-progress window. Do not keep new findings only in conversation context.\n"
+            "When sufficient, write exact HANDOFF_READY: true, run the exact Verify command, "
+            "persist the result, and return. Temporary files do not count."
         )
         return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])
     else:
@@ -2295,50 +2301,24 @@ def persisted_completed_tool_turns(sid):
     return turns
 
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
-    """Stop probe read/research loops before their finite OpenCode step budget.
+    """Require recurring durable progress during bounded probe discovery.
 
-    Progress-only split children are special: their progress file IS the durable
-    deliverable. Once THIS session has changed the durable signature and the
-    resulting file is a valid HANDOFF_READY true/false checkpoint, the
-    no-owned-progress watchdog has achieved its purpose. The finite agent step
-    budget and normal verification still bound the remaining discovery.
+    Any change to this leaf's owned/progress signature resets the existing
+    five-tool-turn window. Progress-only split children are not permanently
+    exempt after HANDOFF_READY:false: their progress file is their durable
+    artifact, so new evidence must continue to be checkpointed.
     """
     if agent!="probe-builder" or not did: return ""
     now=time.monotonic() if now is None else now
     signature=durable_progress_signature(agent,did)
     persisted_turns=persisted_completed_tool_turns(sid)
     state=worker_progress.setdefault(
-        sid,{
-            "signature":signature,
-            "baseline_turns":0,
-            "turns":persisted_turns,
-            "handoff_checkpoint_seen":False,
-        }
+        sid,{"signature":signature,"baseline_turns":0,"turns":persisted_turns}
     )
     if signature!=state["signature"]:
-        leaf=(load_manifest().get("leaves") or {}).get(did,{})
-        handoff_only=bool(
-            isinstance(leaf,dict) and leaf.get("split_handoff_only")
-        )
-        checkpoint_seen=False
-        if handoff_only:
-            progress=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
-            try:
-                checkpoint_seen=split_handoff_progress_checkpoint(
-                    progress.read_text(errors="replace")
-                )
-            except OSError:
-                checkpoint_seen=False
         state.update(
-            signature=signature,
-            baseline_turns=persisted_turns,
-            turns=0,
-            handoff_checkpoint_seen=(
-                bool(state.get("handoff_checkpoint_seen")) or checkpoint_seen
-            ),
+            signature=signature,baseline_turns=persisted_turns,turns=0
         )
-        return ""
-    if state.get("handoff_checkpoint_seen"):
         return ""
     state["turns"]=max(0,persisted_turns-int(state.get("baseline_turns") or 0))
     if state["turns"]>=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS:

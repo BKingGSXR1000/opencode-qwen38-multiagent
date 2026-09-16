@@ -103,19 +103,79 @@ def _leaf_projection(did, raw, role=""):
 
 
 
-def _acceptance_must_texts(project):
-    # Return exact one-line Axxx descriptions from the durable acceptance contract.
+def _join_wrapped_acceptance(parts):
+    result = ""
+    for part in parts:
+        part = str(part or "").strip()
+        if not part:
+            continue
+        if not result:
+            result = part
+        elif result.endswith("-"):
+            result += part
+        else:
+            result += " " + part
+    return result
+
+
+def _acceptance_contract(project):
+    """Project reference policy plus complete multiline Axxx MUST criteria."""
     path = Path(project) / ".opencode-v2" / "ACCEPTANCE.md"
+    default = {"reference_policy": "unknown", "musts": {}}
     try:
         text = path.read_text(errors="replace")
     except OSError:
-        return {}
-    result = {}
-    for match in re.finditer(
-        r"(?m)^\s*-\s*\[\s*\]\s*(A\d{3})\s*:\s*(.+?)\s*$",
+        return default
+
+    policy_match = re.search(
+        r"(?mi)^\s*(?:\*\*)?Reference policy(?:\*\*)?\s*:\s*"
+        r"(none|internal|external-required)\s*$",
         text,
-    ):
-        result[match.group(1)] = match.group(2).strip()
+    )
+    result = {
+        "reference_policy": (
+            policy_match.group(1).lower() if policy_match else "unknown"
+        ),
+        "musts": {},
+    }
+
+    current_id = ""
+    current_parts = []
+
+    def flush():
+        nonlocal current_id, current_parts
+        if current_id:
+            result["musts"][current_id] = _join_wrapped_acceptance(current_parts)
+        current_id = ""
+        current_parts = []
+
+    for line in text.splitlines():
+        match = re.match(
+            r"^\s*-\s*\[\s*\]\s*(A\d{3})\s*:\s*(.*?)\s*$",
+            line,
+        )
+        if match:
+            flush()
+            current_id = match.group(1)
+            current_parts = [match.group(2)]
+            continue
+
+        if not current_id:
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            flush()
+            continue
+
+        # Acceptance criteria may wrap onto indented physical lines. Stop at
+        # headings/other bullets rather than absorbing unrelated contract text.
+        if line[:1].isspace() and not re.match(r"^\s*[-*]\s+", line):
+            current_parts.append(stripped)
+        else:
+            flush()
+
+    flush()
     return result
 
 
@@ -130,7 +190,7 @@ def build_leaf_contexts(project, manifest):
     project = Path(project)
     manifest = manifest if isinstance(manifest, dict) else {}
     leaves = manifest.get("leaves") if isinstance(manifest.get("leaves"), dict) else {}
-    acceptance = _acceptance_must_texts(project)
+    acceptance = _acceptance_contract(project)
     contexts = {}
 
     for did, leaf in sorted(leaves.items()):
@@ -154,8 +214,9 @@ def build_leaf_contexts(project, manifest):
             "contract_deps": _as_string_list(leaf.get("contract_deps")),
             "verify_deps": _as_string_list(leaf.get("verify_deps")),
             "acceptance_ids": acceptance_ids,
+            "reference_policy": acceptance["reference_policy"],
             "acceptance_musts": [
-                {"id": aid, "text": acceptance.get(aid, "")}
+                {"id": aid, "text": acceptance["musts"].get(aid, "")}
                 for aid in acceptance_ids
             ],
             "complexity": str(leaf.get("complexity") or ""),
@@ -413,9 +474,14 @@ def _selftest():
         (project / ".opencode-v2" / "work").mkdir(parents=True)
         (project / ".opencode-v2" / "ACCEPTANCE.md").write_text(
             "# Acceptance Contract\n"
-            "Reference policy: internal\n"
-            "- [ ] A001: first required behavior\n"
-            "- [ ] A002: second required behavior\n"
+            "Reference policy: external-required\n"
+            "## MUST Checks\n"
+            "- [ ] A001: first required behavior that wraps\n"
+            "  across a second physical line and preserves the whole criterion.\n"
+            "- [ ] A002: second required behavior with behind-\n"
+            "  Jupiter geometry.\n"
+            "## SHOULD Checks\n"
+            "- [ ] S001: optional behavior must not leak into A002.\n"
             "<!-- ACCEPTANCE_COMPLETE -->\n"
         )
         (project / ".opencode-v2" / "work" / "D004-A.scope.md").write_text(
@@ -463,8 +529,18 @@ def _selftest():
         }
         contexts = build_leaf_contexts(project, context_manifest)
         assert set(contexts) == {"D003", "D004-A"}
+        assert contexts["D003"]["reference_policy"] == "external-required"
         assert contexts["D003"]["acceptance_musts"] == [
-            {"id": "A001", "text": "first required behavior"}
+            {
+                "id": "A001",
+                "text": (
+                    "first required behavior that wraps across a second physical "
+                    "line and preserves the whole criterion."
+                ),
+            }
+        ]
+        assert contexts["D004-A"]["acceptance_musts"] == [
+            {"id": "A002", "text": "second required behavior with behind-Jupiter geometry."}
         ]
         assert contexts["D004-A"]["source_kind"] == "split-child"
         assert "bounded child work" in contexts["D004-A"]["split_scope"]
