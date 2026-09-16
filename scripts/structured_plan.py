@@ -453,8 +453,32 @@ def compile_plan(project: Path):
     return True,[]
 
 def write_repair(path: Path, errors, source: str):
+    """Write an actionable targeted repair packet.
+
+    Global syntax/root failures still require whole-plan repair. A missing final
+    TEST_CHECKS leaf is different: it is a bounded structural omission and can
+    be repaired by adding/fixing one stable symbolic leaf instead of rewriting
+    the complete plan.
+    """
     affected=[]
-    for e in errors:
+    repair_errors=[]
+    for raw in errors:
+        e=dict(raw) if isinstance(raw,dict) else {
+            "key":"",
+            "code":"unknown",
+            "message":str(raw),
+        }
+        if e.get("code")=="missing-test-manifest" and not e.get("key"):
+            e["key"]="final_tests"
+            e["message"]=(
+                str(e.get("message") or "missing final test-builder leaf")
+                + " Add or repair exactly one `final_tests` leaf: role "
+                  "`test-builder`, owned_artifacts "
+                  "[`.opencode-v2/TEST_CHECKS.json`], and verify_command exact "
+                  "`.opencode-v2/bin/run-checks`. If the key is absent, adding "
+                  "that one named leaf by bounded edit is authorized."
+            )
+        repair_errors.append(e)
         for k in ([e.get("key")] + list(e.get("keys") or [])):
             if k and k not in affected:
                 affected.append(k)
@@ -463,7 +487,7 @@ def write_repair(path: Path, errors, source: str):
         "source":source,
         "whole_plan":not bool(affected),
         "affected_keys":affected,
-        "errors":errors,
+        "errors":repair_errors,
     })
 
 def main():

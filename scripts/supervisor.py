@@ -1681,7 +1681,18 @@ def planner_plan_state(plan_path):
     }
 
 def planner_session_mode(sid):
+    """Classify planner mode after only recognized deterministic preambles."""
     text=strip_subagent_prefix(first_user_text_db(sid)).strip()
+
+    # Root-authored launches sometimes prepend the exact project root before the
+    # canonical planner instruction. New51g exposed that treating such a repair
+    # as fresh immediately retires it against the already-invalid candidate.
+    match=re.match(r"\AProject root:\s*(.+?)\s*\n+",text)
+    if match:
+        supplied=match.group(1).strip()
+        if PROJECT and os.path.realpath(supplied)==os.path.realpath(PROJECT):
+            text=text[match.end():].lstrip()
+
     if text.startswith("Repair structured implementation planning for this project."):
         return "repair"
     if text.startswith("Continue structured implementation planning for this project."):

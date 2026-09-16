@@ -122,6 +122,12 @@ If `IMPLEMENTATION_PLAN.repair.json` exists:
 - read `affected_keys`, `whole_plan`, and `errors`;
 - preserve every unaffected leaf verbatim whenever `whole_plan` is false;
 - edit only the affected leaf objects and dependency references that must change;
+- an affected key may be absent when the listed error is a required missing
+  leaf. In that case, adding exactly that named leaf by a bounded `edit` is
+  authorized and is still targeted repair. For `missing-test-manifest`, add or
+  repair exactly one `final_tests` leaf with role `test-builder`, owning
+  `.opencode-v2/TEST_CHECKS.json`, and verify command exactly
+  `.opencode-v2/bin/run-checks`;
 - do not renumber anything; symbolic keys are stable;
 - do not reread generated `IMPLEMENTATION_PLAN.md`;
 - do not rewrite the whole plan merely to satisfy formatting.
