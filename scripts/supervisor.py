@@ -72,6 +72,9 @@ READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 MAX_SPLITTER_ATTEMPTS=2
 SPLITTER_LEASE_SECONDS=600
+# execute.after can run before the child final text is durable in the session DB.
+# Give the persisted reconcile loop a short bounded window after the hook returns.
+SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS=5
 MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
 SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
 SPLIT_HANDOFF_VERIFY_SENTINEL="SUPERVISOR_HANDOFF_PROGRESS"
@@ -437,21 +440,30 @@ def _normalized_verify_for_recovery_compare(command):
     return re.sub(r"\s+"," ",str(command or "").strip())
 
 
-def split_handoff_progress_complete(text):
-    """Require one exact READY marker line plus exact section-label lines.
+def split_handoff_progress_checkpoint(text):
+    """Recognize one durable progress-only checkpoint, READY or explicitly partial.
 
-    A progress checkpoint may legitimately contain prose such as
-    "set HANDOFF_READY: true after validation".  That prose must never promote a
-    HANDOFF_READY: false checkpoint to READY.
+    The runtime prompt requires this checkpoint in the current worker session
+    before bounded discovery. HANDOFF_READY:false is valid durable progress but
+    is not sufficient for final leaf verification.
     """
     text=str(text or "")
     if len(text.strip()) < 80:
         return False
     lines=[line.strip() for line in text.splitlines()]
     markers=[line for line in lines if line.startswith("HANDOFF_READY:")]
-    if markers != [SPLIT_HANDOFF_MARKER]:
+    if markers not in (["HANDOFF_READY: false"],[SPLIT_HANDOFF_MARKER]):
         return False
     return all(label in lines for label in ("Findings:","Evidence:","Next step:"))
+
+
+def split_handoff_progress_complete(text):
+    """Require one exact READY marker line plus exact section-label lines."""
+    if not split_handoff_progress_checkpoint(text):
+        return False
+    lines=[line.strip() for line in str(text or "").splitlines()]
+    markers=[line for line in lines if line.startswith("HANDOFF_READY:")]
+    return markers == [SPLIT_HANDOFF_MARKER]
 
 
 def split_handoff_verify_command(child_id):
@@ -1199,6 +1211,51 @@ def parse_splitter_final_json(text):
     return None
 
 
+def recover_pending_splitter_completion(parent,status,now=None):
+    """Recover splitter final JSON after execute.after has returned.
+
+    OpenCode may not persist the child final assistant text until the task
+    execute.after hook returns. Waiting synchronously inside that hook therefore
+    cannot reliably make the text visible. Persist a pending session ID and let
+    the normal 0.5s reconciliation loop read it afterward.
+    """
+    status=status if isinstance(status,dict) else {}
+    session=str(status.get("completion_pending_session") or "")
+    if not session:
+        return False,"not-pending"
+    token=str(status.get("completion_pending_token") or "")
+    active_token=str(status.get("dispatch_token") or "")
+    if token and active_token and token!=active_token:
+        return False,"stale-pending-token"
+
+    payload=parse_splitter_final_json(last_assistant_text_db(session))
+    if isinstance(payload,dict):
+        atomic_write_json(split_proposal_path(parent),payload)
+        log(
+            f"SPLIT_PROPOSAL_RECOVERED_AFTER_HOOK parent={parent} "
+            f"session={session} token={token or active_token}"
+        )
+        return True,"proposal-recovered"
+
+    now=time.time() if now is None else float(now)
+    try:
+        deadline=float(status.get("completion_pending_deadline_epoch") or 0)
+    except (TypeError,ValueError):
+        deadline=0
+    if deadline and now < deadline:
+        return False,"completion-pending"
+
+    _,state=record_splitter_failure(
+        parent,"splitter-completed-without-json-proposal",
+        session=session,validation=False,
+    )
+    log(
+        f"SPLIT_PROPOSAL_PERSIST_TIMEOUT parent={parent} "
+        f"session={session} state={state}"
+    )
+    return False,state
+
+
 def complete_splitter(parent, session="", dispatch_token="", output_text=""):
     """Accept completion only from the currently leased splitter token."""
     with splitter_state_lock(parent):
@@ -1210,27 +1267,46 @@ def complete_splitter(parent, session="", dispatch_token="", output_text=""):
             return False,"stale-splitter-completion"
         if not split_request_path(parent).exists(): return False,"split-request-missing"
 
-        # New35: Tool.Result may carry subagent text only in result.content.
-        # The plugin now forwards that synchronously. Keep a short DB fallback
-        # for older adapters/persistence-order races without immediately burning
-        # a splitter attempt on the first not-yet-committed DB read.
         payload=parse_splitter_final_json(output_text)
         source="hook-output" if isinstance(payload,dict) else ""
         if not isinstance(payload,dict) and session:
-            for attempt in range(10):
-                payload=parse_splitter_final_json(last_assistant_text_db(session))
-                if isinstance(payload,dict):
-                    source="session-db"
-                    break
-                if attempt < 9:
-                    time.sleep(0.05)
+            # One non-blocking DB read can succeed on runtimes that persist the
+            # child final message before execute.after. Do NOT spin here:
+            # New51e demonstrated that persistence can occur only after this hook
+            # returns, making synchronous sleep/retry self-defeating.
+            payload=parse_splitter_final_json(last_assistant_text_db(session))
+            if isinstance(payload,dict):
+                source="session-db-immediate"
 
         if not isinstance(payload,dict):
-            _,state=record_splitter_failure(
-                parent,"splitter-completed-without-json-proposal",
-                session=session,validation=False,
+            if not session:
+                _,state=record_splitter_failure(
+                    parent,"splitter-completed-without-json-proposal",
+                    session=session,validation=False,
+                )
+                return False,state
+            now=time.time()
+            try:
+                lease_until=float(status.get("lease_until_epoch") or 0)
+            except (TypeError,ValueError):
+                lease_until=0
+            deadline=now+SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS
+            save_split_status(
+                parent,"splitter-active",
+                claim_count=int(status.get("claim_count") or 0),
+                dispatch_token=dispatch_token,
+                lease_until_epoch=max(lease_until,deadline),
+                completion_pending_session=session,
+                completion_pending_token=dispatch_token,
+                completion_pending_deadline_epoch=deadline,
             )
-            return False,state
+            log(
+                f"SPLIT_COMPLETION_PENDING_PERSIST parent={parent} "
+                f"session={session} token={dispatch_token} "
+                f"grace={SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS}s"
+            )
+            return True,"completion-pending"
+
         atomic_write_json(split_proposal_path(parent),payload)
         log(
             f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} "
@@ -1259,24 +1335,39 @@ def reconcile_split_proposals():
             }:
                 continue
             if state=="splitter-active":
-                try:
-                    expired=float(status.get("lease_until_epoch") or 0) <= time.time()
-                except (TypeError,ValueError):
-                    expired=True
-                if expired:
-                    claims=int(status.get("claim_count") or 0)
-                    if claims >= MAX_SPLITTER_ATTEMPTS:
-                        save_split_status(
-                            did,"splitter-failed",claim_count=claims,
-                            reason="splitter lease expired and claim budget is exhausted",
-                            lease_until_epoch=0,
-                        )
-                    else:
-                        save_split_status(
-                            did,"split-retryable",claim_count=claims,
-                            reason="splitter lease expired",
-                            lease_until_epoch=0,
-                        )
+                pending_session=str(
+                    status.get("completion_pending_session") or ""
+                )
+                if pending_session:
+                    recovered,pending_detail=recover_pending_splitter_completion(
+                        did,status
+                    )
+                    status=load_split_status(did)
+                    state=status.get("state")
+                    if not recovered and pending_detail=="completion-pending":
+                        continue
+                    if not recovered and state!="splitter-active":
+                        continue
+
+                if state=="splitter-active" and not split_proposal_path(did).exists():
+                    try:
+                        expired=float(status.get("lease_until_epoch") or 0) <= time.time()
+                    except (TypeError,ValueError):
+                        expired=True
+                    if expired:
+                        claims=int(status.get("claim_count") or 0)
+                        if claims >= MAX_SPLITTER_ATTEMPTS:
+                            save_split_status(
+                                did,"splitter-failed",claim_count=claims,
+                                reason="splitter lease expired and claim budget is exhausted",
+                                lease_until_epoch=0,
+                            )
+                        else:
+                            save_split_status(
+                                did,"split-retryable",claim_count=claims,
+                                reason="splitter lease expired",
+                                lease_until_epoch=0,
+                            )
             if split_proposal_path(did).exists():
                 process_split_proposal(did)
 
@@ -2204,18 +2295,50 @@ def persisted_completed_tool_turns(sid):
     return turns
 
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
-    """Stop probe read/research loops before their finite OpenCode step budget."""
+    """Stop probe read/research loops before their finite OpenCode step budget.
+
+    Progress-only split children are special: their progress file IS the durable
+    deliverable. Once THIS session has changed the durable signature and the
+    resulting file is a valid HANDOFF_READY true/false checkpoint, the
+    no-owned-progress watchdog has achieved its purpose. The finite agent step
+    budget and normal verification still bound the remaining discovery.
+    """
     if agent!="probe-builder" or not did: return ""
     now=time.monotonic() if now is None else now
     signature=durable_progress_signature(agent,did)
     persisted_turns=persisted_completed_tool_turns(sid)
     state=worker_progress.setdefault(
-        sid,{"signature":signature,"baseline_turns":0,"turns":persisted_turns}
+        sid,{
+            "signature":signature,
+            "baseline_turns":0,
+            "turns":persisted_turns,
+            "handoff_checkpoint_seen":False,
+        }
     )
     if signature!=state["signature"]:
-        state.update(
-            signature=signature,baseline_turns=persisted_turns,turns=0
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        handoff_only=bool(
+            isinstance(leaf,dict) and leaf.get("split_handoff_only")
         )
+        checkpoint_seen=False
+        if handoff_only:
+            progress=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+            try:
+                checkpoint_seen=split_handoff_progress_checkpoint(
+                    progress.read_text(errors="replace")
+                )
+            except OSError:
+                checkpoint_seen=False
+        state.update(
+            signature=signature,
+            baseline_turns=persisted_turns,
+            turns=0,
+            handoff_checkpoint_seen=(
+                bool(state.get("handoff_checkpoint_seen")) or checkpoint_seen
+            ),
+        )
+        return ""
+    if state.get("handoff_checkpoint_seen"):
         return ""
     state["turns"]=max(0,persisted_turns-int(state.get("baseline_turns") or 0))
     if state["turns"]>=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS:
