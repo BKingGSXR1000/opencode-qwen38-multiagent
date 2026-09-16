@@ -111,7 +111,10 @@ instead of the task in ORIGINAL_TASK.md:
 ORIGINAL_TASK_STATE_MISMATCH
 STOP.
 
-Read `.opencode-v2/control-status.json` for the authoritative derived scheduler state.
+Call the `control_query` tool with `query="decision"` for the authoritative
+derived scheduler state. The tool reads the latest supervisor-owned status
+outside model context and returns only a bounded projection. Do not direct-read
+`.opencode-v2/control-status.json` during normal continuation.
 Continue the ORIGINAL task from durable state only."""
 
 PLANNER_CONTINUATION_PROMPT="""Continue structured implementation planning for this project.
