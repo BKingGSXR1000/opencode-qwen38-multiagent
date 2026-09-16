@@ -30,6 +30,7 @@ from worker_sandbox import (
     violation_path as worker_sandbox_violation_path,
 )
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
+from control_query_views import materialize_control_query_views
 from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
     visible_progress_marker,
@@ -111,10 +112,10 @@ instead of the task in ORIGINAL_TASK.md:
 ORIGINAL_TASK_STATE_MISMATCH
 STOP.
 
-Call the `control_query` tool with `query="decision"` for the authoritative
-derived scheduler state. The tool reads the latest supervisor-owned status
-outside model context and returns only a bounded projection. Do not direct-read
-`.opencode-v2/control-status.json` during normal continuation.
+Direct-read `.opencode-v2/query/decision.json` for the authoritative bounded
+scheduler projection. The supervisor materializes it from the same canonical
+state as control-status.json. Do not direct-read full control-status.json during
+normal continuation.
 Continue the ORIGINAL task from durable state only."""
 
 PLANNER_CONTINUATION_PROMPT="""Continue structured implementation planning for this project.
@@ -1478,13 +1479,20 @@ def sync_control_status_snapshot():
         rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
         if not path.exists() or path.read_text(errors="replace")!=rendered:
             atomic_write_text(path,rendered)
+        manifest=(load_manifest() if payload.get("plan",{}).get("complete") else {})
+        materialize_control_query_views(PROJECT,payload,manifest,rendered)
         return payload
     except Exception as exc:
         payload=control_state_error_payload(exc)
+        rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
         try:
             atomic_write_json(path,payload)
         except Exception as write_exc:
             log(f"CONTROL_STATUS_ERROR_WRITE_FAILED source={exc!r} write={write_exc!r}")
+        try:
+            materialize_control_query_views(PROJECT,payload,{},rendered)
+        except Exception as query_exc:
+            log(f"CONTROL_QUERY_VIEW_WRITE_FAILED source={exc!r} query={query_exc!r}")
         log(f"CONTROL_STATUS_SNAPSHOT_ERROR {exc!r}")
         return payload
 # V2.6.9 DURABLE CONTROL STATUS SNAPSHOT END
@@ -2032,9 +2040,14 @@ SUPERVISOR_DYNAMIC_CONTROL_PATHS={
     ".opencode-v2/reference-validation-gate.json",
     ".opencode-v2/IMPLEMENTATION_PLAN.guard.json",
 }
+SUPERVISOR_DYNAMIC_CONTROL_PREFIXES=(
+    ".opencode-v2/query/",
+)
 
 def supervisor_dynamic_control_path(path):
     if path in SUPERVISOR_DYNAMIC_CONTROL_PATHS:
+        return True
+    if any(path.startswith(prefix) for prefix in SUPERVISOR_DYNAMIC_CONTROL_PREFIXES):
         return True
     # Supervisor atomic writes use same-directory temporary names such as
     # .opencode-v2/.control-status.json.geel2cvt.tmp. They can appear/disappear

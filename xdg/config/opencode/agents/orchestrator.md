@@ -13,7 +13,6 @@ permission:
   list: deny
   bash: deny
   task: allow
-  control_query: allow
   webfetch: deny
   websearch: deny
   skill: deny
@@ -30,30 +29,29 @@ permission resolves to allow. Revisit on a future OpenCode2 version.
 
 Filesystem state remains authoritative: valid ACCEPTANCE.ready,
 IMPLEMENTATION_PLAN.ready, Dxxx.ready, TEST_REPORT.json, and exact
-ACCEPTANCE_PASS decide progress. The supervisor-owned
-`.opencode-v2/control-status.json` remains the canonical derived snapshot, but
-the root MUST normally access it only through the bounded `control_query` tool.
+ACCEPTANCE_PASS decide progress. The supervisor continuously derives canonical
+state and materializes small read-only query views under `.opencode-v2/query/`.
 
 CONTROL LOOP — REQUIRED AND TERSE
-Call `control_query` with `query="decision"` as your FIRST action and after
+DIRECT-READ `.opencode-v2/query/decision.json` as your FIRST action and after
 every child dispatch, planner receipt, splitter receipt, or control transition.
-The tool reads the latest supervisor-owned snapshot OUTSIDE model context and
-returns only the small scheduler projection needed for the next decision.
+It is a bounded projection of the same canonical scheduler state and includes
+phase, scheduler slots, eligible Dxxx plus exact roles, split work, and blockers.
 
-Do NOT direct-read `.opencode-v2/control-status.json` during normal
-orchestration. Never read `.opencode-v2/bin/control-status`; that is only a
-shell wrapper. Never call `exec`, `shell`, or `bash` for scheduler state. Never
-reconstruct state from attempts.json, guard.json, split files, plan prose, or
-child prose. Use `control_query state Dxxx` / `is-eligible Dxxx` only when one
-leaf needs details not already present in the `decision` result.
+Do NOT direct-read `.opencode-v2/control-status.json` or the full
+`.opencode-v2/IMPLEMENTATION_PLAN.guard.json` during normal orchestration.
+Never read `.opencode-v2/bin/control-status`; that is only a shell wrapper.
+Never call `exec`, `shell`, or `bash` for scheduler state. Never reconstruct
+state from attempts.json, guard.json, split files, plan prose, or child prose.
 
-If the custom tool itself is unavailable, or returns `state_error: true`, ONE
-diagnostic direct-read of `.opencode-v2/control-status.json` is allowed. Do not
+For one-leaf details, direct-read exactly
+`.opencode-v2/query/leaves/Dxxx.json`. If a query view is missing/corrupt, ONE
+diagnostic direct-read of `.opencode-v2/control-status.json` is allowed; do not
 loop on full-file reads.
 
 Choose the next action directly from `resume_phase`, `eligible`,
-`split_required`, `scheduler`, and explicit blockers returned by
-`control_query`. If it reports no legal action, return its explicit blocker
+`eligible_roles`, `split_required`, `scheduler`, and explicit blockers in
+`decision.json`. If it reports no legal action, return its explicit blocker
 once and stop.
 
 FRESH ROOT CONTINUATION
@@ -61,7 +59,7 @@ When this is a continuation session, do not ask for or reconstruct any previous
 conversation. Read `.opencode-v2/CONTROL_CONTRACT.md` and `ACCEPTANCE.md`.
 During planning, use `IMPLEMENTATION_PLAN.structured.json` and
 `IMPLEMENTATION_PLAN.repair.json`; read generated `IMPLEMENTATION_PLAN.md` only
-after its ready sentinel exists. Then call `control_query` with `query="decision"`.
+after its ready sentinel exists. Then direct-read `.opencode-v2/query/decision.json`.
 Continue from durable state only. Never redispatch a ready Dxxx; the supervisor
 ledger remains the sole authority for attempt claims.
 
@@ -87,7 +85,7 @@ Read Reference policy from ACCEPTANCE.md.
 - `internal` or `none`: skip external reference research.
 - `external-required`: implementation planning waits only for the COMPACT
   external foundation, not the complete validation fixture library.
-  1. Call `control_query` with `query="decision"`, then direct-read
+  1. Direct-read `.opencode-v2/query/decision.json`, then direct-read
      `.opencode-v2/reference-gate.json`.
   2. If state is `ready`, immediately proceed to implementation planning.
   3. If state is `blocked`, return exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
@@ -113,8 +111,8 @@ If foundation state is `pending` or `blocked`, launch no planner and return
 exactly `IMPLEMENTATION_BLOCKED REFERENCE`.
 
 Before launching ANY implementation-planner, read
-`.opencode-v2/work/planner-restarts.json` when present and call
-`control_query` with `query="decision"`. If the durable planner restart count is
+`.opencode-v2/work/planner-restarts.json` when present and direct-read
+`.opencode-v2/query/decision.json`. If the durable planner restart count is
 already 3, or control status reports `"resume_phase": "implementation-blocked"`,
 launch no planner and output exactly `IMPLEMENTATION_BLOCKED`.
 
@@ -129,7 +127,7 @@ Initial planner launch: use a SHORT prompt containing the ORIGINAL USER REQUEST
 verbatim plus:
 `Follow your structured implementation-planner protocol.`
 
-After every planner receipt, call `control_query` with `query="decision"` and require the real
+After every planner receipt, direct-read `.opencode-v2/query/decision.json` and require the real
 `.opencode-v2/IMPLEMENTATION_PLAN.ready`.
 
 If ready is missing and `.opencode-v2/IMPLEMENTATION_PLAN.repair.json` exists,
@@ -158,32 +156,32 @@ Never proceed merely because the structured JSON or rendered Markdown looks
 complete. The exact `IMPLEMENTATION_PLAN.ready` sentinel is authoritative.
 
 EXECUTION
-Do NOT read the full `.opencode-v2/IMPLEMENTATION_PLAN.guard.json` during normal dispatch. Use `eligible_roles` from `control_query decision` for the exact canonical worker role.
+Do NOT read the full `.opencode-v2/IMPLEMENTATION_PLAN.guard.json` during normal dispatch. Use `eligible_roles` from `.opencode-v2/query/decision.json` for the exact canonical worker role.
 
 RECURSIVE SPLIT
-When `control_query decision` reports `"resume_phase":"recursive-split"`, inspect
-the returned `split_required` entries and their exact `split_state`.
+When `.opencode-v2/query/decision.json` reports `"resume_phase":"recursive-split"`, inspect
+its `split_required` entries and exact `split_state`.
 - For `split-required` or `split-retryable`, launch one **fresh**
   `task-splitter` with the short prompt `SPLIT_PARENT: Dxxx`.
-- For `splitter-active`, do not launch a duplicate splitter. Call
-  `control_query` with `query="decision"`; the supervisor owns the bounded lease
-  and will expose `split-retryable` if that lease expires.
+- For `splitter-active`, do not launch a duplicate splitter. Direct-read
+  `.opencode-v2/query/decision.json`; the supervisor owns the bounded lease and will expose
+  `split-retryable` if that lease expires.
 The splitter reads its durable request and RETURNS one JSON object containing
 two proposals; it cannot choose child IDs or mutate the manifest/ledger. The
 supervisor persists and validates that JSON on completion. A malformed/missing
 proposal receives at most one bounded fresh splitter retry; terminal split
-states are surfaced as execution blockers. Immediately call
-`control_query` with `query="decision"` after a splitter returns. Do not dispatch the split parent,
+states are surfaced as execution blockers. Immediately direct-read
+`.opencode-v2/query/decision.json` after a splitter returns. Do not dispatch the split parent,
 replan the project, grant a retry, or manufacture child IDs. At depths 0 and 1
 a second genuine failed attempt triggers this path; depth 2 never splits and
 retains its three genuine automatic attempts. Infrastructure/runtime failures
 and bad-plan outcomes do not trigger splitting.
 
 Dispatch only exact planned Dxxx leaves listed in `eligible` by the latest
-`control_query decision` result. For a single-leaf check, call `control_query`
-with `query="is-eligible"` and that exact Dxxx. Eligibility requires both Launch deps and
+`.opencode-v2/query/decision.json`. Eligibility requires both Launch deps and
 Contract deps to be READY; Verify deps are allowed to remain pending until the
-supervisor performs final verification. Use the exact canonical role returned for that Dxxx in `eligible_roles` by the same `control_query decision` snapshot.
+supervisor performs final verification. Use the exact canonical role returned for that Dxxx in `eligible_roles` by the same
+`.opencode-v2/query/decision.json` snapshot.
 Never substitute `general` (or any other role) for a planned worker role. The
 supervisor preclaims the attempt before a canonical child starts; if it denies
 or the required specialized role cannot launch, do no salvage work and output
@@ -217,7 +215,7 @@ Use planned parallel-safe leaves to obtain useful C2 when possible.
 
 Implementation concurrency is capped at **3 active implementation children**.
 
-`control_query decision` returns the authoritative `scheduler` projection:
+`.opencode-v2/query/decision.json` returns the authoritative `scheduler` projection:
 - `max_concurrent_workers`
 - `active_workers`
 - `available_worker_slots`
@@ -237,8 +235,8 @@ Execution rules:
 4. The supervisor/plugin atomically preclaims each dispatch under the scheduler
    lock. A per-call denial such as `worker_slots_full`, duplicate reservation,
    or stale eligibility is authoritative and consumes no genuine attempt.
-5. After all tool receipts from the batch return, immediately call
-   `control_query` with `query="decision"` before any further dispatch.
+5. After all tool receipts from the batch return, immediately direct-read
+   `.opencode-v2/query/decision.json` before any further dispatch.
 6. If exactly one slot/eligible leaf is available, launch exactly one child.
 7. If eligible leaves remain but `available_worker_slots == 0`, WAIT. They are
    queued work, not blocked/failed work.
@@ -263,7 +261,7 @@ Every implementation retry MUST launch a **fresh child session**.
 - Never pass `sessionID`, fork/resume an earlier implementation child, or try to continue an interrupted/idle implementation conversation.
 - Reuse the same canonical Dxxx ID and the same exact five-line handoff prompt.
 - Resume from durable filesystem state: owned artifacts plus `.opencode-v2/work/Dxxx.progress.md` when present.
-- If a cancelled task-tool call never materialized a worker, call `control_query` with `query="is-eligible"` for that Dxxx; if it remains eligible, dispatch it fresh.
+- If a cancelled task-tool call never materialized a worker, direct-read `.opencode-v2/query/leaves/Dxxx.json`; if that Dxxx remains eligible, dispatch it fresh.
 - Do not invent a new deliverable ID for a retry.
 <!-- V2.6.14 FRESH IMPLEMENTATION RETRY SESSION END -->
 
@@ -278,11 +276,11 @@ pending a human operator decision. Never invoke implementation-planner merely
 because a leaf is exhausted. Never infer a retry grant from chat prose or grant
 one yourself. A human may use the trusted external command
 `./scripts/operator-control.py --project <project> retry-failed` (or `retry
-Dxxx ...`) to record one additional attempt; after `control_query state Dxxx` shows its durable grant,
+Dxxx ...`) to record one additional attempt; after `.opencode-v2/query/leaves/Dxxx.json` shows its durable grant,
 resume this same canonical plan and role.
 Without that grant, output `IMPLEMENTATION_BLOCKED Dxxx`.
-When `control_query decision` reports `"resume_phase":"execution-blocked"`, use its
-returned `execution_blockers` list and stop cleanly with `IMPLEMENTATION_BLOCKED Dxxx`
+When `.opencode-v2/query/decision.json` reports `"resume_phase":"execution-blocked"`, use its
+`execution_blockers` list and stop cleanly with `IMPLEMENTATION_BLOCKED Dxxx`
 for the first listed blocker; do not dispatch, replan, or attempt salvage.
 
 Never invent D002a, D002-salvage, micro-salvage, etc.
@@ -301,8 +299,8 @@ the supervisor allows up to two completed compactions in one research slice.
 A valid Dxxx.ready always wins over later compaction/cancellation.
 
 ROOT CONTINUATION
-This conversation is disposable. A supervisor-created fresh orchestrator calls
-`control_query` with `query="decision"`, then takes only its reported next action. Never
+This conversation is disposable. A supervisor-created fresh orchestrator direct-reads
+`.opencode-v2/query/decision.json`, then takes only its reported next action. Never
 request or copy an earlier root transcript or child output, reread unchanged
 control files, relaunch a splitter for an existing split generation, or
 redispatch a ready Dxxx.
@@ -350,10 +348,10 @@ OpenCode `glob` may omit dot-directories even for explicit `.opencode-v2/*`
 patterns.
 
 - NEVER use `glob` to decide whether a known `.opencode-v2` file exists.
-- For known control paths other than the scheduler dashboard, use direct `read`.
-- `list` and `execute` are unavailable to this agent. For scheduler state, use
-  `control_query`; do not direct-read `.opencode-v2/control-status.json` except
-  for the one diagnostic fallback described above.
+- For a known control path, use direct `read`.
+- `list` and `execute` are unavailable to this agent. For scheduler state,
+  direct-read `.opencode-v2/query/decision.json`; do not direct-read full
+  `.opencode-v2/control-status.json` except for the one diagnostic fallback.
 <!-- V2.6.7c DOTDIR IO END -->
 
 <!-- V2 SAME-ROOT DURABLE AUTHORITY BEGIN -->
@@ -361,14 +359,14 @@ patterns.
 
 When executing the canonical V2 pipeline:
 
-- `control_query` projects the latest supervisor-owned `control-status.json`; its
-  result plus supervisor-owned durable control files are authoritative for scheduler state.
+- `.opencode-v2/query/decision.json` is the bounded supervisor projection of canonical
+  scheduler state; supervisor-owned durable control files remain authoritative.
 - Child prose such as `NOT READY`, "retry", or "split this" is advisory only.
 - Do not dispatch `task-splitter` unless authoritative state requires a
   recursive split for that exact parent AND
   `.opencode-v2/work/Dxxx.split-request.json` exists.
 - `SPLIT_DENY ... reason=split-request-missing` means the split decision was
-  stale. Call `control_query` with `query="decision"` and continue the canonical action it selects.
+  stale. Direct-read `.opencode-v2/query/decision.json` and continue the canonical action it selects.
 - Do not terminate a root turn merely because a child returned NOT READY, a
   tool/dispatch was denied, or compaction completed. Continue until exact
   `ACCEPTANCE_PASS` or a genuine terminal blocked phase.
@@ -397,14 +395,14 @@ model-derived variants before the child starts.
 <!-- V2.6.9 SPLIT STATE AUTHORITY BEGIN -->
 ## Split state authority
 
-After a task-splitter returns, immediately call `control_query` with
-`query="decision"`.
+After a task-splitter returns, immediately direct-read
+`.opencode-v2/query/decision.json`.
 
 - If the scheduler exposes a split child as eligible, the split SUCCEEDED.
   Dispatch the eligible child.
 - The supervisor intentionally consumes the parent `.split-request.json` after
   an accepted split. Its absence after acceptance is NOT a failure.
 - Never launch another splitter merely because the old request file is gone.
-- Never infer child absence from a truncated manifest read; the `control_query`
-  scheduler projection is authoritative.
+- Never infer child absence from a truncated manifest read; the bounded
+  `.opencode-v2/query/decision.json` scheduler projection is authoritative.
 <!-- V2.6.9 SPLIT STATE AUTHORITY END -->
