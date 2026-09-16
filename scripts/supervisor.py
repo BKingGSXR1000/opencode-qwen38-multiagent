@@ -655,13 +655,39 @@ def load_split_transaction(parent):
     return data
 
 
+def _canonical_split_child_scope_text(child_id,parent,child,binding_outcome):
+    """Remove splitter-only ambiguity before rendering a durable child scope.
+
+    The splitter cannot know supervisor-derived child IDs.  If it nevertheless
+    mentions a progress path, bind it to the canonical child/handoff source.
+    Also remove an exact redundant `Inherit: <parent outcome>` style clause;
+    inherited contract text is rendered separately by the supervisor.
+    """
+    text=str(child.get("name","") or "").strip()
+    handoff_only=bool(child.get("split_handoff_only"))
+    handoff_source=str(child.get("split_handoff_source") or "")
+    progress_owner=child_id if handoff_only else handoff_source
+    if progress_owner:
+        text=re.sub(
+            r"\.opencode-v2/work/[A-Za-z0-9-]+\.progress\.md",
+            f".opencode-v2/work/{progress_owner}.progress.md",
+            text,
+        )
+    binding=str(binding_outcome or "").strip()
+    if binding:
+        for prefix in ("Inherit:", "Inherited outcome:", "Parent outcome:"):
+            text=text.replace(f"{prefix} {binding}", "")
+        text=re.sub(r"[ \t]{2,}", " ", text).strip(" ;")
+    return text
+
+
 def render_split_child_scope(child_id,parent,child,parent_leaf):
     """Render a split scope with deterministic inherited-contract precedence.
 
-    Splitter prose may narrow work but cannot rewrite the validated parent
-    contract. Progress-only handoff children are a supervisor-owned exception
-    to normal artifact ownership: their only durable deliverable is their own
-    `.progress.md`, which is already inside the worker firewall allowlist.
+    Normal writing children remain bound by the full inherited parent contract.
+    A progress-only handoff is different: its bounded child scope is the complete
+    executable obligation for that child, while the full parent outcome remains
+    enforced only at later writer/parent finalization.
     """
     binding_outcome=(
         child.get("outcome","")
@@ -676,17 +702,26 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
     )
     handoff_only=bool(child.get("split_handoff_only"))
     handoff_source=str(child.get("split_handoff_source") or "")
+    scope_text=_canonical_split_child_scope_text(
+        child_id,parent,child,binding_outcome
+    )
     handoff_text=""
     if handoff_only:
+        contract_text=(
+            "## Parent contract boundary — supervisor preserved\n\n"
+            "The parent outcome is retained for eventual parent collapse and for "
+            "the dependent writer. It is CONTEXT ONLY for THIS progress child: it "
+            "does NOT expand this child's executable work. The complete executable "
+            "obligation for THIS child is the bounded Child scope below. Do not "
+            "perform parent work that is not explicitly named in that Child scope.\n\n"
+            f"Parent outcome (context only): {binding_outcome}\n"
+        )
         handoff_text=(
             "\n## Progress-only handoff protocol — supervisor enforced\n\n"
-            "This child is an explicit exception to the inherited parent-output "
-            "obligation above. The parent outcome remains binding for eventual "
-            "parent collapse, but THIS child must NOT create or modify the final "
-            "project artifact or attempt the final parent output. Its complete "
-            "deliverable is only the bounded discovery/acquisition/diagnosis in "
-            "Child scope plus the durable progress handoff below. Record reusable "
-            "results in "
+            "THIS child must NOT create or modify the final project artifact or "
+            "attempt the final parent output. Its complete deliverable is only the "
+            "bounded discovery/acquisition/diagnosis in Child scope plus the durable "
+            "progress handoff below. Record reusable results in "
             f"`.opencode-v2/work/{child_id}.progress.md` using all of these exact "
             "labels:\n\n"
             "`HANDOFF_READY: true`\n\n"
@@ -697,33 +732,45 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
             "IDs, commands, API shapes, paths, values, or failure causes needed by "
             "the dependent writer so it does not repeat the probe.\n"
         )
-    elif handoff_source:
-        handoff_text=(
-            "\n## Required predecessor handoff — supervisor enforced\n\n"
-            f"Before doing project work, read `.opencode-v2/work/{handoff_source}.progress.md`. "
-            "Treat its concrete findings/evidence as the durable result of the prior "
-            "bounded probe. Consume that handoff and finish the artifact stage; do not "
-            "repeat the predecessor's investigation unless direct validation disproves it.\n"
+        decomposition_text=(
+            "The following Child scope is authoritative and complete for THIS "
+            "progress-only child. Do not infer additional executable work from the "
+            "parent outcome above.\n\n"
         )
+    else:
+        contract_text=(
+            "## Binding inherited contract — supervisor preserved\n\n"
+            "The inherited outcome below is verbatim authoritative contract text. "
+            "It outranks the model-generated child decomposition below. If the child "
+            "scope, Verify text, or Done-when text contradicts this inherited outcome, "
+            "ignore the contradictory child text and preserve the inherited outcome.\n\n"
+            f"Inherited outcome (binding): {binding_outcome}\n\n"
+            f"Acceptance IDs (inherited): {acceptance_text or 'none'}\n\n"
+            f"Immediate parent Verify command (binding at parent finalization): "
+            f"`{parent_leaf.get('verify_command','')}`\n\n"
+            f"Immediate parent Done when (binding at parent finalization): "
+            f"{parent_leaf.get('done_when','')}\n"
+        )
+        decomposition_text=(
+            "The following child-specific text may narrow/divide work but may not "
+            "weaken, rename, or contradict the binding inherited contract above.\n\n"
+        )
+        if handoff_source:
+            handoff_text=(
+                "\n## Required predecessor handoff — supervisor enforced\n\n"
+                f"Before doing project work, read `.opencode-v2/work/{handoff_source}.progress.md`. "
+                "Treat its concrete findings/evidence as the durable result of the prior "
+                "bounded probe. Consume that handoff and finish the artifact stage; do not "
+                "repeat the predecessor's investigation unless direct validation disproves it.\n"
+            )
     return (
         f"# {child_id} split-child scope\n\n"
         f"Parent: {parent}\n\n"
-        "## Binding inherited contract — supervisor preserved\n\n"
-        "The inherited outcome below is verbatim authoritative contract text. "
-        "It outranks the model-generated child decomposition below. If the child "
-        "scope, Verify text, or Done-when text contradicts this inherited outcome, "
-        "ignore the contradictory child text and preserve the inherited outcome.\n\n"
-        f"Inherited outcome (binding): {binding_outcome}\n\n"
-        f"Acceptance IDs (inherited): {acceptance_text or 'none'}\n\n"
-        f"Immediate parent Verify command (binding at parent finalization): "
-        f"`{parent_leaf.get('verify_command','')}`\n\n"
-        f"Immediate parent Done when (binding at parent finalization): "
-        f"{parent_leaf.get('done_when','')}\n"
+        f"{contract_text}"
         f"{handoff_text}\n"
         "## Bounded child decomposition\n\n"
-        "The following child-specific text may narrow/divide work but may not "
-        "weaken, rename, or contradict the binding inherited contract above.\n\n"
-        f"Child scope: {child['name']}\n\n"
+        f"{decomposition_text}"
+        f"Child scope: {scope_text}\n\n"
         f"Owned artifacts: {child['owned_artifacts']}\n\n"
         f"Child Verify command: `{child['verify_command']}`\n\n"
         f"Child Done when: {child['done_when']}\n"

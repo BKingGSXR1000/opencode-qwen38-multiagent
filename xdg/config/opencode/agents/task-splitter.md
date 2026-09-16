@@ -51,12 +51,18 @@ Use the request's exact parent_id, depth, and generation. Do not invent child
 IDs; the supervisor derives them. The request also contains `parent_contract`
 with the parent's verbatim detailed Outcome, original role, acceptance IDs,
 dependencies, Verify command, and Done-when obligation. Treat
-`parent_contract.outcome` as binding text: do not rename literals, API parameter
-names, flags, paths, constants, or other requirements in it. Preserve those
-obligations when choosing the two bounded scopes; splitting is recovery, not
-permission to weaken or rewrite the parent contract. The supervisor will also
-place the inherited Outcome verbatim into each child scope and it wins over any
-contradictory child-decomposition prose.
+`parent_contract.outcome` as binding text for the eventual parent result: do not
+rename literals, API parameter names, flags, paths, constants, or other
+requirements in it. Preserve those obligations when choosing the two bounded
+scopes; splitting is recovery, not permission to weaken or rewrite the parent
+contract.
+
+Do NOT restate `parent_contract.outcome` inside a proposal `scope` or `done_when`
+and do not add an `Inherit:` / `Inherited outcome:` / `Parent outcome:` clause.
+The supervisor renders inherited contract text itself. For normal writing
+children that inherited contract remains binding. For progress-only child #1,
+the supervisor deliberately marks the parent outcome as context-only and the
+bounded child scope as the complete executable obligation for that child.
 
 ### Parent Verify contradiction recovery
 
@@ -110,9 +116,16 @@ set of concrete values the final writer needs. It must NOT attempt the final
 parent artifact. Keep the scope <=1200 characters and do not encode multiple
 numbered/ordered stages such as `(1) ... (2) ...`. A query matrix across many
 targets/times is not one probe merely because it uses one API. The supervisor
-deterministically rejects oversized/compound progress-handoff scopes. The
-supervisor replaces the sentinel with a safe Verify command and requires the
-worker's own progress file to contain:
+deterministically rejects oversized/compound progress-handoff scopes.
+
+Because child IDs are supervisor-derived, NEVER put a literal
+`.opencode-v2/work/<anything>.progress.md` path in either proposal's `scope` or
+`done_when`. For child #1 say only "this child's progress handoff"; for child #2
+say only "the predecessor handoff". The supervisor injects the exact canonical
+child progress path after deriving the child IDs.
+
+The supervisor replaces the sentinel with a safe Verify command and requires
+the worker's own progress file to contain:
 
 - `HANDOFF_READY: true`
 - `Findings:`
