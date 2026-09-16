@@ -25,6 +25,8 @@ MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
 SPLIT_STATUS_SUFFIX = ".split-status.json"
 LEAF_READY_PROTOCOL = "v2-leaf-ready-v1"
 VERIFY_WAIT_PROTOCOL = "v2-verify-wait-v1"
+PHASE_READY_PROTOCOL = "V2.6.7c"
+PHASE_READY_VALIDATOR = "deterministic-v2.6.7b"
 SPLIT_PROGRESS_STATES = frozenset({"split-required","splitter-active","split-retryable"})
 SPLIT_TERMINAL_STATES = frozenset({
     "split-validation-failed","splitter-failed",
@@ -119,13 +121,26 @@ def ready_info(project, did, _seen=None):
 
 
 def phase_ready(project, name, artifact, marker):
-    data = _kv(Path(project) / ".opencode-v2" / name)
-    return bool(
-        data.get("status") == "complete"
-        and data.get("artifact") == artifact
-        and data.get("marker") == marker
-        and data.get("validated", "").startswith("deterministic-")
-    )
+    root=Path(project)/".opencode-v2"
+    data=_kv(root/name)
+    artifact_path=root/artifact
+    digest=str(data.get("artifact_sha256") or "")
+    if not (
+        data.get("status")=="complete"
+        and data.get("protocol")==PHASE_READY_PROTOCOL
+        and data.get("artifact")==artifact
+        and data.get("marker")==marker
+        and data.get("validated")==PHASE_READY_VALIDATOR
+        and len(digest)==64
+        and all(ch in "0123456789abcdef" for ch in digest)
+        and artifact_path.is_file()
+    ):
+        return False
+    try:
+        actual=hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return actual==digest
 
 
 def load_manifest(project):
@@ -136,12 +151,37 @@ def load_manifest(project):
     )
 
 
-def load_attempts(project):
-    return load_json_object(
-        Path(project) / ".opencode-v2" / "work" / "attempts.json",
-        default_missing={"deliverables": {}},
-        label="attempt ledger",
+def attempt_history_evidence(project):
+    # Return True when Dxxx artifacts prove that an attempt ledger once existed.
+    work=Path(project)/".opencode-v2"/"work"
+    if not work.is_dir():
+        return False
+    patterns=(
+        "D*.ready",
+        "D*.progress.md",
+        "D*.ownership-baseline.json",
+        "D*.attempt-*.execution-baseline.json",
+        "D*.split-request.json",
+        "D*.split-proposal.json",
+        "D*.split-status.json",
+        "D*.split-transaction.json",
+        "D*.verify-wait.json",
     )
+    if any(any(work.glob(pattern)) for pattern in patterns):
+        return True
+    violations=work/"sandbox-violations"
+    return violations.is_dir() and any(violations.glob("D*.jsonl"))
+
+
+def load_attempts(project):
+    path=Path(project)/".opencode-v2"/"work"/"attempts.json"
+    if not path.exists():
+        if attempt_history_evidence(project):
+            raise StateCorruptionError(
+                "attempt ledger missing after durable Dxxx execution history exists"
+            )
+        return {"deliverables": {}}
+    return load_json_object(path,label="attempt ledger")
 
 
 def split_status(project, did):
@@ -543,8 +583,30 @@ def verify_wait_info(project,did):
 def snapshot(project):
     """Return one derived state snapshot suitable for humans, scripts, or UI mirrors."""
     project = Path(project).resolve()
-    manifest = load_manifest(project)
-    leaves = manifest.get("leaves") if isinstance(manifest.get("leaves"), dict) else {}
+    acceptance_complete=phase_ready(
+        project,"ACCEPTANCE.ready","ACCEPTANCE.md","ACCEPTANCE_COMPLETE"
+    )
+    plan_complete=phase_ready(
+        project,"IMPLEMENTATION_PLAN.ready","IMPLEMENTATION_PLAN.md",
+        "IMPLEMENTATION_PLAN_COMPLETE",
+    )
+    manifest=load_manifest(project)
+    if plan_complete:
+        if (
+            manifest.get("protocol")!="V2.6.9"
+            or manifest.get("recursive_split_protocol")!=RECURSIVE_SPLIT_PROTOCOL
+            or manifest.get("project")!=str(project)
+            or not isinstance(manifest.get("leaves"),dict)
+            or not manifest.get("leaves")
+        ):
+            raise StateCorruptionError(
+                "implementation plan is READY but guard manifest is missing or invalid"
+            )
+        leaves=manifest["leaves"]
+    else:
+        # Never project stale leaf state from an old guard manifest while the
+        # current plan artifact is not hash-bound READY.
+        leaves={}
     attempts = load_attempts(project).get("deliverables") or {}
     leaf_states = {}
     for did, leaf in sorted(leaves.items()):
@@ -623,15 +685,6 @@ def snapshot(project):
                 and not launch_missing and not contract_missing
             ),
         }
-    acceptance_complete = phase_ready(
-        project, "ACCEPTANCE.ready", "ACCEPTANCE.md", "ACCEPTANCE_COMPLETE"
-    )
-    plan_complete = phase_ready(
-        project,
-        "IMPLEMENTATION_PLAN.ready",
-        "IMPLEMENTATION_PLAN.md",
-        "IMPLEMENTATION_PLAN_COMPLETE",
-    )
     planner_failures = planner_restarts(project)
     tests = test_state(project)
     execution_blockers = []

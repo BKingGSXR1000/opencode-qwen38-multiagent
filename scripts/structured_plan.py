@@ -323,6 +323,20 @@ def normalize_document(raw):
     test=[x for x in normalized if ".opencode-v2/TEST_CHECKS.json" in x["owned_artifacts"]]
     if not test:
         errors.append({"key":"","code":"missing-test-manifest","message":"missing final test-builder leaf owning .opencode-v2/TEST_CHECKS.json"})
+    if len(test)>1:
+        keys=[leaf["key"] for leaf in test]
+        errors.append({
+            "key":keys[0],
+            "keys":keys,
+            "code":"test-manifest-singleton",
+            "message":(
+                ".opencode-v2/TEST_CHECKS.json is a singleton final manifest and must have "
+                "exactly one structured-plan owner. Do not split an oversized final test leaf "
+                "into multiple TEST_CHECKS owners. Put bounded helper test scripts/artifacts in "
+                "separate test-builder leaves, then make exactly one final test-builder leaf "
+                "own TEST_CHECKS.json and depend on those helpers."
+            ),
+        })
     for leaf in test:
         if leaf["role"]!="test-builder":
             errors.append({"key":leaf["key"],"code":"test-manifest-role","message":f"{leaf['key']}: TEST_CHECKS owner must use test-builder"})

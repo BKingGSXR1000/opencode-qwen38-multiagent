@@ -3,6 +3,7 @@ import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,thre
 from pathlib import Path
 from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
+                           load_attempts as state_load_attempts,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
                            MAX_UNMATERIALIZED_DISPATCH_REPLAYS,
@@ -2606,11 +2607,13 @@ def emit_watchdog_telemetry(sid,row,backend_snapshot,force=False):
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
 def load_attempts():
-    return load_json_object(
-        attempts_path(),
-        default_missing={"protocol":ATTEMPT_LEDGER_PROTOCOL,"deliverables":{}},
-        label="attempt ledger",
-    )
+    # control_state owns the missing-ledger lifecycle invariant. A missing
+    # ledger is legal only before any Dxxx execution-history artifact exists.
+    missing=not attempts_path().exists()
+    data=state_load_attempts(PROJECT)
+    if missing:
+        return {"protocol":ATTEMPT_LEDGER_PROTOCOL,"deliverables":{}}
+    return data
 def save_attempts(data):
     atomic_write_json(attempts_path(),data)
 
@@ -3895,6 +3898,34 @@ def record_root_restart(sid,phase):
 
 # V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
 REFERENCE_FOUNDATION_MARKER="<!-- REFERENCE_FOUNDATION_READY -->"
+REFERENCE_POLICY_RE=re.compile(
+    r"(?im)^\s*(?:#{1,6}\s*)?Reference policy\s*:\s*"
+    r"(none|internal|external-required)\s*$"
+)
+
+
+def reference_foundation_marker_complete(text):
+    # Require one exact READY marker as the final non-empty line.
+    lines=[line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines or lines[-1] != REFERENCE_FOUNDATION_MARKER:
+        return False
+    markers=[line for line in lines if line == REFERENCE_FOUNDATION_MARKER]
+    return markers == [REFERENCE_FOUNDATION_MARKER]
+
+
+def reference_policy_from_text(text):
+    matches=[value.lower() for value in REFERENCE_POLICY_RE.findall(str(text or ""))]
+    return matches[0] if len(matches)==1 else ""
+
+
+def acceptance_reference_policy():
+    if not PROJECT:
+        return ""
+    path=Path(PROJECT)/".opencode-v2"/"ACCEPTANCE.md"
+    try:
+        return reference_policy_from_text(path.read_text(errors="replace"))
+    except OSError:
+        return ""
 
 
 def reference_session_mode(sid):
@@ -4004,9 +4035,7 @@ def reference_gate_snapshot():
                 "max_attempts":MAX_REFERENCE_FOUNDATION_SESSIONS}
 
     ctrl=Path(PROJECT)/".opencode-v2"
-    acceptance=ctrl/"ACCEPTANCE.md"
-    text=acceptance.read_text(errors="replace") if acceptance.exists() else ""
-    if "Reference policy: external-required" not in text:
+    if acceptance_reference_policy() != "external-required":
         return {"state":"not-required","attempts":0,
                 "max_attempts":MAX_REFERENCE_FOUNDATION_SESSIONS}
 
@@ -4018,7 +4047,7 @@ def reference_gate_snapshot():
     completed,active,productive,stagnant=_reference_progress_stats("foundation")
     ready=(
         foundation.exists()
-        and REFERENCE_FOUNDATION_MARKER in foundation_text
+        and reference_foundation_marker_complete(foundation_text)
         and foundation_result=="READY"
     )
     hard=len(completed)>=MAX_REFERENCE_FOUNDATION_SESSIONS
@@ -4045,9 +4074,7 @@ def reference_validation_gate_snapshot():
                 "max_attempts":MAX_REFERENCE_VALIDATION_SESSIONS}
 
     ctrl=Path(PROJECT)/".opencode-v2"
-    acceptance=ctrl/"ACCEPTANCE.md"
-    text=acceptance.read_text(errors="replace") if acceptance.exists() else ""
-    if "Reference policy: external-required" not in text:
+    if acceptance_reference_policy() != "external-required":
         return {"state":"not-required","attempts":0,
                 "max_attempts":MAX_REFERENCE_VALIDATION_SESSIONS}
 

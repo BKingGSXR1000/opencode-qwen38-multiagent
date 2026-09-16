@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,8 @@ PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
 ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
 PLAN_MAX_LINES = 500
 RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
+PHASE_READY_PROTOCOL = "V2.6.7c"
+PHASE_READY_VALIDATOR = "deterministic-v2.6.7b"
 TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
 TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
 TASK_SHAPE_REPEAT_LIMIT = {"S": 4, "M": 6}
@@ -115,6 +118,25 @@ def final_nonempty_line(text: str) -> str:
         if line.strip():
             return line.strip()
     return ""
+
+def top_level_plan_complete(text: str) -> bool:
+    lines=text.splitlines()
+    return bool(
+        len(lines)>=2
+        and lines[0].strip()=="# Implementation Plan"
+        and lines[1].strip()=="Status: COMPLETE"
+    )
+
+def phase_ready_text(artifact_path: Path, artifact: str, marker: str) -> str:
+    digest=hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    return (
+        "status=complete\n"
+        f"protocol={PHASE_READY_PROTOCOL}\n"
+        f"artifact={artifact}\n"
+        f"marker={marker}\n"
+        f"validated={PHASE_READY_VALIDATOR}\n"
+        f"artifact_sha256={digest}\n"
+    )
 
 def deps(value: str):
     return re.findall(r"\bD\d{3}\b", value or "")
@@ -508,13 +530,17 @@ def parse_plan(text: str):
 
     return leaves, waves, errors
 
+REFERENCE_POLICY_RE = re.compile(
+    r"(?im)^\s*(?:#{1,6}\s*)?Reference policy\s*:\s*"
+    r"(none|internal|external-required)\s*$"
+)
+
+def reference_policies(text: str):
+    return [value.lower() for value in REFERENCE_POLICY_RE.findall(str(text or ""))]
+
 def reference_policy(text: str):
-    m = re.search(
-        r"(?im)^\s*(?:#{1,6}\s*)?Reference policy\s*:\s*"
-        r"(none|internal|external-required)\s*$",
-        text,
-    )
-    return m.group(1).lower() if m else ""
+    values=reference_policies(text)
+    return values[0] if len(values)==1 else ""
 
 def validate_acceptance(project: Path, finalize=False):
     ctrl = project / ".opencode-v2"
@@ -529,7 +555,13 @@ def validate_acceptance(project: Path, finalize=False):
         text = path.read_text(errors="replace")
         if final_nonempty_line(text) != ACC_MARKER:
             errors.append("final line is not exact ACCEPTANCE_COMPLETE marker")
-        if reference_policy(text) == "internal" and INTERNAL_EXTERNAL_REFERENCE_RE.search(text):
+        policies=reference_policies(text)
+        policy=policies[0] if len(policies)==1 else ""
+        if len(policies)!=1:
+            errors.append(
+                "Reference policy must appear exactly once: none|internal|external-required"
+            )
+        if policy == "internal" and INTERNAL_EXTERNAL_REFERENCE_RE.search(text):
             errors.append(
                 "internal Reference policy cannot require externally authoritative/reference truth"
             )
@@ -538,10 +570,9 @@ def validate_acceptance(project: Path, finalize=False):
             errors.append("no machine-readable MUST lines; use exact '- [ ] A001: description'")
         elif len(must_ids)!=len(set(must_ids)):
             errors.append("duplicate machine-readable MUST Axxx IDs")
-        if not reference_policy(text):
-            errors.append("missing Reference policy: none|internal|external-required")
 
     if errors:
+        ready.unlink(missing_ok=True)
         atomic_write(err, "\n".join(errors) + "\n")
         return False, errors
 
@@ -550,11 +581,7 @@ def validate_acceptance(project: Path, finalize=False):
     if finalize:
         atomic_write(
             ready,
-            "status=complete\n"
-            "protocol=V2.6.7c\n"
-            "artifact=ACCEPTANCE.md\n"
-            "marker=ACCEPTANCE_COMPLETE\n"
-            "validated=deterministic-v2.6.7b\n",
+            phase_ready_text(path,"ACCEPTANCE.md","ACCEPTANCE_COMPLETE"),
         )
     return True, []
 
@@ -652,7 +679,7 @@ def validate_plan(project: Path, finalize=False):
             )
         if final_nonempty_line(text) != PLAN_MARKER:
             errors.append("final line is not exact IMPLEMENTATION_PLAN_COMPLETE marker")
-        if not re.search(r"(?m)^Status:\s*COMPLETE\s*$", text):
+        if not top_level_plan_complete(text):
             errors.append("top-level plan Status must be COMPLETE before finalization")
         if not re.search(
             r"(?ms)^##\s+Planner checkpoint\s*\nStatus:\s*COMPLETE\s*$",
@@ -681,6 +708,8 @@ def validate_plan(project: Path, finalize=False):
                     )
 
     if errors:
+        ready.unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
         atomic_write(err, "\n".join(errors) + "\n")
         write_plan_repair_packet(ctrl, errors, source="control-guard")
         return False, errors
@@ -707,11 +736,9 @@ def validate_plan(project: Path, finalize=False):
     if finalize:
         atomic_write(
             ready,
-            "status=complete\n"
-            "protocol=V2.6.7c\n"
-            "artifact=IMPLEMENTATION_PLAN.md\n"
-            "marker=IMPLEMENTATION_PLAN_COMPLETE\n"
-            "validated=deterministic-v2.6.7b\n",
+            phase_ready_text(
+                path,"IMPLEMENTATION_PLAN.md","IMPLEMENTATION_PLAN_COMPLETE"
+            ),
         )
     return True, []
 

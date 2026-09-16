@@ -32,13 +32,28 @@ renders the Markdown plan, and the deterministic control guard validates it.
 
 ## Required reads
 
+### Fresh-plan / whole-plan mode
 Read these known files directly:
 1. `.opencode-v2/ORIGINAL_TASK.md`
 2. `.opencode-v2/ACCEPTANCE.md`
 3. `.opencode-v2/CONTROL_CONTRACT.md`
 
 If `.opencode-v2/IMPLEMENTATION_PLAN.structured.json` already exists, read it.
-If `.opencode-v2/IMPLEMENTATION_PLAN.repair.json` exists, read it.
+If a repair packet exists with `whole_plan: true`, read it and then use the
+fresh-plan authoritative inputs above.
+
+### Targeted repair mode — READ BUDGET IS A HARD RULE
+When `.opencode-v2/IMPLEMENTATION_PLAN.repair.json` exists with
+`whole_plan: false`, FIRST read only:
+1. `.opencode-v2/IMPLEMENTATION_PLAN.structured.json`
+2. `.opencode-v2/IMPLEMENTATION_PLAN.repair.json`
+
+Then edit the affected keys promptly. Do NOT reread `ORIGINAL_TASK.md`,
+`ACCEPTANCE.md`, `CONTROL_CONTRACT.md`, reference-gate/foundation files, lessons,
+or unrelated project files unless a listed repair error explicitly depends on
+information that is absent from the structured leaf and repair packet.
+A targeted ownership/task-shape/role/dependency repair is not permission to
+re-research already established planning context.
 
 Read `.opencode-v2/GLOBAL_LESSONS.md` or `.opencode-v2/LESSONS_LEARNED.md`
 only when the current task clearly needs a previously recorded project lesson.
@@ -60,6 +75,11 @@ PARTIAL during planning. If the foundation is not ready, return exactly:
 
 For Reference policy `internal` or `none`, do not invent external authoritative
 sources, APIs, datasets, providers, or research requirements.
+
+In targeted repair mode with `whole_plan: false`, do not repeat this external
+reference-gate read unless a listed repair error is specifically about reference
+policy/foundation state. The already-created structured plan is the durable
+planning context for unrelated repairs.
 
 ## Fresh-plan mode
 
@@ -239,14 +259,32 @@ or `systemctl` remediation.
 - Unknown current external API/SDK/CLI contracts must come from durable verified
   evidence or a bounded probe, never model memory.
 
-## Required final test leaf
+## Required final test leaf — SINGLE OWNER
 
-Every nontrivial coding project must contain a final `test-builder` leaf that
-owns exactly/among its bounded artifacts:
+Every nontrivial coding project must contain exactly ONE final `test-builder`
+leaf that owns:
 `.opencode-v2/TEST_CHECKS.json`
+
+`TEST_CHECKS.json` is a singleton control manifest. Never assign that path to
+two leaves, including when repairing an oversized final-test leaf.
 
 Its `verify_command` must be exactly:
 `.opencode-v2/bin/run-checks`
+
+If final testing exceeds one leaf's S/M task-shape limits, split the work like
+this instead:
+1. create bounded prerequisite `test-builder` leaves that each own DISTINCT
+   ordinary helper test artifacts/scripts (for example `tests/scene.py`,
+   `tests/astronomy.py`, or another non-reserved project path);
+2. distribute the relevant MUST `acceptance_ids` across those helper leaves;
+3. make exactly one final `test-builder` leaf own
+   `.opencode-v2/TEST_CHECKS.json`, depend on the helper leaves, and write the
+   manifest commands that execute those helpers.
+
+Repair rule: a `test-manifest-singleton` or ownership-overlap error involving
+`.opencode-v2/TEST_CHECKS.json` MUST be repaired by leaving exactly one manifest
+owner and relocating every other test leaf to a distinct helper artifact. Never
+repair it by giving multiple leaves the same TEST_CHECKS path.
 
 Use the TEST_CHECKS schema from `CONTROL_CONTRACT.md`. Do not inspect harness
 source to rediscover it.
