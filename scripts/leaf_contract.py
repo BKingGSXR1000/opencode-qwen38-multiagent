@@ -2,6 +2,10 @@
 """Shared deterministic leaf-contract rules for initial plans and split children."""
 import re
 import shlex
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 IMPLEMENTATION_ROLES = frozenset({
     "probe-builder", "implementer", "core-builder", "feature-builder",
@@ -42,6 +46,63 @@ def _masking_errors_from_tokens(tokens):
             errors.append(VERIFY_MASKING_MESSAGES["set-plus-e"])
         if tokens[i]=="exit" and tokens[i+1]=="0":
             errors.append(VERIFY_MASKING_MESSAGES["exit-zero"])
+    return errors
+
+
+def _embedded_interpreter_syntax_errors(tokens):
+    """Syntax-check quoted node/python -e/-c payloads without executing them."""
+    errors=[]
+    for i in range(len(tokens)-2):
+        executable=tokens[i]
+        base=executable.rsplit("/",1)[-1]
+        mode=tokens[i+1]
+        payload=tokens[i+2]
+
+        if base in {"python","python3"} and mode=="-c":
+            try:
+                compile(payload,"<verify-python-c>","exec")
+            except SyntaxError as exc:
+                errors.append(
+                    "Verify python -c payload has invalid syntax: "
+                    f"{exc.msg} line={exc.lineno}"
+                )
+
+        if base in {"node","nodejs"} and mode in {"-e","--eval"}:
+            node=shutil.which(executable) or shutil.which(base)
+            if not node:
+                continue
+            temp_path=""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",suffix=".js",encoding="utf-8",delete=False
+                ) as handle:
+                    handle.write(payload)
+                    temp_path=handle.name
+                proc=subprocess.run(
+                    [node,"--check",temp_path],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if proc.returncode:
+                    detail=" ".join(
+                        line.strip() for line in proc.stderr.splitlines()
+                        if line.strip() and not line.strip().startswith("Node.js ")
+                    )
+                    errors.append(
+                        "Verify node -e payload has invalid JavaScript syntax"
+                        + (f": {detail[:300]}" if detail else "")
+                    )
+            except (OSError,subprocess.SubprocessError):
+                pass
+            finally:
+                if temp_path:
+                    try:
+                        Path(temp_path).unlink()
+                    except OSError:
+                        pass
     return errors
 SUPERVISOR_RESERVED_PREFIXES = (".opencode-v2/work/", ".opencode-v2/bin/")
 SUPERVISOR_RESERVED_EXACT = frozenset({
@@ -111,6 +172,7 @@ def validate_verify_command(verify_command: str):
         return errors
 
     errors.extend(_masking_errors_from_tokens(tokens))
+    errors.extend(_embedded_interpreter_syntax_errors(tokens))
 
     # A quoted node/python payload is data to the shell and may legitimately
     # contain ||. But a nested shell -c payload is shell syntax again, so

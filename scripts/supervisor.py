@@ -45,7 +45,8 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
-EARLY_WRITE_COMPLETED_TURNS=3
+PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=2
+EARLY_WRITE_COMPLETED_TURNS=4
 MAX_REFERENCE_FOUNDATION_SESSIONS=3
 MAX_REFERENCE_VALIDATION_SESSIONS=8
 MAX_REFERENCE_STAGNANT_SESSIONS=2
@@ -219,10 +220,11 @@ def implementation_runtime_prompt(did,agent):
             "Labels start at column 1. Do not prefix them with #/## and do not append text "
             "after true/false. Use true only when the downstream writer has enough evidence. "
             "This response MUST contain that write/edit and no discovery tool call.\n"
-            "3. AFTER that write, bounded discovery is allowed. After ANY meaningful new "
-            "fact/evidence, the NEXT tool-bearing response MUST update the same progress file "
-            "BEFORE another discovery call. Each durable update resets the five-turn "
-            "no-progress window. Do not keep new findings only in conversation context.\n"
+            "3. AFTER that write, exactly ONE discovery tool-bearing response is allowed. "
+            "The IMMEDIATELY FOLLOWING tool-bearing response MUST update the same progress "
+            "file before any further discovery. A failed query is still evidence and must be "
+            "checkpointed. Two consecutive post-checkpoint discovery turns cause deterministic "
+            "recycling. Do not keep new findings only in conversation context.\n"
             "When sufficient, write exact HANDOFF_READY: true, run the exact Verify command, "
             "persist the result, and return. Temporary files do not count."
         )
@@ -232,12 +234,12 @@ def implementation_runtime_prompt(did,agent):
     if agent not in READ_ONLY_SPLIT_ROLES and owned:
         gate=(
             "\n\nEARLY WRITE GATE — EXACT:\n"
-            "At the END of your THIRD completed tool-bearing assistant turn, at least one "
+            "At the END of your FOURTH completed tool-bearing assistant turn, at least one "
             "owned project artifact MUST differ from its dispatch baseline. The progress file "
             "does NOT satisfy this gate. If the owned artifact was already correct, use at "
-            "most those three turns to run the exact Verify command and return normally. "
-            "Do not make a fourth tool-bearing turn. Any fourth tool call while no owned "
-            "artifact delta exists is deterministically denied."
+            "most those four turns to run the exact Verify command and return normally. "
+            "Do not make a fifth tool-bearing turn. A fifth tool call while no owned "
+            "artifact delta exists causes deterministic session retirement."
         )
         return base+gate
 
@@ -2401,7 +2403,7 @@ def _owned_artifact_changed_since_execution_baseline(did,attempt):
 
 
 def early_write_gate_state(sid):
-    """Fail closed before a fourth tool-bearing turn for writing leaves."""
+    """Fail closed before a fifth tool-bearing turn for writing leaves."""
     agent=_session_agent_db(sid)
     if agent not in IMPLEMENTATION_AGENTS:
         return "na","not-implementation-worker"
@@ -2429,6 +2431,20 @@ def early_write_gate_state(sid):
     )
 
 
+def enforce_early_write_gate(sid):
+    """Retire a worker immediately once the exact write deadline is missed."""
+    state,detail=early_write_gate_state(sid)
+    if state!="deny":
+        return state,detail
+    agent=_session_agent_db(sid)
+    reason=(
+        "early_write_deadline_no_owned_artifact_delta "
+        f"{detail}"
+    )
+    abort_session(sid,reason,agent)
+    return "deny",reason
+
+
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
     """Require recurring durable progress during bounded probe discovery.
 
@@ -2441,6 +2457,12 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
     now=time.monotonic() if now is None else now
     signature=durable_progress_signature(agent,did)
     persisted_turns=persisted_completed_tool_turns(sid)
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    handoff_only=bool(isinstance(leaf,dict) and leaf.get("split_handoff_only"))
+    limit=(
+        PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS
+        if handoff_only else PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS
+    )
     state=worker_progress.setdefault(
         sid,{"signature":signature,"baseline_turns":0,"turns":persisted_turns}
     )
@@ -2450,9 +2472,9 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
         )
         return ""
     state["turns"]=max(0,persisted_turns-int(state.get("baseline_turns") or 0))
-    if state["turns"]>=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS:
+    if state["turns"]>=limit:
         return ("probe_research_loop_no_owned_progress "
-                f"tool_turns={state['turns']} limit={PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS}")
+                f"tool_turns={state['turns']} limit={limit}")
     return ""
 
 def supervisor_finalize_ready(did):
@@ -5121,10 +5143,14 @@ def reconcile_planner_completion(sid):
     planner_completion_seen.add(sid)
 
 
-def probe_progress_abort_reason(reason):
-    """Return the bounded probe-discipline failure, never an infrastructure fault."""
+def worker_behavior_abort_reason(reason):
+    """Return deterministic model-behavior failures, never infrastructure faults."""
     reason=str(reason or "")
-    return reason if reason.startswith("probe_research_loop_no_owned_progress") else ""
+    prefixes=(
+        "probe_research_loop_no_owned_progress",
+        "early_write_deadline_no_owned_artifact_delta",
+    )
+    return reason if reason.startswith(prefixes) else ""
 
 def reconcile_idle_implementation_session(sid,agent):
     if sid in post_finalize_seen:
@@ -5146,14 +5172,14 @@ def reconcile_idle_implementation_session(sid,agent):
         if compaction_failure(sid)=="compaction.failed"
         else ""
     )
-    probe_behavior_reason=probe_progress_abort_reason(supervisor_abort)
+    worker_behavior_reason=worker_behavior_abort_reason(supervisor_abort)
     infrastructure_reason=(
         abort_reason
-        or ("" if probe_behavior_reason else supervisor_abort)
+        or ("" if worker_behavior_reason else supervisor_abort)
         or compaction_abort
     )
 
-    if probe_behavior_reason and not ready_info(did):
+    if worker_behavior_reason and not ready_info(did):
         # New37: this is not an infrastructure outage. The model successfully
         # executed several read/probe tool turns but violated the probe's
         # durable-progress contract. Count it as a genuine leaf failure so the
@@ -5167,29 +5193,29 @@ def reconcile_idle_implementation_session(sid,agent):
                 return
             verify_wait_log_state.pop(did,None)
             log(
-                f"POST_SESSION_VERIFY_AFTER_PROBE_ABORT session={sid} "
+                f"POST_SESSION_VERIFY_AFTER_WORKER_BEHAVIOR_ABORT session={sid} "
                 f"deliverable={did} result={detail}"
             )
             csv(
-                "POST_SESSION_VERIFY_AFTER_PROBE_ABORT",sid,agent,
+                "POST_SESSION_VERIFY_AFTER_WORKER_BEHAVIOR_ABORT",sid,agent,
                 f"{did} {detail}"
             )
         if not finalized and not ready_info(did):
             recorded,outcome=record_leaf_failure(
-                did,probe_behavior_reason,"genuine"
+                did,worker_behavior_reason,"genuine"
             )
             release_operator_reservation(
-                sid,did,probe_behavior_reason
+                sid,did,worker_behavior_reason
             )
             log(
-                f"LEAF_PROBE_PROGRESS_FAILURE session={sid} "
+                f"LEAF_WORKER_BEHAVIOR_FAILURE session={sid} "
                 f"deliverable={did} recorded={str(recorded).lower()} "
-                f"outcome={outcome} reason={probe_behavior_reason}"
+                f"outcome={outcome} reason={worker_behavior_reason}"
             )
             csv(
-                "LEAF_PROBE_PROGRESS_FAILURE",sid,agent,
+                "LEAF_WORKER_BEHAVIOR_FAILURE",sid,agent,
                 f"{did} recorded={str(recorded).lower()} "
-                f"outcome={outcome} reason={probe_behavior_reason}"
+                f"outcome={outcome} reason={worker_behavior_reason}"
             )
     elif infrastructure_reason and not ready_info(did):
         finalized=False
@@ -5295,8 +5321,8 @@ def reconcile_idle_implementation_session(sid,agent):
     if durable_abort:
         resolve_abort_intent(
             sid,
-            "genuine-probe-progress-failure"
-            if probe_behavior_reason else
+            "genuine-worker-behavior-failure"
+            if worker_behavior_reason else
             "infrastructure-classified"
             if infrastructure_reason else
             "completed-without-observed-abort"
@@ -5453,7 +5479,7 @@ def main():
         if unknown or not args.project:
             raise SystemExit("early-write check requires --project --early-write-check")
         PROJECT=args.project
-        state,detail=early_write_gate_state(args.early_write_check)
+        state,detail=enforce_early_write_gate(args.early_write_check)
         if state=="deny":
             raise SystemExit(f"EARLY_WRITE_DENY session={args.early_write_check} {detail}")
         print(f"EARLY_WRITE_{state.upper()} session={args.early_write_check} {detail}")

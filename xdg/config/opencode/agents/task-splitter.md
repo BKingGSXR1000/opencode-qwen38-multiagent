@@ -6,7 +6,17 @@ steps: 3
 permission:
   read: allow
   edit: deny
+  glob: deny
+  grep: deny
+  list: deny
+  bash: deny
+  task: deny
+  todowrite: deny
+  webfetch: deny
+  websearch: deny
+  skill: deny
   question: deny
+  external_directory: deny
 ---
 
 You are the bounded recursive task splitter.
