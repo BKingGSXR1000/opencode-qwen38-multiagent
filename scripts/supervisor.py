@@ -46,7 +46,7 @@ HARD_SECONDS=120; HARD_REASONING_CHARS=8000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
 PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=2
-EARLY_WRITE_COMPLETED_TURNS=4
+EARLY_WRITE_COMPLETED_TURNS_BY_COMPLEXITY={"S":4,"M":6}
 MAX_REFERENCE_FOUNDATION_SESSIONS=3
 MAX_REFERENCE_VALIDATION_SESSIONS=8
 MAX_REFERENCE_STAGNANT_SESSIONS=2
@@ -205,6 +205,19 @@ def implementation_prompt(did):
         "Continue from actual filesystem state and execute the deliverable."
     )
 
+def early_write_completed_turn_limit(leaf):
+    complexity=str(leaf.get("complexity") or "S").strip().upper() if isinstance(leaf,dict) else "S"
+    return int(EARLY_WRITE_COMPLETED_TURNS_BY_COMPLEXITY.get(complexity,4))
+
+
+def _ordinal_word(value):
+    return {4:"FOURTH",6:"SIXTH"}.get(int(value),f"{int(value)}TH")
+
+
+def _next_ordinal_word(value):
+    return {4:"fifth",6:"seventh"}.get(int(value),f"{int(value)+1}th")
+
+
 def implementation_runtime_prompt(did,agent):
     """Deterministically enrich the canonical child-visible prompt."""
     base=implementation_prompt(did)
@@ -241,14 +254,17 @@ def implementation_runtime_prompt(did,agent):
 
     owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
     if agent not in READ_ONLY_SPLIT_ROLES and owned:
+        deadline=early_write_completed_turn_limit(leaf)
         gate=(
             "\n\nEARLY WRITE GATE — EXACT:\n"
-            "At the END of your FOURTH completed tool-bearing assistant turn, at least one "
-            "owned project artifact MUST differ from its dispatch baseline. The progress file "
-            "does NOT satisfy this gate. If the owned artifact was already correct, use at "
-            "most those four turns to run the exact Verify command and return normally. "
-            "Do not make a fifth tool-bearing turn. A fifth tool call while no owned "
-            "artifact delta exists causes deterministic session retirement."
+            f"At the END of your {_ordinal_word(deadline)} completed tool-bearing assistant turn, "
+            "at least one owned project artifact MUST differ from its dispatch baseline. "
+            "The progress file does NOT satisfy this gate. If the owned artifact was already "
+            f"correct, use at most those {deadline} turns to run the exact Verify command and "
+            f"return normally. Do not make a {_next_ordinal_word(deadline)} tool-bearing turn "
+            "except for the single exact final progress-file handoff allowed by the supervisor. "
+            f"Any other {_next_ordinal_word(deadline)} tool call while no owned artifact delta "
+            "exists causes deterministic session retirement."
         )
         return base+gate
 
@@ -758,7 +774,7 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
     enforced only at later writer/parent finalization.
     """
     binding_outcome=(
-        child.get("outcome","")
+        child.get("parent_outcome_context","")
         or parent_leaf.get("outcome","")
         or parent_leaf.get("name","")
     )
@@ -807,21 +823,24 @@ def render_split_child_scope(child_id,parent,child,parent_leaf):
         )
     else:
         contract_text=(
-            "## Binding inherited contract — supervisor preserved\n\n"
-            "The inherited outcome below is verbatim authoritative contract text. "
-            "It outranks the model-generated child decomposition below. If the child "
-            "scope, Verify text, or Done-when text contradicts this inherited outcome, "
-            "ignore the contradictory child text and preserve the inherited outcome.\n\n"
-            f"Inherited outcome (binding): {binding_outcome}\n\n"
-            f"Acceptance IDs (inherited): {acceptance_text or 'none'}\n\n"
-            f"Immediate parent Verify command (binding at parent finalization): "
+            "## Parent contract boundary — supervisor preserved\n\n"
+            "The parent outcome below is CONTEXT ONLY for THIS split child. It is "
+            "retained verbatim so literals and domain meaning are not lost, but it "
+            "does NOT expand this child's executable work. The supervisor enforces "
+            "the complete parent outcome, parent Verify, and parent Done-when later "
+            "when collapsing the split.\n\n"
+            f"Parent outcome (context only): {binding_outcome}\n\n"
+            f"Parent Acceptance IDs (context): {acceptance_text or 'none'}\n\n"
+            f"Immediate parent Verify command (parent finalization only): "
             f"`{parent_leaf.get('verify_command','')}`\n\n"
-            f"Immediate parent Done when (binding at parent finalization): "
+            f"Immediate parent Done when (parent finalization only): "
             f"{parent_leaf.get('done_when','')}\n"
         )
         decomposition_text=(
-            "The following child-specific text may narrow/divide work but may not "
-            "weaken, rename, or contradict the binding inherited contract above.\n\n"
+            "The following Child scope, Owned artifacts, Child Verify, and Child "
+            "Done-when are the COMPLETE executable obligation for THIS child. Do "
+            "not perform other parent work merely because it appears in parent "
+            "context above.\n\n"
         )
         if handoff_source:
             handoff_text=(
@@ -1073,7 +1092,8 @@ def validate_split_proposal(parent, proposals, request=None):
         child.update({
             "id":expected[index],
             "name":proposal["scope"],
-            "outcome":inherited_outcome,
+            "outcome":proposal["scope"],
+            "parent_outcome_context":inherited_outcome,
             "owned_artifacts":_canonical_owned_artifacts(owned_list),
             "owned_artifact_paths":owned_list,
             "verify_command":child_verify,
@@ -2494,7 +2514,7 @@ def persisted_completed_tool_turns(sid):
             if not isinstance(part,dict) or part.get("type")!="tool":
                 continue
             state=part.get("state") if isinstance(part.get("state"),dict) else {}
-            if state.get("status") and state.get("status")!="running":
+            if str(state.get("status") or "").lower() in {"completed","error"}:
                 completed=True; break
         if completed:
             turns+=1
@@ -2538,8 +2558,9 @@ def early_write_gate_state(sid):
     if agent in READ_ONLY_SPLIT_ROLES or not owned_artifact_paths(leaf):
         return "na","read-only-or-progress-only"
     turns=persisted_completed_tool_turns(sid)
-    if turns < EARLY_WRITE_COMPLETED_TURNS:
-        return "allow",f"completed_tool_turns={turns}"
+    deadline=early_write_completed_turn_limit(leaf)
+    if turns < deadline:
+        return "allow",f"completed_tool_turns={turns} deadline={deadline}"
     if ready_info(did):
         return "satisfied","leaf-ready"
     attempt=attempt_sequence_for_session(sid,did)
@@ -2551,7 +2572,8 @@ def early_write_gate_state(sid):
         return "satisfied",f"owned-artifact-delta attempt={attempt}"
     return "deny",(
         f"early_write_gate completed_tool_turns={turns} "
-        f"required={EARLY_WRITE_COMPLETED_TURNS} detail={detail}"
+        f"required={deadline} complexity={str(leaf.get('complexity') or 'S').upper()} "
+        f"detail={detail}"
     )
 
 
@@ -2564,27 +2586,49 @@ def _tool_targets_exact_progress_file(did,tool,args):
 
 
 def enforce_early_write_gate(sid,tool="",args=None):
-    """Retire after turn 4, except one exact final progress-file write."""
+    """Retire at the exact S/M deadline, except one final progress-file write."""
     state,detail=early_write_gate_state(sid)
     if state!="deny":
         return state,detail
     did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    deadline=early_write_completed_turn_limit(leaf)
     turns=persisted_completed_tool_turns(sid)
     if (
         did
-        and turns==EARLY_WRITE_COMPLETED_TURNS
+        and turns==deadline
         and _tool_targets_exact_progress_file(did,tool,args)
     ):
         return "final-progress",(
-            f"completed_tool_turns={turns} exact_progress_write={did}"
+            f"completed_tool_turns={turns} deadline={deadline} exact_progress_write={did}"
         )
     agent=_session_agent_db(sid)
     reason=(
         "early_write_deadline_no_owned_artifact_delta "
         f"{detail}"
     )
-    abort_session(sid,reason,agent)
+    # The CLI guard persists intent. The in-process plugin performs the native
+    # session interrupt and then confirms the durable intent.
+    set_abort_intent(sid,reason,agent,"requested")
+    log(f"PLUGIN_INTERRUPT_REQUESTED session={sid} agent={agent} reason={reason}")
+    csv("PLUGIN_INTERRUPT_REQUESTED",sid,agent,reason)
     return "deny",reason
+
+
+def confirm_plugin_interrupt(sid):
+    if not PROJECT or not sid:
+        return False,"missing-project-or-session"
+    data=load_abort_intents()
+    entry=(data.get("sessions") or {}).get(sid)
+    if not isinstance(entry,dict) or entry.get("state")!="requested":
+        return False,"no-requested-abort-intent"
+    set_abort_intent(
+        sid,
+        str(entry.get("reason") or "plugin-native-interrupt"),
+        str(entry.get("agent") or ""),
+        "confirmed",
+    )
+    return True,"confirmed"
 
 
 def splitter_tool_boundary_state(sid,tool,args):
@@ -5644,10 +5688,22 @@ def main():
     ap.add_argument("--tool-name",default="")
     ap.add_argument("--tool-args-b64",default="")
     ap.add_argument("--splitter-tool-check")
+    ap.add_argument("--confirm-plugin-interrupt")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     args,unknown=ap.parse_known_args()
+    if args.confirm_plugin_interrupt:
+        if unknown or not args.project:
+            raise SystemExit("plugin interrupt confirmation requires --project")
+        PROJECT=args.project
+        ok,detail=confirm_plugin_interrupt(args.confirm_plugin_interrupt)
+        if not ok:
+            raise SystemExit(
+                f"PLUGIN_INTERRUPT_CONFIRM_DENY session={args.confirm_plugin_interrupt} {detail}"
+            )
+        print(f"PLUGIN_INTERRUPT_CONFIRMED session={args.confirm_plugin_interrupt} {detail}")
+        return
     if args.early_write_check:
         if unknown or not args.project:
             raise SystemExit("early-write check requires --project --early-write-check")

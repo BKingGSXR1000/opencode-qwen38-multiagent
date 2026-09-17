@@ -212,6 +212,7 @@ def build_leaf_contexts(project, manifest):
             "source_kind": "split-child" if "-" in did else "plan-leaf",
             "name": str(leaf.get("name") or ""),
             "outcome": str(leaf.get("outcome") or leaf.get("name") or ""),
+            "parent_outcome_context": str(leaf.get("parent_outcome_context") or ""),
             "role": str(leaf.get("role") or ""),
             "owned_artifacts": leaf.get("owned_artifacts", ""),
             "owned_artifact_paths": _as_string_list(leaf.get("owned_artifact_paths")),

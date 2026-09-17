@@ -123,7 +123,14 @@ function supervisor(directory, args) {
 
 const earlyWriteSatisfiedSessions = new Set();
 
-function guardEarlyWrite(directory, event, output) {
+export async function interruptDeniedSession(api, sessionID) {
+  if (!api?.session || typeof api.session.interrupt !== "function") {
+    throw new Error("native session.interrupt API unavailable");
+  }
+  await api.session.interrupt({ sessionID, continue: false });
+}
+
+async function guardEarlyWrite(directory, event, output, api) {
   const tool = String(event?.tool || "");
   if (tool === "subagent" || tool === "task") return;
   const sessionID = hookSessionID(event);
@@ -139,6 +146,19 @@ function guardEarlyWrite(directory, event, output) {
     ]);
   } catch (error) {
     const detail = String(error?.stderr || error?.message || error).trim();
+    if (detail.includes("EARLY_WRITE_DENY")) {
+      try {
+        await interruptDeniedSession(api, sessionID);
+        supervisor(directory, ["--confirm-plugin-interrupt", sessionID]);
+      } catch (interruptError) {
+        const interruptDetail = String(
+          interruptError?.stderr || interruptError?.message || interruptError
+        ).trim();
+        throw new Error(
+          `${detail} PLUGIN_NATIVE_INTERRUPT_FAILED ${interruptDetail || "unknown"}`
+        );
+      }
+    }
     throw new Error(detail || `EARLY_WRITE_DENY session=${sessionID}`);
   }
   if (/^EARLY_WRITE_(?:NA|SATISFIED)\b/.test(String(raw || "").trim())) {
@@ -262,7 +282,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
     guardSplitterToolBoundary(directory, event, output);
-    guardEarlyWrite(directory, event, output);
+    await guardEarlyWrite(directory, event, output, api);
     guardWorkerMutation(directory, event, output);
     if (event.tool !== "subagent" && event.tool !== "task") return;
     // Support both the beta combined event shape and the newer split
