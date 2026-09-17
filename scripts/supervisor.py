@@ -69,6 +69,7 @@ MAX_PLANNER_RESTARTS=3
 # use this unambiguous schema name without a destructive migration.
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v2"
+SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL="v2-split-parent-contract-invalid-v1"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
@@ -179,6 +180,14 @@ def last_assistant_text_db(sid):
     except Exception:
         pass
     return ""
+
+def parse_split_parent(text):
+    m=re.search(
+        r"(?m)^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$",
+        str(text or ""),
+    )
+    return m.group(1) if m else ""
+
 
 def parse_deliverable(text):
     if not text: return ""
@@ -1186,6 +1195,101 @@ def persist_split(parent, proposals):
             return apply_split_transaction(parent,txn)
 
 
+def _structured_plan_symbolic_key(did):
+    mapping=load_json_object(
+        Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.structured-map.json",
+        label="structured plan map",
+    )
+    if mapping.get("protocol")!="v2-structured-plan-map-v1":
+        raise ValueError("structured plan map protocol mismatch")
+    key=(mapping.get("id_to_key") or {}).get(did)
+    if not isinstance(key,str) or not key:
+        raise ValueError(f"no structured-plan key for {did}")
+    return key
+
+
+def _clear_split_request_state_for_contract_repair(did):
+    for path in (
+        split_request_path(did),
+        split_proposal_path(did),
+        split_status_path(did),
+        split_transaction_path(did),
+    ):
+        path.unlink(missing_ok=True)
+
+
+def request_parent_contract_repair(did, payload, request):
+    allowed={"protocol","parent_id","depth","generation","field","reason"}
+    if set(payload) != allowed:
+        raise ValueError("parent-contract-invalid payload has wrong fields")
+    if payload.get("protocol")!=SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL:
+        raise ValueError("parent-contract-invalid protocol mismatch")
+    if payload.get("parent_id")!=did:
+        raise ValueError("parent-contract-invalid parent mismatch")
+    if payload.get("depth")!=split_depth(did):
+        raise ValueError("parent-contract-invalid depth mismatch")
+    if payload.get("generation")!=request.get("generation",1):
+        raise ValueError("parent-contract-invalid generation mismatch")
+    if payload.get("field")!="verify_command":
+        raise ValueError("only verify_command parent-contract repair is supported")
+    reason=str(payload.get("reason") or "").strip()
+    if len(reason)<20 or len(reason)>1200:
+        raise ValueError("parent-contract-invalid reason must be 20..1200 chars")
+
+    key=_structured_plan_symbolic_key(did)
+    repair_path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.repair.json"
+    atomic_write_json(repair_path,{
+        "protocol":"v2-structured-plan-repair-v1",
+        "source":"runtime-split-parent-contract",
+        "whole_plan":False,
+        "affected_keys":[key],
+        "errors":[{
+            "key":key,
+            "code":"runtime-parent-verify-invalid",
+            "message":(
+                f"{key}: runtime split recovery found the parent verify_command "
+                f"internally inconsistent or non-verifying. Repair only this leaf's "
+                f"verify_command without weakening Outcome/Done when/Acceptance. "
+                f"Evidence: {reason}"
+            ),
+        }],
+    })
+    (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").unlink(missing_ok=True)
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                raise ValueError("missing attempt ledger entry for parent repair")
+            changed=False
+            for item in entry.get("failure_history",[]) or []:
+                if (
+                    isinstance(item,dict)
+                    and item.get("classification")=="genuine"
+                    and _split_failure_is_verification_related(item.get("reason"))
+                ):
+                    item["classification"]="bad-plan"
+                    item["reclassified_by"]="runtime-parent-contract-repair"
+                    changed=True
+            if "split_required" in entry:
+                entry.pop("split_required",None)
+                changed=True
+            if changed:
+                save_attempts(data)
+
+    _clear_split_request_state_for_contract_repair(did)
+    log(
+        f"PARENT_CONTRACT_REPAIR_REQUESTED deliverable={did} key={key} "
+        f"field=verify_command reason={reason}"
+    )
+    csv(
+        "PARENT_CONTRACT_REPAIR_REQUESTED","", "task-splitter",
+        f"{did} key={key} field=verify_command"
+    )
+    return True,"parent-contract-repair"
+
+
 def process_split_proposal(did, session="", require_proposal=False):
     """Validate one proposal; malformed proposals receive one bounded fresh retry."""
     if not split_request_path(did).exists():
@@ -1213,6 +1317,8 @@ def process_split_proposal(did, session="", require_proposal=False):
         return False,state
     request=load_json_object(split_request_path(did),label=f"split request {did}")
     try:
+        if payload.get("protocol")==SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL:
+            return request_parent_contract_repair(did,payload,request)
         if (
             payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL
             or payload.get("parent_id")!=did
@@ -1263,23 +1369,15 @@ def claim_splitter(parent, dispatch_token):
     return True,"claimed"
 
 def parse_splitter_final_json(text):
+    # Accept only one exact bare JSON object and nothing else.
     text=(text or "").strip()
-    if text.startswith("```"):
-        text=re.sub(r"^```(?:json)?\s*","",text,flags=re.I)
-        text=re.sub(r"\s*```$","",text)
+    if not text or text.startswith("```") or text.endswith("```"):
+        return None
     try:
         obj=json.loads(text)
-        return obj if isinstance(obj,dict) else None
     except Exception:
-        pass
-    a=text.find("{"); b=text.rfind("}")
-    if a>=0 and b>a:
-        try:
-            obj=json.loads(text[a:b+1])
-            return obj if isinstance(obj,dict) else None
-        except Exception:
-            pass
-    return None
+        return None
+    return obj if isinstance(obj,dict) else None
 
 
 def recover_pending_splitter_completion(parent,status,now=None):
@@ -1500,6 +1598,18 @@ def record_leaf_failure(did, reason, classification="genuine"):
         return split_request(did)
     return True,"genuine-recorded"
 
+def read_only_genuine_terminal(did):
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if not isinstance(leaf,dict) or leaf.get("role") not in READ_ONLY_SPLIT_ROLES:
+        return False
+    entry=(load_attempts().get("deliverables") or {}).get(did,{})
+    history=entry.get("failure_history",[]) if isinstance(entry,dict) else []
+    return any(
+        isinstance(item,dict) and item.get("classification")=="genuine"
+        for item in history
+    )
+
+
 def retryable_unmaterialized_dispatch_entry(entry):
     """Use the canonical attempt projection for bounded zero-work replays."""
     return bool(attempt_state(entry).get("unmaterialized_dispatch_reusable"))
@@ -1552,6 +1662,16 @@ def normalized_state_snapshot(project):
             leaves[did]["running"]=True
             leaves[did]["eligible"]=False
 
+    for did,leaf in leaves.items():
+        if (
+            isinstance(leaf,dict)
+            and leaf.get("role") in READ_ONLY_SPLIT_ROLES
+            and read_only_genuine_terminal(did)
+            and not ready_info(did)
+        ):
+            leaf["eligible"]=False
+            leaf["attempt_limit_reached"]=True
+
     clean=[]
     for item in data.get("execution_blockers",[]) if isinstance(data.get("execution_blockers"),list) else []:
         if not isinstance(item,dict):
@@ -1563,7 +1683,11 @@ def normalized_state_snapshot(project):
         if did in active_ids:
             note_state_blocker_exempt_active(did,item.get("reason",""))
             continue
-        if item.get("reason")=="attempt_limit_reached" and not leaf.get("attempt_limit_reached",False):
+        if (
+            item.get("reason")=="attempt_limit_reached"
+            and not leaf.get("attempt_limit_reached",False)
+            and not read_only_genuine_terminal(did)
+        ):
             log(
                 f"STATE_BLOCKER_EXEMPT deliverable={did} reason=attempt_limit_reached "
                 f"attempts={leaf.get('attempts',0)}"
@@ -2431,11 +2555,29 @@ def early_write_gate_state(sid):
     )
 
 
-def enforce_early_write_gate(sid):
-    """Retire a worker immediately once the exact write deadline is missed."""
+def _tool_targets_exact_progress_file(did,tool,args):
+    if tool not in {"write","edit","apply_patch","patch","multiedit"}:
+        return False
+    target=f".opencode-v2/work/{did}.progress.md"
+    raw=json.dumps(args if isinstance(args,dict) else {},sort_keys=True)
+    return target in raw
+
+
+def enforce_early_write_gate(sid,tool="",args=None):
+    """Retire after turn 4, except one exact final progress-file write."""
     state,detail=early_write_gate_state(sid)
     if state!="deny":
         return state,detail
+    did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+    turns=persisted_completed_tool_turns(sid)
+    if (
+        did
+        and turns==EARLY_WRITE_COMPLETED_TURNS
+        and _tool_targets_exact_progress_file(did,tool,args)
+    ):
+        return "final-progress",(
+            f"completed_tool_turns={turns} exact_progress_write={did}"
+        )
     agent=_session_agent_db(sid)
     reason=(
         "early_write_deadline_no_owned_artifact_delta "
@@ -2443,6 +2585,32 @@ def enforce_early_write_gate(sid):
     )
     abort_session(sid,reason,agent)
     return "deny",reason
+
+
+def splitter_tool_boundary_state(sid,tool,args):
+    if _session_agent_db(sid)!="task-splitter":
+        return "na","not-task-splitter"
+    parent=parse_split_parent(first_user_text_db(sid))
+    if not parent:
+        return "deny","missing canonical SPLIT_PARENT"
+    turns=persisted_completed_tool_turns(sid)
+    if turns != 0:
+        return "deny",f"task-splitter already completed {turns} tool-bearing turn(s)"
+    if tool!="read":
+        return "deny",f"task-splitter first tool must be read, got {tool}"
+    values=[]
+    if isinstance(args,dict):
+        for key in ("filePath","file_path","path","filename"):
+            value=args.get(key)
+            if isinstance(value,str):
+                values.append(value)
+    expected=f".opencode-v2/work/{parent}.split-request.json"
+    expected_abs=str((Path(PROJECT)/expected).resolve(strict=False)).replace("\\","/")
+    allowed={expected,"./"+expected,expected_abs}
+    normalized={str(v).replace("\\","/") for v in values}
+    if not normalized.intersection(allowed):
+        return "deny",f"task-splitter may read only {expected}"
+    return "allow",expected
 
 
 def probe_loop_reason(sid,agent,did,tool_id,now=None):
@@ -3098,6 +3266,8 @@ def preclaim_attempt(agent,text,dispatch_token):
     did,violation=validate_dispatch(agent,text)
     if violation:
         return "denied",did,violation,0
+    if did and read_only_genuine_terminal(did):
+        return "denied",did,"read_only_genuine_terminal",0
     try:
         with scheduler_lock():
             data=load_attempts()
@@ -5273,7 +5443,7 @@ def reconcile_idle_implementation_session(sid,agent):
             )
             csv("POST_SESSION_VERIFY",sid,agent,f"{did} {detail}")
             if not ok and detail != "not-applicable":
-                if detail.startswith("verify-infrastructure-"):
+                if detail.startswith(("verify-infrastructure-","verification-error-")):
                     granted,grant_detail=record_infrastructure_abort(
                         sid,did,detail,"verification-environment"
                     )
@@ -5471,6 +5641,9 @@ def main():
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--early-write-check")
+    ap.add_argument("--tool-name",default="")
+    ap.add_argument("--tool-args-b64",default="")
+    ap.add_argument("--splitter-tool-check")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
@@ -5479,10 +5652,40 @@ def main():
         if unknown or not args.project:
             raise SystemExit("early-write check requires --project --early-write-check")
         PROJECT=args.project
-        state,detail=enforce_early_write_gate(args.early_write_check)
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(args.tool_args_b64).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=enforce_early_write_gate(
+            args.early_write_check,args.tool_name,tool_args
+        )
         if state=="deny":
             raise SystemExit(f"EARLY_WRITE_DENY session={args.early_write_check} {detail}")
-        print(f"EARLY_WRITE_{state.upper()} session={args.early_write_check} {detail}")
+        label=state.upper().replace("-","_")
+        print(f"EARLY_WRITE_{label} session={args.early_write_check} {detail}")
+        return
+    if args.splitter_tool_check:
+        if unknown or not args.project:
+            raise SystemExit("splitter tool check requires --project")
+        PROJECT=args.project
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(args.tool_args_b64).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=splitter_tool_boundary_state(
+            args.splitter_tool_check,args.tool_name,tool_args
+        )
+        if state=="deny":
+            raise SystemExit(
+                f"SPLITTER_TOOL_DENY session={args.splitter_tool_check} {detail}"
+            )
+        print(f"SPLITTER_TOOL_{state.upper()} session={args.splitter_tool_check} {detail}")
         return
     if args.render_runtime_prompt:
         if unknown or not args.project or not args.agent:

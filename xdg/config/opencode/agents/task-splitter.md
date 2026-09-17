@@ -29,8 +29,11 @@ Exactly one tool call is allowed:
 After that read, use NO MORE TOOLS. Do not read a proposal file, plan, AGENTS.md,
 progress file, directory, or any other path. Do not glob/list/grep/bash/edit.
 
-Your FINAL RESPONSE must be exactly one JSON object, with no Markdown fence and
-no prose before or after it:
+Your FINAL RESPONSE must be exactly one bare JSON object, with no Markdown
+fence and no prose before or after it. The supervisor rejects salvage, prefixes,
+suffixes, and fenced JSON.
+
+Normal split form:
 
 {
   "protocol": "v2-task-split-proposal-v2",
@@ -60,6 +63,22 @@ no prose before or after it:
     }
   ]
 }
+
+If and ONLY if the parent `verify_command` itself is internally contradictory,
+non-verifying, or impossible for the stated parent contract, do NOT rewrite it
+inside child proposals. Return this alternate exact bare JSON object instead:
+
+{
+  "protocol": "v2-split-parent-contract-invalid-v1",
+  "parent_id": "D001",
+  "depth": 0,
+  "generation": 1,
+  "field": "verify_command",
+  "reason": "20-1200 chars of concrete evidence showing why the parent Verify itself is invalid"
+}
+
+This escalates to targeted implementation-planner repair. It is NOT permission
+to weaken Outcome, Done when, Acceptance, or implementation requirements.
 
 Use the request's exact parent_id, depth, and generation. Do not invent child
 IDs; the supervisor derives them. The request also contains `parent_contract`

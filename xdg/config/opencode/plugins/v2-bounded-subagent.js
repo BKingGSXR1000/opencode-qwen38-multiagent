@@ -123,14 +123,20 @@ function supervisor(directory, args) {
 
 const earlyWriteSatisfiedSessions = new Set();
 
-function guardEarlyWrite(directory, event) {
+function guardEarlyWrite(directory, event, output) {
   const tool = String(event?.tool || "");
   if (tool === "subagent" || tool === "task") return;
   const sessionID = hookSessionID(event);
   if (!sessionID || earlyWriteSatisfiedSessions.has(sessionID)) return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
   let raw;
   try {
-    raw = supervisor(directory, ["--early-write-check", sessionID]);
+    raw = supervisor(directory, [
+      "--early-write-check", sessionID,
+      "--tool-name", tool,
+      "--tool-args-b64", payload,
+    ]);
   } catch (error) {
     const detail = String(error?.stderr || error?.message || error).trim();
     throw new Error(detail || `EARLY_WRITE_DENY session=${sessionID}`);
@@ -140,21 +146,41 @@ function guardEarlyWrite(directory, event) {
   }
 }
 
+function guardSplitterToolBoundary(directory, event, output) {
+  const sessionID = hookSessionID(event);
+  if (!sessionID) return;
+  const tool = String(event?.tool || "");
+  if (tool === "subagent" || tool === "task") return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  try {
+    supervisor(directory, [
+      "--splitter-tool-check", sessionID,
+      "--tool-name", tool,
+      "--tool-args-b64", payload,
+    ]);
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    if (detail.includes("not-task-splitter")) return;
+    if (detail.includes("SPLITTER_TOOL_DENY")) throw new Error(detail);
+  }
+}
+
 export function proposalFromOutput(output, parent, directory) {
   if (typeof output !== "string") return null;
-  // The task-splitter is instructed to use its second tool turn for a write.
-  // Some beta turns nevertheless reach their cap after returning a complete
-  // fenced JSON proposal. Materialize only that exact structured contract;
-  // never derive children, scopes, IDs, or control state from prose.
-  const match = output.match(/```json\s*([\s\S]*?)\s*```/i);
-  if (!match) return null;
+  const raw = output.trim();
+  if (!raw || raw.startsWith("```") || raw.endsWith("```")) return null;
   try {
-    const proposal = JSON.parse(match[1]);
+    const proposal = JSON.parse(raw);
     const request = JSON.parse(readFileSync(join(directory, ".opencode-v2", "work", `${parent}.split-request.json`), "utf8"));
+    if (proposal?.parent_id !== parent || proposal?.depth !== request?.depth ||
+        proposal?.generation !== request?.generation) return null;
+    if (proposal?.protocol === "v2-split-parent-contract-invalid-v1") {
+      return proposal?.field === "verify_command" && typeof proposal?.reason === "string"
+        ? proposal : null;
+    }
     if (proposal?.protocol !== "v2-task-split-proposal-v2" ||
-        proposal?.parent_id !== parent || proposal?.depth !== request?.depth ||
-        proposal?.generation !== request?.generation || !Array.isArray(proposal?.proposals) ||
-        proposal.proposals.length !== 2) return null;
+        !Array.isArray(proposal?.proposals) || proposal.proposals.length !== 2) return null;
     return proposal;
   } catch {
     return null;
@@ -235,7 +261,8 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   });
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
-    guardEarlyWrite(directory, event);
+    guardSplitterToolBoundary(directory, event, output);
+    guardEarlyWrite(directory, event, output);
     guardWorkerMutation(directory, event, output);
     if (event.tool !== "subagent" && event.tool !== "task") return;
     // Support both the beta combined event shape and the newer split
