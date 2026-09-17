@@ -186,6 +186,26 @@ function guardSplitterToolBoundary(directory, event, output) {
   }
 }
 
+function guardProgressHandoff(directory, event, output) {
+  const sessionID = hookSessionID(event);
+  if (!sessionID) return;
+  const tool = String(event?.tool || "");
+  if (tool === "subagent" || tool === "task") return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  try {
+    supervisor(directory, [
+      "--progress-handoff-tool-check", sessionID,
+      "--tool-name", tool,
+      "--tool-args-b64", payload,
+    ]);
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    if (detail.includes("not-probe-builder") || detail.includes("not-progress-handoff")) return;
+    if (detail.includes("PROGRESS_HANDOFF_DENY")) throw new Error(detail);
+  }
+}
+
 export function proposalFromOutput(output, parent, directory) {
   if (typeof output !== "string") return null;
   const raw = output.trim();
@@ -282,6 +302,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
     guardSplitterToolBoundary(directory, event, output);
+    guardProgressHandoff(directory, event, output);
     await guardEarlyWrite(directory, event, output, api);
     guardWorkerMutation(directory, event, output);
     if (event.tool !== "subagent" && event.tool !== "task") return;

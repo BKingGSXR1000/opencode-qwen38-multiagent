@@ -206,6 +206,11 @@ def build_leaf_contexts(project, manifest):
         parent_acceptance_ids = _as_string_list(
             parent_leaf.get("acceptance_ids") if isinstance(parent_leaf, dict) else []
         )
+        progress_path = project / ".opencode-v2" / "work" / f"{did}.progress.md"
+        try:
+            current_progress = progress_path.read_text(errors="replace")[:4000]
+        except OSError:
+            current_progress = ""
         packet = {
             "protocol": LEAF_CONTEXT_PROTOCOL,
             "deliverable": did,
@@ -239,6 +244,7 @@ def build_leaf_contexts(project, manifest):
             "done_when": str(leaf.get("done_when") or ""),
             "split_handoff_only": bool(leaf.get("split_handoff_only")),
             "split_handoff_source": str(leaf.get("split_handoff_source") or ""),
+            "current_progress": current_progress,
         }
 
         if "-" in did:

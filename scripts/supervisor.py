@@ -77,7 +77,7 @@ MAX_SPLITTER_ATTEMPTS=2
 SPLITTER_LEASE_SECONDS=600
 # execute.after can run before the child final text is durable in the session DB.
 # Give the persisted reconcile loop a short bounded window after the hook returns.
-SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS=5
+SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS=15
 MAX_SPLIT_PARENT_FINALIZE_FAILURES=3
 SPLIT_TRANSACTION_PROTOCOL="v2-split-transaction-v1"
 SPLIT_HANDOFF_VERIFY_SENTINEL="SUPERVISOR_HANDOFF_PROGRESS"
@@ -229,10 +229,10 @@ def implementation_runtime_prompt(did,agent):
         action_order=(
             "MANDATORY ACTION ORDER — PROGRESS-ONLY HANDOFF:\n"
             "1. FIRST tool-bearing response: read ONLY the authoritative context packet "
-            f".opencode-v2/query/leaves/{did}-context.json exactly once for this session and, "
-            "if present, the current progress file "
-            f".opencode-v2/work/{did}.progress.md. Do not inspect CONTROL_CONTRACT or project "
-            "artifacts yet.\n"
+            f".opencode-v2/query/leaves/{did}-context.json exactly once for this session. "
+            "Do NOT read the progress file separately: the packet field current_progress "
+            "contains its current contents, or an empty string when none exists. Do not "
+            "inspect CONTROL_CONTRACT or project artifacts yet.\n"
             "2. SECOND tool-bearing response: write/edit exactly "
             f".opencode-v2/work/{did}.progress.md with this plain-text shape:\n"
             "HANDOFF_READY: false\n\n"
@@ -240,13 +240,13 @@ def implementation_runtime_prompt(did,agent):
             "Evidence:\n<evidence or none yet>\n\n"
             "Next step:\n<next bounded action>\n"
             "Labels start at column 1. Do not prefix them with #/## and do not append text "
-            "after true/false. Use true only when the downstream writer has enough evidence. "
-            "This response MUST contain that write/edit and no discovery tool call.\n"
-            "3. AFTER that write, exactly ONE discovery tool-bearing response is allowed. "
-            "The IMMEDIATELY FOLLOWING tool-bearing response MUST update the same progress "
-            "file before any further discovery. A failed query is still evidence and must be "
-            "checkpointed. Two consecutive post-checkpoint discovery turns cause deterministic "
-            "recycling. Do not keep new findings only in conversation context.\n"
+            "after true/false. Preserve useful current_progress facts. Use true only when "
+            "the downstream writer has enough evidence.\n"
+            "3. AFTER every valid checkpoint, exactly ONE discovery tool-bearing response "
+            "is allowed. The NEXT tool-bearing response MUST update the progress file. A "
+            "mechanical guard denies a second consecutive discovery with "
+            "PROGRESS_CHECKPOINT_REQUIRED but keeps the session alive so you can checkpoint. "
+            "A failed query is evidence and must be checkpointed.\n"
             "When sufficient, write exact HANDOFF_READY: true, run the exact Verify command, "
             "persist the result, and return. Temporary files do not count."
         )
@@ -257,14 +257,13 @@ def implementation_runtime_prompt(did,agent):
         deadline=early_write_completed_turn_limit(leaf)
         gate=(
             "\n\nEARLY WRITE GATE — EXACT:\n"
-            f"At the END of your {_ordinal_word(deadline)} completed tool-bearing assistant turn, "
-            "at least one owned project artifact MUST differ from its dispatch baseline. "
-            "The progress file does NOT satisfy this gate. If the owned artifact was already "
-            f"correct, use at most those {deadline} turns to run the exact Verify command and "
-            f"return normally. Do not make a {_next_ordinal_word(deadline)} tool-bearing turn "
-            "except for the single exact final progress-file handoff allowed by the supervisor. "
-            f"Any other {_next_ordinal_word(deadline)} tool call while no owned artifact delta "
-            "exists causes deterministic session retirement."
+            f"Use the first {deadline} completed tool-bearing turns for bounded inspection. "
+            f"If no owned artifact differs at the end of turn {deadline}, the NEXT tool-bearing "
+            "response is WRITE-ONLY: it MUST create or update an owned project artifact. "
+            "No additional read/search/web/discovery call is allowed in that state. The only "
+            "alternative is one exact progress-file write when the owned artifact is already "
+            "correct and you are finalizing the handoff. A non-writing tool in WRITE-ONLY "
+            "state causes deterministic session retirement."
         )
         return base+gate
 
@@ -2585,6 +2584,181 @@ def _tool_targets_exact_progress_file(did,tool,args):
     return target in raw
 
 
+def _project_relative_tool_path(value):
+    if not isinstance(value,str) or not value.strip():
+        return ""
+    value=value.strip().replace("\\","/")
+    project=str(Path(PROJECT).resolve(strict=False)).replace("\\","/").rstrip("/")
+    if value.startswith(project+"/"):
+        value=value[len(project)+1:]
+    if value.startswith("./"):
+        value=value[2:]
+    path=Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        return ""
+    return path.as_posix()
+
+
+def _target_path_values(args):
+    result=[]
+    def walk(value,key=""):
+        if isinstance(value,dict):
+            for k,v in value.items():
+                if k in {"path","file","filePath","file_path","filename"} and isinstance(v,str):
+                    result.append(v)
+                else:
+                    walk(v,k)
+        elif isinstance(value,list):
+            for item in value:
+                walk(item,key)
+    walk(args if isinstance(args,dict) else {})
+    return result
+
+
+def _current_tool_mutates_owned_artifact(did,tool,args):
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
+    if not owned:
+        return False
+    direct={"write","edit","apply_patch","patch","multiedit"}
+    if tool in direct:
+        normalized=[
+            _project_relative_tool_path(value)
+            for value in _target_path_values(args)
+        ]
+        if any(path and _path_inside_any(path,owned) for path in normalized):
+            return True
+        raw=json.dumps(args if isinstance(args,dict) else {},sort_keys=True)
+        return any(path in raw for path in owned)
+
+    if tool not in {"bash","shell","execute"}:
+        return False
+    command=(args or {}).get("command") if isinstance(args,dict) else ""
+    if not isinstance(command,str):
+        return False
+    for rel in owned:
+        candidates=[
+            rel,
+            str((Path(PROJECT)/rel).resolve(strict=False)).replace("\\","/"),
+        ]
+        for target in candidates:
+            q=re.escape(target)
+            patterns=(
+                rf"(?:>|>>)\s*['\"]?{q}(?:['\"]|\s|$)",
+                rf"\btee(?:\s+-a)?\s+['\"]?{q}(?:['\"]|\s|$)",
+                rf"\b(?:touch|truncate|rm|unlink)\b[^\n;]*{q}",
+                rf"\b(?:sed\s+-i|perl\s+-pi)\b[^\n;]*{q}",
+                rf"\b(?:cp|mv|install)\b[^\n;]*\s['\"]?{q}(?:['\"]|\s|$)",
+                rf"\bopen\s*\(\s*['\"]{q}['\"]\s*,\s*['\"][wax+]",
+                rf"\bPath\s*\(\s*['\"]{q}['\"]\s*\)\s*\.\s*write_(?:text|bytes)\b",
+            )
+            if any(re.search(pattern,command) for pattern in patterns):
+                return True
+    return False
+
+
+def session_completed_tool_inputs(sid):
+    out=[]
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq",
+            (sid,),
+        ).fetchall()
+        con.close()
+        for (raw,) in rows:
+            try:
+                data=json.loads(raw) if raw else {}
+            except Exception:
+                continue
+            content=data.get("content") if isinstance(data,dict) else []
+            if not isinstance(content,list):
+                continue
+            for part in content:
+                if not isinstance(part,dict) or part.get("type")!="tool":
+                    continue
+                state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                if str(state.get("status") or "").lower() not in {"completed","error"}:
+                    continue
+                inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                out.append((str(part.get("name") or ""),inp))
+    except Exception:
+        pass
+    return out
+
+
+def _tool_targets_exact_project_path(tool,args,target):
+    if tool not in {"read","write","edit","apply_patch","patch","multiedit"}:
+        return False
+    target=target.replace("\\","/")
+    target_abs=str((Path(PROJECT)/target).resolve(strict=False)).replace("\\","/")
+    for raw in _target_path_values(args):
+        value=str(raw).replace("\\","/")
+        if value in {target,"./"+target,target_abs}:
+            return True
+    return False
+
+
+def progress_handoff_tool_state(sid,tool,args):
+    agent=_session_agent_db(sid)
+    if agent!="probe-builder":
+        return "na","not-probe-builder"
+    did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if not did or not isinstance(leaf,dict) or not leaf.get("split_handoff_only"):
+        return "na","not-progress-handoff"
+
+    context=f".opencode-v2/query/leaves/{did}-context.json"
+    progress=f".opencode-v2/work/{did}.progress.md"
+    history=session_completed_tool_inputs(sid)
+
+    def is_context_read(item):
+        name,inp=item
+        return name=="read" and _tool_targets_exact_project_path(name,inp,context)
+
+    def is_progress_write(item):
+        name,inp=item
+        return _tool_targets_exact_progress_file(did,name,inp)
+
+    context_seen=any(is_context_read(item) for item in history)
+    last_progress=-1
+    for index,item in enumerate(history):
+        if is_progress_write(item):
+            last_progress=index
+
+    current_progress_write=_tool_targets_exact_progress_file(did,tool,args)
+    if last_progress < 0:
+        if not history:
+            if tool=="read" and _tool_targets_exact_project_path(tool,args,context):
+                return "allow","bootstrap-context-read"
+            return "deny","PROGRESS_CONTEXT_REQUIRED"
+        if current_progress_write and context_seen:
+            return "allow","bootstrap-checkpoint-write"
+        return "deny","PROGRESS_BOOTSTRAP_CHECKPOINT_REQUIRED"
+
+    progress_path=Path(PROJECT)/progress
+    try:
+        progress_text=progress_path.read_text(errors="replace")
+    except OSError:
+        progress_text=""
+    if not split_handoff_progress_checkpoint(progress_text):
+        if current_progress_write:
+            return "allow","repair-invalid-checkpoint"
+        return "deny","PROGRESS_CHECKPOINT_REQUIRED"
+
+    if current_progress_write:
+        return "allow","checkpoint-write"
+
+    noncheckpoint_after=[
+        item for item in history[last_progress+1:]
+        if not is_progress_write(item)
+    ]
+    if not noncheckpoint_after:
+        return "allow","one-discovery-after-checkpoint"
+    return "deny","PROGRESS_CHECKPOINT_REQUIRED"
+
+
 def enforce_early_write_gate(sid,tool="",args=None):
     """Retire at the exact S/M deadline, except one final progress-file write."""
     state,detail=early_write_gate_state(sid)
@@ -2594,14 +2768,15 @@ def enforce_early_write_gate(sid,tool="",args=None):
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     deadline=early_write_completed_turn_limit(leaf)
     turns=persisted_completed_tool_turns(sid)
-    if (
-        did
-        and turns==deadline
-        and _tool_targets_exact_progress_file(did,tool,args)
-    ):
-        return "final-progress",(
-            f"completed_tool_turns={turns} deadline={deadline} exact_progress_write={did}"
-        )
+    if did and turns==deadline:
+        if _tool_targets_exact_progress_file(did,tool,args):
+            return "final-progress",(
+                f"completed_tool_turns={turns} deadline={deadline} exact_progress_write={did}"
+            )
+        if _current_tool_mutates_owned_artifact(did,tool,args):
+            return "write-only",(
+                f"completed_tool_turns={turns} deadline={deadline} owned_artifact_write={did}"
+            )
     agent=_session_agent_db(sid)
     reason=(
         "early_write_deadline_no_owned_artifact_delta "
@@ -2671,10 +2846,11 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
     persisted_turns=persisted_completed_tool_turns(sid)
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     handoff_only=bool(isinstance(leaf,dict) and leaf.get("split_handoff_only"))
-    limit=(
-        PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS
-        if handoff_only else PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS
-    )
+    if handoff_only:
+        # Progress-only children are governed by the execute.before state machine.
+        # Do not recycle the whole session for a denied second discovery.
+        return ""
+    limit=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS
     state=worker_progress.setdefault(
         sid,{"signature":signature,"baseline_turns":0,"turns":persisted_turns}
     )
@@ -5688,6 +5864,7 @@ def main():
     ap.add_argument("--tool-name",default="")
     ap.add_argument("--tool-args-b64",default="")
     ap.add_argument("--splitter-tool-check")
+    ap.add_argument("--progress-handoff-tool-check")
     ap.add_argument("--confirm-plugin-interrupt")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
@@ -5722,6 +5899,29 @@ def main():
             raise SystemExit(f"EARLY_WRITE_DENY session={args.early_write_check} {detail}")
         label=state.upper().replace("-","_")
         print(f"EARLY_WRITE_{label} session={args.early_write_check} {detail}")
+        return
+    if args.progress_handoff_tool_check:
+        if unknown or not args.project:
+            raise SystemExit("progress handoff tool check requires --project")
+        PROJECT=args.project
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(args.tool_args_b64).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=progress_handoff_tool_state(
+            args.progress_handoff_tool_check,args.tool_name,tool_args
+        )
+        if state=="deny":
+            raise SystemExit(
+                f"PROGRESS_HANDOFF_DENY session={args.progress_handoff_tool_check} {detail}"
+            )
+        print(
+            f"PROGRESS_HANDOFF_{state.upper()} "
+            f"session={args.progress_handoff_tool_check} {detail}"
+        )
         return
     if args.splitter_tool_check:
         if unknown or not args.project:
