@@ -109,6 +109,27 @@ function exactDeliverable(args) {
   return prompt.match(/^DELIVERABLE:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/m)?.[1] || "unknown";
 }
 
+
+// V2.6.9 NATIVE BACKGROUND IMPLEMENTATION BEGIN
+const NATIVE_BACKGROUND_IMPLEMENTATION_AGENTS = new Set([
+  "probe-builder", "implementer", "core-builder", "feature-builder",
+  "reasoning-builder", "integrator", "tester", "test-builder",
+]);
+
+export function enableNativeImplementationBackground(args, agent, did) {
+  if (
+    !args ||
+    typeof args !== "object" ||
+    !NATIVE_BACKGROUND_IMPLEMENTATION_AGENTS.has(agent) ||
+    !/^D\d{3}(?:-[AB](?:[12])?)?$/.test(String(did || ""))
+  ) {
+    return false;
+  }
+  args.background = true;
+  return true;
+}
+// V2.6.9 NATIVE BACKGROUND IMPLEMENTATION END
+
 function splitParent(args) {
   const prompt = typeof args?.prompt === "string" ? args.prompt : "";
   return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/)?.[1] || "";
@@ -264,14 +285,16 @@ function ownedArtifacts(directory, did) {
 
 export function boundedChildResult({ directory, args = {}, metadata = {}, original = "" }) {
   const did = exactDeliverable(args);
-  const childSessionID = metadata?.sessionID || "unknown";
+  const childSessionID = metadata?.sessionID || metadata?.sessionId || "unknown";
   const readyPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
     ? join(directory, ".opencode-v2", "work", `${did}.ready`)
     : "";
   const progressPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
     ? join(directory, ".opencode-v2", "work", `${did}.progress.md`)
     : "";
-  const termination = metadata?.status || (original.length > TARGET_MAX_CHILD_RESULT_CHARS ? "output_limited" : "completed");
+  const termination = metadata?.background === true
+    ? "background-running"
+    : metadata?.status || (original.length > TARGET_MAX_CHILD_RESULT_CHARS ? "output_limited" : "completed");
   const lines = [
     `AGENT: ${args?.agent || "unknown"}`,
     `DELIVERABLE: ${did}`,
@@ -293,230 +316,6 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
   }
   return result;
 }
-
-
-// V2.6.9 CONTINUOUS IMPLEMENTATION BACKFILL BEGIN
-const BACKFILL_INITIAL_SETTLE_MS = 600;
-const BACKFILL_POLL_MS = 250;
-const BACKFILL_STALE_LAUNCH_MS = 1500;
-const BACKFILL_IMPLEMENTATION_AGENTS = new Set([
-  "probe-builder", "implementer", "core-builder", "feature-builder",
-  "reasoning-builder", "integrator", "tester", "test-builder",
-]);
-
-const nativeImplementationCalls = new Map();
-const backfillPumps = new Map();
-const backfillChildren = new Map();
-const backfillFailedThisWave = new Map();
-let backfillSerial = 0;
-
-function nativeCallKey(event, did) {
-  return `${hookCallID(event)}:${did}`;
-}
-
-function rootNativeCalls(rootSessionID, create = false) {
-  let calls = nativeImplementationCalls.get(rootSessionID);
-  if (!calls && create) {
-    calls = new Map();
-    nativeImplementationCalls.set(rootSessionID, calls);
-  }
-  return calls;
-}
-
-function trackNativeImplementationStart(event, did) {
-  const rootSessionID = hookSessionID(event);
-  if (!rootSessionID || !did || did === "unknown") return;
-  rootNativeCalls(rootSessionID, true).set(nativeCallKey(event, did), did);
-}
-
-function trackNativeImplementationComplete(event, did) {
-  const rootSessionID = hookSessionID(event);
-  const calls = rootNativeCalls(rootSessionID, false);
-  if (!calls) return 0;
-  calls.delete(nativeCallKey(event, did));
-  if (!calls.size) {
-    nativeImplementationCalls.delete(rootSessionID);
-    backfillFailedThisWave.delete(rootSessionID);
-    return 0;
-  }
-  return calls.size;
-}
-
-function nativeActiveDids(rootSessionID) {
-  return new Set(rootNativeCalls(rootSessionID, false)?.values() || []);
-}
-
-function canonicalImplementationPrompt(did) {
-  return [
-    `DELIVERABLE: ${did}`,
-    `Read .opencode-v2/query/leaves/${did}-context.json exactly once for this session; it is the complete authoritative deliverable contract. Do not read .opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope.`,
-    `Read .opencode-v2/work/${did}.progress.md if present.`,
-    "Inspect your owned project artifacts as they currently exist.",
-    "Continue from actual filesystem state and execute the deliverable.",
-  ].join("\n");
-}
-
-function readDecision(directory) {
-  try {
-    const path = join(directory, ".opencode-v2", "query", "decision.json");
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    return value && typeof value === "object" ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function sleepMs(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function childSessionID(created) {
-  return String(
-    created?.id ||
-    created?.sessionID ||
-    created?.data?.id ||
-    created?.data?.sessionID ||
-    ""
-  );
-}
-
-function reconcileBackfillChildren(rootSessionID, decision) {
-  const active = new Set(
-    Array.isArray(decision?.scheduler?.active_deliverables)
-      ? decision.scheduler.active_deliverables
-      : []
-  );
-  const now = Date.now();
-  for (const [did, state] of [...backfillChildren.entries()]) {
-    if (state.rootSessionID !== rootSessionID) continue;
-    if (active.has(did)) {
-      state.seenActive = true;
-      continue;
-    }
-    if (state.seenActive || now - state.launchedAt >= BACKFILL_STALE_LAUNCH_MS) {
-      backfillChildren.delete(did);
-    }
-  }
-}
-
-export function selectBackfillCandidates(decision, excluded = new Set()) {
-  if (!decision || decision.state_error === true || decision.resume_phase !== "execution") {
-    return [];
-  }
-  const scheduler = decision.scheduler || {};
-  if (scheduler.error) return [];
-  const slots = Math.max(0, Number(scheduler.available_worker_slots || 0));
-  if (!slots) return [];
-  const eligible = Array.isArray(decision.eligible) ? decision.eligible : [];
-  const roles = decision.eligible_roles && typeof decision.eligible_roles === "object"
-    ? decision.eligible_roles
-    : {};
-  const result = [];
-  for (const did of eligible) {
-    const role = roles[did];
-    if (
-      typeof did !== "string" ||
-      excluded.has(did) ||
-      !BACKFILL_IMPLEMENTATION_AGENTS.has(role)
-    ) {
-      continue;
-    }
-    result.push({ did, role });
-    if (result.length >= slots) break;
-  }
-  return result;
-}
-
-async function launchBackfillWorker(directory, api, rootSessionID, did, agent) {
-  const token = `backfill:${rootSessionID}:${did}:${++backfillSerial}`;
-  const canonicalPrompt = canonicalImplementationPrompt(did);
-
-  supervisor(directory, [
-    "--agent", agent,
-    "--prompt", canonicalPrompt,
-    "--claim-dispatch", token,
-  ]);
-
-  const runtimePrompt = supervisor(directory, [
-    "--agent", agent,
-    "--render-runtime-prompt", did,
-  ]).replace(/\r?\n$/, "");
-
-  if (
-    typeof api?.session?.create !== "function" ||
-    typeof api?.session?.switchAgent !== "function" ||
-    typeof api?.session?.prompt !== "function"
-  ) {
-    throw new Error("BACKFILL_API_UNAVAILABLE session.create/switchAgent/prompt");
-  }
-
-  const created = await api.session.create({
-    parentID: rootSessionID,
-    title: `V2 backfill ${did}`,
-  });
-  const sessionID = childSessionID(created);
-  if (!sessionID) throw new Error(`BACKFILL_SESSION_ID_MISSING deliverable=${did}`);
-
-  backfillChildren.set(did, {
-    rootSessionID,
-    sessionID,
-    launchedAt: Date.now(),
-    seenActive: false,
-  });
-
-  await api.session.switchAgent({ sessionID, agent });
-  await api.session.prompt({ sessionID, text: runtimePrompt });
-  console.error(
-    `[V2_BACKFILL] launched deliverable=${did} agent=${agent} session=${sessionID}`
-  );
-  return sessionID;
-}
-
-async function runBackfillPump(directory, api, rootSessionID) {
-  if (!rootSessionID || backfillPumps.has(rootSessionID)) return;
-
-  const pump = (async () => {
-    await sleepMs(BACKFILL_INITIAL_SETTLE_MS);
-    while ((rootNativeCalls(rootSessionID, false)?.size || 0) > 0) {
-      const decision = readDecision(directory);
-      if (decision) reconcileBackfillChildren(rootSessionID, decision);
-
-      const excluded = nativeActiveDids(rootSessionID);
-      for (const did of backfillChildren.keys()) excluded.add(did);
-      for (const did of backfillFailedThisWave.get(rootSessionID) || []) excluded.add(did);
-
-      const candidates = selectBackfillCandidates(decision, excluded);
-      for (const { did, role } of candidates) {
-        if ((rootNativeCalls(rootSessionID, false)?.size || 0) <= 0) break;
-        try {
-          await launchBackfillWorker(directory, api, rootSessionID, did, role);
-        } catch (error) {
-          let failed = backfillFailedThisWave.get(rootSessionID);
-          if (!failed) {
-            failed = new Set();
-            backfillFailedThisWave.set(rootSessionID, failed);
-          }
-          failed.add(did);
-          const detail = String(error?.stderr || error?.message || error)
-            .trim()
-            .replace(/\s+/g, " ")
-            .slice(0, 800);
-          console.error(
-            `[V2_BACKFILL] launch-denied deliverable=${did} detail=${detail || "unknown"}`
-          );
-        }
-      }
-      await sleepMs(BACKFILL_POLL_MS);
-    }
-  })().finally(() => {
-    backfillPumps.delete(rootSessionID);
-  });
-
-  backfillPumps.set(rootSessionID, pump);
-  void pump;
-}
-// V2.6.9 CONTINUOUS IMPLEMENTATION BACKFILL END
-
 
 export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   // Stamp OpenCode V2's deterministic request kind before provider dispatch.
@@ -550,7 +349,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       throw new Error("DISPATCH_DENY general is not a canonical implementation role");
     }
     const hasDeliverable = typeof prompt === "string" && /^DELIVERABLE:\s*D\d{3}(?:-[AB](?:[12])?)?\s*$/m.test(prompt);
-    const implementationAgents = new Set(["probe-builder", "implementer", "core-builder", "feature-builder", "reasoning-builder", "integrator", "tester", "test-builder"]);
+    const implementationAgents = NATIVE_BACKGROUND_IMPLEMENTATION_AGENTS;
     if (!implementationAgents.has(agent) && !hasDeliverable) return;
     // Render the exact post-preclaim runtime prompt before reserving an attempt.
     // Rendering is read-only; the canonical five-line parent prompt remains the
@@ -574,13 +373,16 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     // accepted here.
     if (runtimePrompt !== null) args.prompt = runtimePrompt;
 
-    trackNativeImplementationStart(event, did);
+    // Native OpenCode background subagents return their tool receipt
+    // immediately while OpenCode itself creates the correctly parented child.
+    // The supervisor preclaim above remains authoritative for eligibility,
+    // attempts and the five-worker limit.
+    enableNativeImplementationBackground(args, agent, did);
   });
   const after = await api.tool.hook("execute.after", async (event, output) => {
     const result = event?.result || output;
     if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
     const args = hookArgs(event, output);
-    const completedDid = exactDeliverable(args);
     const rawResult = toolResultText(result);
     const splitterParent = args?.agent === "task-splitter" ? splitParent(args) : "";
     if (splitterParent) {
@@ -627,11 +429,6 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     };
     // Batch 8: supervisor Verify still needs this exact attempt's
     // ephemeral runtime environment. Terminal cleanup is supervisor-owned.
-
-    if (completedDid !== "unknown") {
-      const remaining = trackNativeImplementationComplete(event, completedDid);
-      if (remaining > 0) void runBackfillPump(directory, api, hookSessionID(event));
-    }
   });
   return () => {
     modelRequest.dispose();
@@ -671,23 +468,26 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
     throw new Error("unknown-deliverable dispatch token fallback changed");
   }
 
-  const canonical = canonicalImplementationPrompt("D042");
-  if (canonical.split("\n").length !== 5 || !canonical.startsWith("DELIVERABLE: D042\n")) {
-    throw new Error("backfill canonical implementation prompt shape changed");
+  const backgroundArgs = {};
+  if (
+    !enableNativeImplementationBackground(backgroundArgs, "tester", "D042") ||
+    backgroundArgs.background !== true
+  ) {
+    throw new Error("canonical implementation call was not forced to native background mode");
   }
-  const candidates = selectBackfillCandidates({
-    resume_phase: "execution",
-    state_error: false,
-    eligible: ["D001", "D002", "D003"],
-    eligible_roles: {
-      D001: "implementer",
-      D002: "tester",
-      D003: "reference-researcher",
-    },
-    scheduler: { available_worker_slots: 2, error: "" },
-  }, new Set(["D001"]));
-  if (JSON.stringify(candidates) !== JSON.stringify([{ did: "D002", role: "tester" }])) {
-    throw new Error("backfill candidate selection changed");
+  const plannerArgs = {};
+  if (
+    enableNativeImplementationBackground(plannerArgs, "implementation-planner", "D042") ||
+    Object.prototype.hasOwnProperty.call(plannerArgs, "background")
+  ) {
+    throw new Error("non-implementation call was incorrectly forced to background mode");
+  }
+  const unknownArgs = {};
+  if (
+    enableNativeImplementationBackground(unknownArgs, "tester", "unknown") ||
+    Object.prototype.hasOwnProperty.call(unknownArgs, "background")
+  ) {
+    throw new Error("unknown deliverable was incorrectly forced to background mode");
   }
 
   console.log("v2-bounded-subagent selftest: OK");

@@ -27,3 +27,9 @@ export XDG_STATE_HOME="/home/bking/AI/opencode-qwen38-multiagent-v2/xdg/state"
 # --- BEGIN V2.1 AUTO MODE ---
 export OPENCODE2_BIN="/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/opencode2-auto.sh"
 # --- END V2.1 AUTO MODE ---
+# --- BEGIN V2.6.9 NATIVE BACKGROUND IMPLEMENTATION ---
+# Let OpenCode's own task/subagent implementation create correctly parented
+# asynchronous child sessions. The V2 plugin still performs canonical
+# eligibility/attempt/slot preclaim before the native tool executes.
+export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+# --- END V2.6.9 NATIVE BACKGROUND IMPLEMENTATION ---
