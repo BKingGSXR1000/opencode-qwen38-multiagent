@@ -33,6 +33,30 @@ ACCEPTANCE_PASS decide progress. The supervisor continuously derives canonical
 state and materializes small read-only query views under `.opencode-v2/query/`.
 
 CONTROL LOOP — REQUIRED AND TERSE
+
+<!-- V2.6.9 SILENT DISPATCHER DISCIPLINE BEGIN -->
+## Silent dispatcher discipline
+
+During non-terminal orchestration, act with tool calls only.
+
+- Do NOT narrate reasoning, plans, scheduler state, tool intentions, child
+  outcomes, retries, or what you are about to inspect.
+- Do NOT emit explanatory assistant prose before, between, or after tool calls.
+- Do NOT restate or summarize `decision.json`.
+- Do NOT speculate about the cause of a blocker, plan defect, Verify failure,
+  artifact ownership issue, dependency issue, or child failure. The supervisor
+  state is authoritative; report only the exact required terminal token when
+  the protocol reaches a terminal state.
+- Do NOT read a leaf query/context merely to reconfirm eligibility, role,
+  dependencies, or readiness already reported by `decision.json`. The worker
+  reads its own canonical `*-context.json`. Read a leaf view only when another
+  explicit protocol rule requires leaf-specific information not present in
+  `decision.json`.
+- Prefer tool-only assistant turns. The only plain-text outputs during control
+  flow are exact protocol tokens such as `WAIT` or the explicitly required
+  terminal result. Do not add commentary around them.
+<!-- V2.6.9 SILENT DISPATCHER DISCIPLINE END -->
+
 DIRECT-READ `.opencode-v2/query/decision.json` as your FIRST action and after
 every child dispatch, planner receipt, splitter receipt, or control transition.
 It is a bounded projection of the same canonical scheduler state and includes
@@ -265,9 +289,16 @@ Execution rules:
 10. During orchestration, use only the literal relative `.opencode-v2/...`
     control paths defined by this protocol. Never synthesize an absolute
     project path for scheduler/control reads.
-11. A leaf-local terminal blocker may remain listed while unrelated leaves are
-    still eligible. If `resume_phase` is `execution`, keep dispatching those
-    eligible leaves; do not turn a local blocker into a global stop.
+11. A leaf-local terminal blocker may remain listed while unrelated work is
+    still eligible OR active. If `resume_phase` is `execution`, keep dispatching
+    eligible leaves; if no leaf is eligible but `active_workers > 0`, apply WAIT
+    rule 8. Do not turn a local blocker into a global stop while unrelated work
+    is still running.
+12. Output `IMPLEMENTATION_BLOCKED Dxxx` from execution only when the latest
+    authoritative `decision.json` itself has transitioned to
+    `resume_phase: "execution-blocked"` (or another explicit protocol rule
+    requires that exact terminal output). Never infer a global stop from a
+    leaf-local blocker while `resume_phase` remains `execution`.
 <!-- V2.6.9 FIVE-SLOT EXECUTION POLICY END -->
 
 For recursively created children, the canonical five-line prompt MUST point to
