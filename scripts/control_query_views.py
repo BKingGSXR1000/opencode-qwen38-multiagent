@@ -308,6 +308,33 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
 
     plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
     reference = snapshot.get("reference") if isinstance(snapshot.get("reference"), dict) else {}
+    acceptance = snapshot.get("acceptance") if isinstance(snapshot.get("acceptance"), dict) else {}
+
+    acceptance_complete=bool(acceptance.get("complete"))
+    acceptance_next_action="ready" if acceptance_complete else "fresh"
+    if not acceptance_complete and project:
+        guard_errors=Path(project)/".opencode-v2"/"ACCEPTANCE.guard-errors.txt"
+        try:
+            if guard_errors.exists() and guard_errors.read_text(errors="replace").strip():
+                acceptance_next_action="repair"
+        except OSError:
+            pass
+
+    reference_validation_state=(
+        "not-required"
+        if str(reference.get("policy") or "")!="external-required"
+        else "pending"
+    )
+    if project and str(reference.get("policy") or "")=="external-required":
+        gate_path=Path(project)/".opencode-v2"/"reference-validation-gate.json"
+        try:
+            gate=json.loads(gate_path.read_text())
+        except (OSError,json.JSONDecodeError):
+            gate={}
+        if isinstance(gate,dict):
+            candidate=str(gate.get("state") or "")
+            if candidate in {"pending","ready","blocked","not-required","not-applicable"}:
+                reference_validation_state=candidate
 
     plan_complete=bool(plan.get("complete"))
     plan_blocked=bool(plan.get("blocked"))
@@ -330,7 +357,11 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
 
     decision = {
         **base,
-        "acceptance_complete": bool((snapshot.get("acceptance") or {}).get("complete")),
+        "acceptance_complete": acceptance_complete,
+        "acceptance": {
+            "complete": acceptance_complete,
+            "next_action": acceptance_next_action,
+        },
         "reference": {
             "policy": str(reference.get("policy") or "unknown"),
             "foundation_state": str(reference.get("foundation_state") or "not-applicable"),
@@ -338,6 +369,9 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
             "max_attempts": int(reference.get("max_attempts") or 0),
             "productive_sessions": int(reference.get("productive_sessions") or 0),
             "stagnant_tail": int(reference.get("stagnant_tail") or 0),
+        },
+        "reference_validation": {
+            "state": reference_validation_state,
         },
         "plan": {
             "complete": plan_complete,
@@ -496,6 +530,10 @@ def _selftest():
     views, leaves = build_query_views(snapshot, manifest, source)
     assert views["decision.json"]["eligible"] == ["D003"]
     assert views["decision.json"]["eligible_roles"] == {"D003": "feature-builder"}
+    assert views["decision.json"]["acceptance"] == {
+        "complete": True,
+        "next_action": "ready",
+    }
     assert views["decision.json"]["reference"] == {
         "policy": "external-required",
         "foundation_state": "ready",

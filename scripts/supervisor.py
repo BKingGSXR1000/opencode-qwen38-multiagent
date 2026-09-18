@@ -31,6 +31,7 @@ from worker_sandbox import (
 )
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 from control_query_views import materialize_control_query_views
+from deterministic_dispatch import select_actions as deterministic_select_actions
 from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
     visible_progress_marker,
@@ -98,6 +99,7 @@ root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_lau
 verify_wait_log_state={}
 backend_sampler=BackendTelemetrySampler(ROOT)
 watchdog_telemetry_last={}
+deterministic_shadow_last_state_version=""
 
 ROOT_CONTINUATION_PROMPT="""Continue orchestration for this project.
 
@@ -2072,6 +2074,7 @@ def sync_control_status_snapshot():
             atomic_write_text(path,rendered)
         manifest=(load_manifest() if payload.get("plan",{}).get("complete") else {})
         materialize_control_query_views(PROJECT,payload,manifest,rendered)
+        deterministic_shadow_observe()
         return payload
     except Exception as exc:
         payload=control_state_error_payload(exc)
@@ -2082,11 +2085,44 @@ def sync_control_status_snapshot():
             log(f"CONTROL_STATUS_ERROR_WRITE_FAILED source={exc!r} write={write_exc!r}")
         try:
             materialize_control_query_views(PROJECT,payload,{},rendered)
+            deterministic_shadow_observe()
         except Exception as query_exc:
             log(f"CONTROL_QUERY_VIEW_WRITE_FAILED source={exc!r} query={query_exc!r}")
         log(f"CONTROL_STATUS_SNAPSHOT_ERROR {exc!r}")
         return payload
 # V2.6.9 DURABLE CONTROL STATUS SNAPSHOT END
+
+def deterministic_shadow_observe():
+    global deterministic_shadow_last_state_version
+    if not PROJECT:
+        return []
+    if str(os.environ.get("V2_DETERMINISTIC_SHADOW","1")).strip().lower() in {"0","false","no","off"}:
+        return []
+    path=Path(PROJECT)/".opencode-v2/query/decision.json"
+    try:
+        decision=load_json_object(path,label="deterministic shadow decision")
+        version=str(decision.get("state_version") or "")
+        if not version or version==deterministic_shadow_last_state_version:
+            return []
+        actions=deterministic_select_actions(decision)
+        payload={
+            "owner":"supervisor",
+            "protocol":"v2-deterministic-shadow-v1",
+            "state_version":version,
+            "resume_phase":str(decision.get("resume_phase") or ""),
+            "actions":actions,
+            "observed_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        }
+        atomic_write_json(Path(PROJECT)/".opencode-v2/query/deterministic-shadow.json",payload)
+        compact=json.dumps(actions,sort_keys=True,separators=(",",":"))
+        log(f"DETERMINISTIC_SHADOW state={version} phase={payload['resume_phase']} actions={compact}")
+        csv("DETERMINISTIC_SHADOW","","supervisor",
+            f"state={version} phase={payload['resume_phase']} actions={compact}")
+        deterministic_shadow_last_state_version=version
+        return actions
+    except Exception as exc:
+        log(f"DETERMINISTIC_SHADOW_ERROR {exc!r}")
+        return []
 
 def ready_info(did):
     return state_ready_info(PROJECT,did) if PROJECT and did else {}
