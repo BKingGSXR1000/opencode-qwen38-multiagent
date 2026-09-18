@@ -1774,11 +1774,13 @@ def normalized_state_snapshot(project):
     if data.get("resume_phase")=="execution-blocked":
         if not clean and (active_ids or eligible_exists):
             data["resume_phase"]="execution"
-        elif eligible_exists and local_blockers_only:
+        elif (active_ids or eligible_exists) and local_blockers_only:
             data["resume_phase"]="execution"
             log(
                 "STATE_LOCAL_BLOCKER_CONTINUE "
-                f"blockers={','.join(str(x.get('deliverable') or '') for x in clean)}"
+                f"blockers={','.join(str(x.get('deliverable') or '') for x in clean)} "
+                f"active={','.join(sorted(active_ids)) or 'none'} "
+                f"eligible={str(bool(eligible_exists)).lower()}"
             )
 
     # Reference foundation is a scheduler precondition, not a root-model memory
@@ -5660,6 +5662,25 @@ def worker_behavior_abort_reason(reason):
     )
     return reason if reason.startswith(prefixes) else ""
 
+
+def classify_post_session_failure(did,detail,execution):
+    """Classify a terminal implementation result from authoritative contract state.
+
+    Missing declared output is worker failure, not a bad plan. `bad-plan` is
+    reserved for an actually unusable contract: unsafe/missing Verify or no
+    concrete owned artifact path at all.
+    """
+    if str(detail or "").startswith("verify-command-unsafe:"):
+        return "bad-plan"
+    if detail=="verify-command-missing" and not execution:
+        return "bad-plan"
+    if detail=="owned-artifacts-missing" and not execution:
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        if not owned_artifact_paths(leaf):
+            return "bad-plan"
+    return "genuine"
+
+
 def reconcile_idle_implementation_session(sid,agent):
     if sid in post_finalize_seen:
         return
@@ -5801,14 +5822,8 @@ def reconcile_idle_implementation_session(sid,agent):
                         f"detail={detail} outcome={outcome}"
                     )
                 else:
-                    classification=(
-                        "bad-plan"
-                        if detail.startswith("verify-command-unsafe:")
-                        or (
-                            detail in {"verify-command-missing","owned-artifacts-missing"}
-                            and not meaningful_worker_execution(sid,did)
-                        )
-                        else "genuine"
+                    classification=classify_post_session_failure(
+                        did,detail,execution
                     )
                     recorded,outcome=record_leaf_failure(
                         did,detail,classification
