@@ -70,6 +70,7 @@ MAX_PLANNER_RESTARTS=3
 ATTEMPT_LEDGER_PROTOCOL="v2-attempt-ledger-v1"
 SPLIT_PROPOSAL_PROTOCOL="v2-task-split-proposal-v2"
 SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL="v2-split-parent-contract-invalid-v1"
+VERIFY_EVIDENCE_PROTOCOL="v2-supervisor-verify-evidence-v1"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
@@ -218,6 +219,16 @@ def _next_ordinal_word(value):
     return {4:"fifth",6:"seventh"}.get(int(value),f"{int(value)+1}th")
 
 
+def verify_reporting_rule():
+    return (
+        "\n\nEXACT VERIFY REPORTING:\n"
+        "Only report or write `exact Verify passed` when you ran the context packet's "
+        "verify_command UNCHANGED and that exact command exited 0. Any modified, "
+        "equivalent, diagnostic, or smoke check must be labeled `noncanonical check`; "
+        "never claim it proves the canonical Verify. Supervisor Verify evidence is authoritative."
+    )
+
+
 def implementation_runtime_prompt(did,agent):
     """Deterministically enrich the canonical child-visible prompt."""
     base=implementation_prompt(did)
@@ -250,7 +261,7 @@ def implementation_runtime_prompt(did,agent):
             "When sufficient, write exact HANDOFF_READY: true, run the exact Verify command, "
             "persist the result, and return. Temporary files do not count."
         )
-        return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])
+        return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])+verify_reporting_rule()
 
     owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
     if agent not in READ_ONLY_SPLIT_ROLES and owned:
@@ -265,9 +276,9 @@ def implementation_runtime_prompt(did,agent):
             "correct and you are finalizing the handoff. A non-writing tool in WRITE-ONLY "
             "state causes deterministic session retirement."
         )
-        return base+gate
+        return base+gate+verify_reporting_rule()
 
-    return base
+    return base+verify_reporting_rule()
 
 def recursive_split_enabled():
     return load_manifest().get("recursive_split_protocol") == RECURSIVE_SPLIT_PROTOCOL
@@ -595,12 +606,24 @@ def split_request(did):
 
     failures=entry.get("failure_history",[]) if isinstance(entry,dict) else []
     compact=[]
+    failed_attempt_ids=set()
     for item in failures[-2:]:
         if isinstance(item,dict):
-            compact.append({
+            row={
                 k:item.get(k)
                 for k in ("attempt","classification","reason","timestamp")
-            })
+            }
+            compact.append(row)
+            try:
+                failed_attempt_ids.add(int(item.get("attempt") or 0))
+            except (TypeError,ValueError):
+                pass
+    verify_evidence=load_supervisor_verify_evidence(did)
+    split_verify_evidence=[
+        item for item in verify_evidence.get("entries",[])
+        if isinstance(item,dict)
+        and int(item.get("attempt") or 0) in failed_attempt_ids
+    ][-2:]
     progress_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
     try:
         progress_text=progress_path.read_text(errors="replace")[:4000]
@@ -633,7 +656,14 @@ def split_request(did):
         "durable_progress":{
             "path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),
             "contents":progress_text,
+            "authority":"worker-non-authoritative-for-canonical-verify",
         },
+        "supervisor_verify_evidence":split_verify_evidence,
+        "evidence_precedence":(
+            "supervisor_verify_evidence is authoritative for whether the exact "
+            "canonical parent Verify ran, its exit code, stdout, and stderr. "
+            "durable_progress is worker-authored and MUST NOT override it."
+        ),
         "existing_artifacts":[item for item in parent_owned if (Path(PROJECT)/item).exists()],
         "artifact_inventory":_split_artifact_inventory(parent_owned),
         "ownership_items":parent_owned,
@@ -645,6 +675,12 @@ def split_request(did):
                 item.get("classification")=="genuine"
                 and _split_failure_is_verification_related(item.get("reason"))
                 for item in compact if isinstance(item,dict)
+            ),
+            "parent_verify_invalid_precedence":(
+                "If supervisor_verify_evidence shows the parent verify_command itself "
+                "is intrinsically invalid, contradictory, or non-verifying, return "
+                "v2-split-parent-contract-invalid-v1. This takes precedence over "
+                "verification_recovery_allowed and writer+tester recovery."
             ),
             "rule":(
                 "Split must materially reduce executable work: partition owned "
@@ -2161,6 +2197,76 @@ def _inside_any(path,items):
     return any(path==item or path.startswith(item.rstrip("/")+"/") for item in items)
 
 
+def verify_evidence_path(did):
+    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.verify-evidence.json"
+
+
+def _bounded_process_text(value, limit=4000):
+    if value is None:
+        return ""
+    if isinstance(value,bytes):
+        value=value.decode("utf-8","replace")
+    return str(value)[:limit]
+
+
+def load_supervisor_verify_evidence(did):
+    default={
+        "owner":"supervisor",
+        "protocol":VERIFY_EVIDENCE_PROTOCOL,
+        "deliverable":did,
+        "entries":[],
+    }
+    path=verify_evidence_path(did)
+    if not path.exists():
+        return default
+    data=load_json_object(path,label=f"verify evidence {did}")
+    if (
+        data.get("owner")!="supervisor"
+        or data.get("protocol")!=VERIFY_EVIDENCE_PROTOCOL
+        or data.get("deliverable")!=did
+        or not isinstance(data.get("entries"),list)
+    ):
+        raise StateCorruptionError(f"verify evidence {did} is invalid")
+    return data
+
+
+def persist_supervisor_verify_evidence(did,sid,command,checked,detail,error=""):
+    attempt=attempt_sequence_for_session(sid,did) if sid else 0
+    if not attempt:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+    item={
+        "attempt":int(attempt or 0),
+        "session":str(sid or ""),
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        "command":str(command or "")[:3000],
+        "executed":checked is not None,
+        "exit_code":(
+            int(getattr(checked,"returncode"))
+            if checked is not None and getattr(checked,"returncode",None) is not None
+            else None
+        ),
+        "result":str(detail or "")[:1000],
+        "stdout":_bounded_process_text(getattr(checked,"stdout",None)),
+        "stderr":_bounded_process_text(getattr(checked,"stderr",None)),
+        "error":str(error or "")[:1000],
+    }
+    data=load_supervisor_verify_evidence(did)
+    entries=[
+        row for row in data.get("entries",[])
+        if not (
+            isinstance(row,dict)
+            and int(row.get("attempt") or 0)==item["attempt"]
+            and str(row.get("session") or "")==item["session"]
+        )
+    ]
+    entries.append(item)
+    data["entries"]=entries[-6:]
+    data["latest"]=item
+    atomic_write_json(verify_evidence_path(did),data)
+    return item
+
+
 def run_verify_fail_closed(command,runner=subprocess.run,session=""):
     """Run leaf verification under fail-fast shell semantics.
 
@@ -2192,9 +2298,12 @@ def run_verify_fail_closed(command,runner=subprocess.run,session=""):
             return checked,"verified"
 
     try:
+        kwargs={"cwd":PROJECT,"timeout":240}
+        if runner is subprocess.run:
+            kwargs.update({"capture_output":True,"text":True})
         checked=runner(
             ["/bin/bash","-euo","pipefail","-c",command],
-            cwd=PROJECT,timeout=240,
+            **kwargs,
         )
     except TypeError:
         # Small test doubles may only accept the historical signature.
@@ -2962,15 +3071,24 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
     command=(verify_command_override or leaf.get("verify_command") or "").strip()
     command_errors=validate_verify_command(command)
     if command_errors:
+        detail="verify-command-unsafe:"+command_errors[0]
+        persist_supervisor_verify_evidence(
+            did,sid,command,None,detail,error=command_errors[0]
+        )
         clear_verify_wait(did)
-        return False,"verify-command-unsafe:"+command_errors[0]
+        return False,detail
 
     before_verify=project_fingerprints()
     try:
         checked,detail=run_verify_fail_closed(command,runner=runner,session=sid)
     except (OSError,subprocess.TimeoutExpired) as e:
+        detail=f"verification-error-{type(e).__name__}"
+        persist_supervisor_verify_evidence(
+            did,sid,command,None,detail,error=str(e)
+        )
         clear_verify_wait(did)
-        return False,f"verification-error-{type(e).__name__}"
+        return False,detail
+    persist_supervisor_verify_evidence(did,sid,command,checked,detail)
     if detail!="verified":
         clear_verify_wait(did)
         return False,detail

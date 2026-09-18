@@ -97,20 +97,35 @@ children that inherited contract remains binding. For progress-only child #1,
 the supervisor deliberately marks the parent outcome as context-only and the
 bounded child scope as the complete executable obligation for that child.
 
-### Parent Verify contradiction recovery
+### Parent Verify decision precedence — mandatory
 
-The parent `Verify command` is executable evidence, not permission to weaken the
-parent's Outcome, Acceptance IDs, or Done-when obligation. If the parent Verify
-command itself appears inconsistent with those higher-level obligations (for
-example a numeric range in Verify contradicts the Done-when range), make child
-#2 a read-only `tester` whenever the ownership partition permits it. That tester
-must independently verify the FULL inherited parent semantics using a corrected,
-safe command derived from the parent contract. Do not copy the known-bad literal
-merely to make the child fail in the same way. The supervisor may use such an
-already-READY read-only tester as a narrowly-scoped recovery verifier only after
-the original parent Verify fails; it will re-run the tester command itself before
-creating parent readiness.
+The request contains `supervisor_verify_evidence`, produced by the supervisor
+from the EXACT canonical parent Verify. It records command, attempt, exit code,
+stdout, stderr, and result. It is authoritative. `durable_progress` is
+worker-authored and MUST NOT override supervisor evidence about whether the
+canonical Verify ran or passed.
 
+Use this exact decision order:
+
+1. If the parent `verify_command` itself is intrinsically invalid,
+   contradictory to `parent_contract`, non-verifying, or fails because of a
+   defect in the command itself (for example invalid quoting/syntax, an
+   intrinsically wrong module/path invocation, or a range that contradicts the
+   parent contract), return ONLY `v2-split-parent-contract-invalid-v1`.
+   Emit NO child proposals.
+2. This parent-contract-invalid rule has absolute precedence even when
+   `decomposition_policy.verification_recovery_allowed` is true.
+3. Only when the canonical parent Verify itself is valid and the supervisor
+   evidence instead shows that the implementation failed a valid check may
+   verification recovery use writer -> tester, subject to the normal shape
+   rules below.
+4. Never "repair" a bad parent Verify by silently substituting corrected child
+   Verify commands. Parent-contract repair belongs to the implementation
+   planner.
+
+A worker may report that an equivalent or modified check passed. Treat that as
+noncanonical evidence only. It cannot cancel or outweigh a failed exact
+supervisor Verify.
 
 ### Structured filesystem intent — mandatory
 
@@ -147,6 +162,9 @@ reproduce the failed writer unchanged and merely add a tester unless the split
 request explicitly says:
 
 `decomposition_policy.verification_recovery_allowed: true`
+
+That flag NEVER authorizes writer -> tester when the parent Verify itself is
+invalid. In that case the mandatory parent-contract-invalid protocol above wins.
 
 The supervisor deterministically accepts only these shapes:
 
@@ -227,8 +245,10 @@ the supervisor alone derives child IDs.
 ### Read-only verification child
 
 A split may legitimately need one writer plus one independent verifier ONLY
-when `decomposition_policy.verification_recovery_allowed` is true. A single
-owned artifact by itself is NOT a reason to use writer+tester; for runtime,
+when `decomposition_policy.verification_recovery_allowed` is true AND the
+authoritative supervisor evidence does not show that the parent Verify itself
+is invalid. A single owned artifact by itself is NOT a reason to use
+writer+tester; for runtime,
 progress, ownership, acquisition, or step-limit failures use the progress
 handoff -> writer shape above.
 
