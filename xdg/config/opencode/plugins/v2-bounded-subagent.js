@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -7,6 +7,32 @@ export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 
 const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/worker_sandbox.py";
 const FINALIZE_ACCEPTANCE = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/finalize-acceptance.py";
+const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
+const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
+const deterministicTransportProbeRoots = new Set();
+
+function isDeterministicTransportProbe(args) {
+  return (
+    args &&
+    typeof args === "object" &&
+    args.command === DETERMINISTIC_TRANSPORT_PROBE_COMMAND &&
+    args.agent === DETERMINISTIC_TRANSPORT_PROBE_AGENT
+  );
+}
+
+function transportProbeLog(directory, payload) {
+  try {
+    const root = join(directory, ".opencode-v2");
+    mkdirSync(root, { recursive: true });
+    appendFileSync(
+      join(root, "transport-probe.jsonl"),
+      JSON.stringify({ time: new Date().toISOString(), ...payload }) + "\n",
+      "utf8",
+    );
+  } catch {
+    // Probe telemetry must never affect normal tool execution.
+  }
+}
 // V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 const MUTATION_TOOLS = new Set(["edit", "write", "apply_patch", "patch", "multiedit", "bash", "shell", "execute"]);
 
@@ -347,6 +373,14 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   // Stamp OpenCode V2's deterministic request kind before provider dispatch.
   const modelRequest = await api.session.hook("model.request", async (event) => {
     markRequestPurpose(event);
+    const sessionID = hookSessionID(event);
+    if (sessionID && deterministicTransportProbeRoots.has(sessionID)) {
+      transportProbeLog(directory, {
+        event: "root-model-request",
+        session: sessionID,
+        kind: String(event?.kind || ""),
+      });
+    }
   });
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
@@ -360,6 +394,19 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     // input/output hook shape.
     const args = hookArgs(event, output);
     const agent = args.agent;
+    if (isDeterministicTransportProbe(args)) {
+      const sessionID = hookSessionID(event);
+      if (!sessionID) throw new Error("TRANSPORT_PROBE_DENY missing parent session id");
+      deterministicTransportProbeRoots.add(sessionID);
+      args.background = true;
+      transportProbeLog(directory, {
+        event: "task-before",
+        session: sessionID,
+        call: hookCallID(event),
+        agent: String(agent || ""),
+        background: true,
+      });
+    }
     const prompt = args.prompt;
     if (agent === "acceptance-validator") {
       execFileSync("python3", [FINALIZE_ACCEPTANCE, "--prepare", directory], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -411,7 +458,17 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
     const args = hookArgs(event, output);
     const rawResult = toolResultText(result);
+    const transportProbe = isDeterministicTransportProbe(args);
     const splitterParent = args?.agent === "task-splitter" ? splitParent(args) : "";
+    if (transportProbe) {
+      transportProbeLog(directory, {
+        event: "task-after",
+        session: hookSessionID(event),
+        call: hookCallID(event),
+        child: String(result?.metadata?.sessionID || result?.metadata?.sessionId || ""),
+        background: result?.metadata?.background === true,
+      });
+    }
     if (splitterParent) {
       // The completion event is the deterministic validation trigger. The
       // supervisor reads only the splitter's durable proposal and records an
@@ -426,7 +483,14 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       }
     }
     let receipt;
-    if (args?.agent === "acceptance-validator") {
+    if (transportProbe) {
+      const child = String(result?.metadata?.sessionID || result?.metadata?.sessionId || "unknown");
+      receipt = [
+        "V2_NATIVE_TRANSPORT_PROBE_STARTED",
+        `CHILD: ${child}`,
+        `BACKGROUND: ${result?.metadata?.background === true}`,
+      ].join("\n");
+    } else if (args?.agent === "acceptance-validator") {
       const raw = rawResult.trim();
       const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
       if (!modelPass) {
@@ -454,6 +518,26 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
       parentResultChars: receipt.length,
       fullOutputStorage: "session_history",
     };
+    if (transportProbe) {
+      const sessionID = hookSessionID(event);
+      try {
+        await interruptDeniedSession(api, sessionID);
+        transportProbeLog(directory, {
+          event: "root-interrupt",
+          session: sessionID,
+          call: hookCallID(event),
+          status: "ok",
+        });
+      } catch (error) {
+        transportProbeLog(directory, {
+          event: "root-interrupt",
+          session: sessionID,
+          call: hookCallID(event),
+          status: "error",
+          detail: String(error?.message || error).slice(0, 500),
+        });
+      }
+    }
     // Batch 8: supervisor Verify still needs this exact attempt's
     // ephemeral runtime environment. Terminal cleanup is supervisor-owned.
   });
