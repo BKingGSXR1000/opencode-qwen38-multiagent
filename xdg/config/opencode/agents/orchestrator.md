@@ -57,6 +57,23 @@ During non-terminal orchestration, act with tool calls only.
   terminal result. Do not add commentary around them.
 <!-- V2.6.9 SILENT DISPATCHER DISCIPLINE END -->
 
+<!-- V2.6.9 ROOT READ FIREWALL BEGIN -->
+## Mechanical root read firewall
+
+During `execution`, `recursive-split`, and `execution-blocked`, the root read
+surface is mechanically restricted. The only legal `read` targets are:
+- `.opencode-v2/query/decision.json`
+- `.opencode-v2/query/leaves/Dxxx.json` for an explicit leaf-specific protocol
+  check that decision.json cannot answer.
+
+Do not read implementation-plan files, control-status.json, progress files,
+split-status/request/proposal files, reference work/evidence, directories, or
+project artifacts in those phases. Do not retry a denied read. Do not synthesize
+a different absolute project path. A correct absolute path supplied because of
+the OpenCode read-tool schema is canonicalized against the exact project root;
+all other paths are denied.
+<!-- V2.6.9 ROOT READ FIREWALL END -->
+
 DIRECT-READ `.opencode-v2/query/decision.json` as your FIRST action and after
 every child dispatch, planner receipt, splitter receipt, or control transition.
 It is a bounded projection of the same canonical scheduler state and includes
@@ -80,10 +97,16 @@ once and stop.
 
 FRESH ROOT CONTINUATION
 When this is a continuation session, do not ask for or reconstruct any previous
-conversation. Read `.opencode-v2/CONTROL_CONTRACT.md` and `ACCEPTANCE.md`.
-During planning, use `IMPLEMENTATION_PLAN.structured.json` and
-`IMPLEMENTATION_PLAN.repair.json`; read generated `IMPLEMENTATION_PLAN.md` only
-after its ready sentinel exists. Then direct-read `.opencode-v2/query/decision.json`.
+conversation. FIRST direct-read `.opencode-v2/query/decision.json`.
+
+If its `resume_phase` is `execution`, `recursive-split`, or
+`execution-blocked`, continue only from the bounded query surface above. Do not
+reread CONTROL_CONTRACT, ACCEPTANCE, plan artifacts, progress, split state, or
+reference files.
+
+For other phases, read only the phase-required durable inputs. During planning,
+use `IMPLEMENTATION_PLAN.structured.json` and `IMPLEMENTATION_PLAN.repair.json`;
+read generated `IMPLEMENTATION_PLAN.md` only after its ready sentinel exists.
 Continue from durable state only. Never redispatch a ready Dxxx; the supervisor
 ledger remains the sole authority for attempt claims.
 

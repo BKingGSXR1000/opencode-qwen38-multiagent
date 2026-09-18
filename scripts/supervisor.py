@@ -154,6 +154,85 @@ def csv(kind,sid="",agent="",detail=""):
 
 def db_connect(): return sqlite3.connect(f"file:{DB}?mode=ro",uri=True,timeout=1)
 
+ROOT_READ_GUARDED_PHASES={"execution","recursive-split","execution-blocked"}
+ROOT_READ_LEAF_QUERY_RE=re.compile(
+    r"^\.opencode-v2/query/leaves/D\d{3}(?:-[AB](?:[12])?)?\.json$"
+)
+
+
+def root_read_session_identity(sid):
+    # Return whether SID is this project's primary orchestrator root session.
+    if not sid:
+        return False,"missing-session"
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT parent_id,coalesce(agent,''),coalesce(directory,'') "
+            "FROM session_v2 WHERE id=?",
+            (sid,),
+        ).fetchone()
+        con.close()
+    except Exception as exc:
+        # Efficiency guard: don't break child reads on transient DB failure.
+        return False,f"session-db-unavailable:{type(exc).__name__}"
+    if not row:
+        return False,"session-missing"
+    parent_id,agent,directory=row
+    if parent_id is not None:
+        return False,"child-session"
+    if agent!="orchestrator":
+        return False,f"non-orchestrator:{agent or 'unknown'}"
+    try:
+        if PROJECT and Path(directory).resolve()!=Path(PROJECT).resolve():
+            return False,"different-project"
+    except Exception:
+        return False,"invalid-session-directory"
+    return True,"root-orchestrator"
+
+
+def root_read_relative_path(project,raw_path):
+    # Canonicalize one OpenCode read path against the exact project root.
+    raw=str(raw_path or "").strip()
+    if not raw:
+        return "","missing-filePath"
+    try:
+        root=Path(project).resolve()
+        candidate=Path(raw)
+        if not candidate.is_absolute():
+            candidate=root/candidate
+        candidate=candidate.resolve()
+        rel=candidate.relative_to(root).as_posix()
+    except Exception:
+        return "","outside-project"
+    return rel,"canonical"
+
+
+def root_read_path_policy(project,phase,tool_args):
+    # Bound root reads during implementation-control phases.
+    if str(phase or "") not in ROOT_READ_GUARDED_PHASES:
+        return "na",f"phase={phase or 'unknown'}"
+    args=tool_args if isinstance(tool_args,dict) else {}
+    rel,detail=root_read_relative_path(project,args.get("filePath"))
+    if not rel:
+        return "deny",detail
+    if rel==".opencode-v2/query/decision.json":
+        return "allow",rel
+    if ROOT_READ_LEAF_QUERY_RE.fullmatch(rel):
+        return "allow",rel
+    return "deny",f"path-not-allowed:{rel}"
+
+
+def root_control_read_state(sid,tool_args):
+    # Apply the read firewall only to the primary root orchestrator.
+    is_root,identity=root_read_session_identity(sid)
+    if not is_root:
+        return "na",identity
+    snapshot=normalized_state_snapshot(PROJECT)
+    phase=str(snapshot.get("resume_phase") or "") if isinstance(snapshot,dict) else ""
+    state,detail=root_read_path_policy(PROJECT,phase,tool_args)
+    return state,f"phase={phase or 'unknown'} {detail}"
+
+
 def first_user_text_db(sid):
     try:
         con=db_connect(); row=con.execute("SELECT data FROM session_message WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1",(sid,)).fetchone(); con.close()
@@ -5993,6 +6072,7 @@ def main():
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
     ap.add_argument("--render-runtime-prompt")
+    ap.add_argument("--root-read-check")
     ap.add_argument("--early-write-check")
     ap.add_argument("--tool-name",default="")
     ap.add_argument("--tool-args-b64",default="")
@@ -6003,6 +6083,27 @@ def main():
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     args,unknown=ap.parse_known_args()
+    if args.root_read_check:
+        if unknown or not args.project:
+            raise SystemExit("root read check requires --project --root-read-check")
+        PROJECT=args.project
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(args.tool_args_b64).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=root_control_read_state(args.root_read_check,tool_args)
+        if state=="deny":
+            raise SystemExit(
+                f"ROOT_READ_DENY session={args.root_read_check} {detail}"
+            )
+        print(
+            f"ROOT_READ_{state.upper()} "
+            f"session={args.root_read_check} {detail}"
+        )
+        return
     if args.confirm_plugin_interrupt:
         if unknown or not args.project:
             raise SystemExit("plugin interrupt confirmation requires --project")

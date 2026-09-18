@@ -142,6 +142,26 @@ function supervisor(directory, args) {
   ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }
 
+function guardRootControlRead(directory, event, output) {
+  if (String(event?.tool || "") !== "read") return;
+  const sessionID = hookSessionID(event);
+  if (!sessionID) return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  try {
+    supervisor(directory, [
+      "--root-read-check", sessionID,
+      "--tool-args-b64", payload,
+    ]);
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    if (detail.includes("ROOT_READ_DENY")) {
+      throw new Error(detail);
+    }
+    throw new Error(`ROOT_READ_GUARD_ERROR ${detail || "unknown"}`);
+  }
+}
+
 const earlyWriteSatisfiedSessions = new Set();
 
 export async function interruptDeniedSession(api, sessionID) {
@@ -330,6 +350,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   });
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
+    guardRootControlRead(directory, event, output);
     guardSplitterToolBoundary(directory, event, output);
     guardProgressHandoff(directory, event, output);
     await guardEarlyWrite(directory, event, output, api);
