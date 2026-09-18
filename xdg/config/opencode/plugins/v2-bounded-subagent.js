@@ -292,7 +292,8 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
   const progressPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
     ? join(directory, ".opencode-v2", "work", `${did}.progress.md`)
     : "";
-  const termination = metadata?.background === true
+  const backgroundRunning = metadata?.background === true;
+  const termination = backgroundRunning
     ? "background-running"
     : metadata?.status || (original.length > TARGET_MAX_CHILD_RESULT_CHARS ? "output_limited" : "completed");
   const lines = [
@@ -302,6 +303,11 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
     `ATTEMPT: ${attemptFor(directory, did, childSessionID)}`,
     `READY: ${readyPath ? fileStatus(readyPath) === "present" : false}`,
     `TERMINATION: ${termination}`,
+    ...(backgroundRunning ? [
+      "WAIT_ACTION: END_CURRENT_ROOT_TURN_IMMEDIATELY",
+      "DO_NOT_POLL: true",
+      "WAKEUP: OpenCode will inject the background completion/cancellation event. On the next root turn, direct-read .opencode-v2/query/decision.json once.",
+    ] : []),
     `PROGRESS_FILE: ${progressPath ? fileStatus(progressPath) : "unknown"}`,
     "OWNED_ARTIFACTS:",
     ...ownedArtifacts(directory, did),
@@ -488,6 +494,21 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
     Object.prototype.hasOwnProperty.call(unknownArgs, "background")
   ) {
     throw new Error("unknown deliverable was incorrectly forced to background mode");
+  }
+
+  const backgroundReceipt = boundedChildResult({
+    directory: "/tmp/v2-b3-selftest-missing-project",
+    args: { agent: "tester", prompt: "DELIVERABLE: D042" },
+    metadata: { background: true, sessionID: "ses-bg-selftest" },
+    original: "native background task started",
+  });
+  if (
+    !backgroundReceipt.includes("TERMINATION: background-running") ||
+    !backgroundReceipt.includes("WAIT_ACTION: END_CURRENT_ROOT_TURN_IMMEDIATELY") ||
+    !backgroundReceipt.includes("DO_NOT_POLL: true") ||
+    !backgroundReceipt.includes(".opencode-v2/query/decision.json once")
+  ) {
+    throw new Error("background receipt lost explicit no-poll/wakeup semantics");
   }
 
   console.log("v2-bounded-subagent selftest: OK");

@@ -243,16 +243,31 @@ Execution rules:
 4. The supervisor/plugin atomically preclaims each dispatch under the scheduler
    lock. A per-call denial such as `worker_slots_full`, duplicate reservation,
    or stale eligibility is authoritative and consumes no genuine attempt.
-5. After all tool receipts from the batch return, immediately direct-read
-   `.opencode-v2/query/decision.json` before any further dispatch.
-6. If exactly one slot/eligible leaf is available, launch exactly one child.
-7. If eligible leaves remain but `available_worker_slots == 0`, WAIT. They are
-   queued work, not blocked/failed work.
-8. If no leaf is currently eligible but `active_workers > 0`, WAIT for a child
-   transition; do not output `IMPLEMENTATION_BLOCKED`.
-9. A leaf-local terminal blocker may remain listed while unrelated leaves are
-   still eligible. If `resume_phase` is `execution`, keep dispatching those
-   eligible leaves; do not turn a local blocker into a global stop.
+5. Implementation `subagent` calls run as native OpenCode background children.
+   Their immediate tool receipt means "started", NOT "finished". After the
+   immediate receipts from one dispatch batch return, direct-read exactly the
+   relative path `.opencode-v2/query/decision.json` ONCE before deciding the
+   next action.
+6. If exactly one slot/eligible leaf is available in that snapshot, launch
+   exactly one child. If multiple slots/leaves are available, apply rule 2.
+7. WAIT has one exact meaning. If eligible leaves remain but
+   `available_worker_slots == 0`, make NO further tool/read calls in this
+   assistant turn. Return the exact bare text `WAIT` and end the turn.
+8. Likewise, if no leaf is currently eligible but `active_workers > 0`, make
+   NO further tool/read calls in this assistant turn. Return the exact bare
+   text `WAIT` and end the turn. Do not output `IMPLEMENTATION_BLOCKED`.
+9. While WAITing, NEVER poll `decision.json`, child sessions, progress files,
+   owned artifacts, directories, or filesystem state; NEVER sleep; NEVER retry
+   a read. OpenCode will inject a native background completion/cancellation
+   notification into this root session. When that notification creates the
+   next assistant turn, its FIRST action is one direct-read of the exact
+   relative path `.opencode-v2/query/decision.json`.
+10. During orchestration, use only the literal relative `.opencode-v2/...`
+    control paths defined by this protocol. Never synthesize an absolute
+    project path for scheduler/control reads.
+11. A leaf-local terminal blocker may remain listed while unrelated leaves are
+    still eligible. If `resume_phase` is `execution`, keep dispatching those
+    eligible leaves; do not turn a local blocker into a global stop.
 <!-- V2.6.9 FIVE-SLOT EXECUTION POLICY END -->
 
 For recursively created children, the canonical five-line prompt MUST point to
