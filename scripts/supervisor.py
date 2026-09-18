@@ -207,19 +207,44 @@ def root_read_relative_path(project,raw_path):
     return rel,"canonical"
 
 
+def root_read_tool_path(tool_args):
+    # OpenCode2 beta-19242 exposes read input as `path`; newer source uses
+    # `filePath`. Accept either spelling, but fail closed on ambiguity.
+    args=tool_args if isinstance(tool_args,dict) else {}
+    path_value=args.get("path")
+    file_value=args.get("filePath")
+
+    for key,value in (("path",path_value),("filePath",file_value)):
+        if value is not None and not isinstance(value,str):
+            return "",f"invalid-{key}-type:{type(value).__name__}"
+
+    path_value=(path_value or "").strip()
+    file_value=(file_value or "").strip()
+
+    if path_value and file_value and path_value!=file_value:
+        return "","ambiguous-path-keys"
+    if path_value:
+        return path_value,"path"
+    if file_value:
+        return file_value,"filePath"
+    return "","missing-path-argument"
+
+
 def root_read_path_policy(project,phase,tool_args):
     # Bound root reads during implementation-control phases.
     if str(phase or "") not in ROOT_READ_GUARDED_PHASES:
         return "na",f"phase={phase or 'unknown'}"
-    args=tool_args if isinstance(tool_args,dict) else {}
-    rel,detail=root_read_relative_path(project,args.get("filePath"))
+    raw_path,source=root_read_tool_path(tool_args)
+    if not raw_path:
+        return "deny",source
+    rel,detail=root_read_relative_path(project,raw_path)
     if not rel:
         return "deny",detail
     if rel==".opencode-v2/query/decision.json":
-        return "allow",rel
+        return "allow",f"{rel} arg={source}"
     if ROOT_READ_LEAF_QUERY_RE.fullmatch(rel):
-        return "allow",rel
-    return "deny",f"path-not-allowed:{rel}"
+        return "allow",f"{rel} arg={source}"
+    return "deny",f"path-not-allowed:{rel} arg={source}"
 
 
 def root_control_read_state(sid,tool_args):
