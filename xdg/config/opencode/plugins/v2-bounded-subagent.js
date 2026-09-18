@@ -10,6 +10,21 @@ const FINALIZE_ACCEPTANCE = "/home/bking/AI/opencode-qwen38-multiagent-v2/script
 const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
 const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
 const deterministicTransportProbeRoots = new Set();
+const deterministicTransportToolProbeCalls = new Set();
+const DETERMINISTIC_TRANSPORT_TOOL_TARGET = ".opencode-v2/transport-tool-target.txt";
+
+function isDeterministicTransportToolRead(args) {
+  if (!args || typeof args !== "object") return false;
+  const values = ["filePath", "file_path", "path", "filename"]
+    .map((key) => args[key])
+    .filter((value) => typeof value === "string")
+    .map((value) => value.replaceAll("\\", "/"));
+  return values.some((value) =>
+    value === DETERMINISTIC_TRANSPORT_TOOL_TARGET ||
+    value === "./" + DETERMINISTIC_TRANSPORT_TOOL_TARGET ||
+    value.endsWith("/" + DETERMINISTIC_TRANSPORT_TOOL_TARGET)
+  );
+}
 
 function taskAgent(args) {
   if (!args || typeof args !== "object") return "";
@@ -389,6 +404,17 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   });
 
   const before = await api.tool.hook("execute.before", async (event, output) => {
+    const probeArgs = hookArgs(event, output);
+    if (String(event?.tool || "") === "read" && isDeterministicTransportToolRead(probeArgs)) {
+      const key = `${hookSessionID(event)}:${hookCallID(event)}`;
+      deterministicTransportToolProbeCalls.add(key);
+      transportProbeLog(directory, {
+        event: "child-tool-before",
+        session: hookSessionID(event),
+        call: hookCallID(event),
+        tool: "read",
+      });
+    }
     guardRootControlRead(directory, event, output);
     guardSplitterToolBoundary(directory, event, output);
     guardProgressHandoff(directory, event, output);
@@ -460,6 +486,16 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
   });
   const after = await api.tool.hook("execute.after", async (event, output) => {
     const result = event?.result || output;
+    const probeKey = `${hookSessionID(event)}:${hookCallID(event)}`;
+    if (deterministicTransportToolProbeCalls.has(probeKey)) {
+      deterministicTransportToolProbeCalls.delete(probeKey);
+      transportProbeLog(directory, {
+        event: "child-tool-after",
+        session: hookSessionID(event),
+        call: hookCallID(event),
+        tool: String(event?.tool || ""),
+      });
+    }
     if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
     const args = hookArgs(event, output);
     const rawResult = toolResultText(result);
