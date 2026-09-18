@@ -1422,6 +1422,17 @@ def request_parent_contract_repair(did, payload, request):
             if not isinstance(entry,dict):
                 raise ValueError("missing attempt ledger entry for parent repair")
             changed=False
+            marker=entry.get("split_required")
+            try:
+                prior_generation=int(
+                    (marker.get("generation") if isinstance(marker,dict) else None)
+                    or request.get("generation")
+                    or 1
+                )
+            except (TypeError,ValueError):
+                raise StateCorruptionError(
+                    f"{did} split generation is invalid during parent contract repair"
+                )
             for item in entry.get("failure_history",[]) or []:
                 if (
                     isinstance(item,dict)
@@ -1431,9 +1442,15 @@ def request_parent_contract_repair(did, payload, request):
                     item["classification"]="bad-plan"
                     item["reclassified_by"]="runtime-parent-contract-repair"
                     changed=True
+            entry["split_rearm_after_contract_repair"]={
+                "generation":max(1,prior_generation),
+                "field":"verify_command",
+                "structured_key":key,
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            }
+            changed=True
             if "split_required" in entry:
                 entry.pop("split_required",None)
-                changed=True
             if changed:
                 save_attempts(data)
 
@@ -1447,6 +1464,100 @@ def request_parent_contract_repair(did, payload, request):
         f"{did} key={key} field=verify_command"
     )
     return True,"parent-contract-repair"
+
+
+def rearm_splits_after_parent_contract_repair():
+    # Recreate a split edge only after the repaired parent plan is finalized.
+    # The stale request embeds the old invalid Verify command, so it must stay
+    # suppressed until the repaired plan has again passed finalization.
+    if not PROJECT or not plan_ready():
+        return []
+
+    manifest=load_manifest()
+    leaves=manifest.get("leaves") if isinstance(manifest.get("leaves"),dict) else {}
+    rearmed=[]
+    changed=False
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entries=data.get("deliverables") if isinstance(data.get("deliverables"),dict) else {}
+            for did,entry in entries.items():
+                if not isinstance(entry,dict):
+                    continue
+                pending=entry.get("split_rearm_after_contract_repair")
+                if not isinstance(pending,dict):
+                    continue
+
+                leaf=leaves.get(did)
+                if not isinstance(leaf,dict):
+                    raise StateCorruptionError(
+                        f"{did} repaired parent is missing from finalized manifest"
+                    )
+
+                expected_key=str(pending.get("structured_key") or "")
+                actual_key=_structured_plan_symbolic_key(did)
+                if not expected_key or actual_key!=expected_key:
+                    raise StateCorruptionError(
+                        f"{did} structured key changed across parent contract repair "
+                        f"expected={expected_key!r} actual={actual_key!r}"
+                    )
+
+                if ready_info(did) or leaf_children(did):
+                    entry.pop("split_rearm_after_contract_repair",None)
+                    changed=True
+                    continue
+
+                history=entry.get("failure_history",[])
+                genuine=sum(
+                    1 for item in history
+                    if isinstance(item,dict)
+                    and item.get("classification")=="genuine"
+                ) if isinstance(history,list) else 0
+
+                handoff_only=bool(leaf.get("split_handoff_only"))
+                if (
+                    recursive_split_enabled()
+                    and genuine>=2
+                    and split_depth(did)<MAX_SPLIT_DEPTH
+                    and not handoff_only
+                ):
+                    try:
+                        prior_generation=int(pending.get("generation") or 1)
+                    except (TypeError,ValueError):
+                        raise StateCorruptionError(
+                            f"{did} pending repaired split generation is invalid"
+                        )
+                    generation=max(1,prior_generation)+1
+                    entry["split_required"]={
+                        "generation":generation,
+                        "reason":"genuine-failure-threshold-after-contract-repair",
+                        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                    }
+                    rearmed.append(did)
+
+                entry.pop("split_rearm_after_contract_repair",None)
+                changed=True
+
+            if changed:
+                save_attempts(data)
+
+    for did in rearmed:
+        ok,detail=split_request(did)
+        if not ok:
+            raise StateCorruptionError(
+                f"{did} repaired split rearm failed: {detail}"
+            )
+        log(
+            f"PARENT_CONTRACT_REPAIR_SPLIT_REARMED deliverable={did} "
+            f"detail={detail}"
+        )
+        csv(
+            "PARENT_CONTRACT_REPAIR_SPLIT_REARMED","", "supervisor",
+            f"{did} {detail}"
+        )
+
+    return rearmed
 
 
 def process_split_proposal(did, session="", require_proposal=False):
@@ -5291,7 +5402,10 @@ def control_guard(kind):
         if r.returncode!=0:
             detail=(r.stdout+r.stderr).strip().replace("\n"," | ")
             log(f"CONTROL_GUARD_INVALID kind={kind} detail={detail[:1600]}")
-        return r.returncode==0
+            return False
+        if kind=="plan":
+            rearm_splits_after_parent_contract_repair()
+        return True
     except Exception as e:
         log(f"CONTROL_GUARD_ERROR kind={kind} error={e!r}")
         return False
