@@ -73,7 +73,7 @@ SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL="v2-split-parent-contract-invalid-v1"
 VERIFY_EVIDENCE_PROTOCOL="v2-supervisor-verify-evidence-v1"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
-MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
+MAX_CONCURRENT_IMPLEMENTATION_WORKERS=5
 MAX_SPLITTER_ATTEMPTS=2
 SPLITTER_LEASE_SECONDS=600
 # execute.after can run before the child final text is durable in the session DB.
@@ -3543,7 +3543,7 @@ def validate_dispatch(agent,text,runtime=False):
     if ready_info(did): return did,"already_complete"
     return did,""
 
-# V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER BEGIN
+# V2.6.9 FIVE-SLOT IMPLEMENTATION SCHEDULER BEGIN
 def active_implementation_sessions(strict=False):
     """Return live implementation children; scheduler decisions fail closed."""
     if not PROJECT:
@@ -3597,7 +3597,7 @@ def available_implementation_slots(data=None, strict=False):
     active=len(active_implementation_sessions(strict=strict))
     reserved=reserved_dispatch_slot_count(data)
     return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved)
-# V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER END
+# V2.6.9 FIVE-SLOT IMPLEMENTATION SCHEDULER END
 
 def preclaim_attempt(agent,text,dispatch_token):
     """Atomically observe scheduler capacity and reserve one canonical attempt."""

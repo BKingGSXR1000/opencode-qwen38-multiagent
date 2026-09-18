@@ -218,10 +218,10 @@ status rather than trusting their prose.
 
 Use planned parallel-safe leaves to obtain useful C2 when possible.
 
-<!-- V2.6.9 THREE-SLOT EXECUTION POLICY BEGIN -->
-## Three-slot implementation scheduler
+<!-- V2.6.9 FIVE-SLOT EXECUTION POLICY BEGIN -->
+## Five-slot implementation scheduler
 
-Implementation concurrency is capped at **3 active implementation children**.
+Implementation concurrency is capped at **5 active implementation children**.
 
 `.opencode-v2/query/decision.json` returns the authoritative `scheduler` projection:
 - `max_concurrent_workers`
@@ -230,10 +230,10 @@ Implementation concurrency is capped at **3 active implementation children**.
 - `active_deliverables`
 
 Execution rules:
-1. Never have more than 3 implementation children active.
+1. Never have more than 5 implementation children active.
 2. When one authoritative status snapshot exposes multiple DISTINCT eligible
    leaves and `available_worker_slots > 1`, launch up to
-   `min(available_worker_slots, number_of_eligible_leaves, 3)` eligible children
+   `min(available_worker_slots, number_of_eligible_leaves, 5)` eligible children
    as separate `subagent` tool calls in the SAME assistant response. Do not wait
    for the first child to finish before issuing the other launches from that
    same snapshot.
@@ -253,7 +253,7 @@ Execution rules:
 9. A leaf-local terminal blocker may remain listed while unrelated leaves are
    still eligible. If `resume_phase` is `execution`, keep dispatching those
    eligible leaves; do not turn a local blocker into a global stop.
-<!-- V2.6.9 THREE-SLOT EXECUTION POLICY END -->
+<!-- V2.6.9 FIVE-SLOT EXECUTION POLICY END -->
 
 For recursively created children, the canonical five-line prompt MUST point to
 `.opencode-v2/query/leaves/<child>-context.json`. Its `split_scope` field embeds
