@@ -11,12 +11,17 @@ const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
 const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
 const deterministicTransportProbeRoots = new Set();
 
+function taskAgent(args) {
+  if (!args || typeof args !== "object") return "";
+  return String(args.agent || args.subagent_type || "");
+}
+
 function isDeterministicTransportProbe(args) {
   return (
     args &&
     typeof args === "object" &&
     args.command === DETERMINISTIC_TRANSPORT_PROBE_COMMAND &&
-    args.agent === DETERMINISTIC_TRANSPORT_PROBE_AGENT
+    taskAgent(args) === DETERMINISTIC_TRANSPORT_PROBE_AGENT
   );
 }
 
@@ -343,7 +348,7 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
     ? "background-running"
     : metadata?.status || (original.length > TARGET_MAX_CHILD_RESULT_CHARS ? "output_limited" : "completed");
   const lines = [
-    `AGENT: ${args?.agent || "unknown"}`,
+    `AGENT: ${taskAgent(args) || "unknown"}`,
     `DELIVERABLE: ${did}`,
     `SESSION: ${childSessionID}`,
     `ATTEMPT: ${attemptFor(directory, did, childSessionID)}`,
@@ -393,7 +398,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     // Support both the beta combined event shape and the newer split
     // input/output hook shape.
     const args = hookArgs(event, output);
-    const agent = args.agent;
+    const agent = taskAgent(args);
     if (isDeterministicTransportProbe(args)) {
       const sessionID = hookSessionID(event);
       if (!sessionID) throw new Error("TRANSPORT_PROBE_DENY missing parent session id");
@@ -459,7 +464,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
     const args = hookArgs(event, output);
     const rawResult = toolResultText(result);
     const transportProbe = isDeterministicTransportProbe(args);
-    const splitterParent = args?.agent === "task-splitter" ? splitParent(args) : "";
+    const splitterParent = taskAgent(args) === "task-splitter" ? splitParent(args) : "";
     if (transportProbe) {
       transportProbeLog(directory, {
         event: "task-after",
@@ -490,7 +495,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
         `CHILD: ${child}`,
         `BACKGROUND: ${result?.metadata?.background === true}`,
       ].join("\n");
-    } else if (args?.agent === "acceptance-validator") {
+    } else if (taskAgent(args) === "acceptance-validator") {
       const raw = rawResult.trim();
       const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
       if (!modelPass) {
@@ -577,6 +582,19 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
   }
   if (implementationDispatchToken({ callID: "split-call" }, "unknown") !== "split-call") {
     throw new Error("unknown-deliverable dispatch token fallback changed");
+  }
+
+  if (taskAgent({ agent: "tester" }) !== "tester") {
+    throw new Error("taskAgent lost legacy agent field");
+  }
+  if (taskAgent({ subagent_type: "tester" }) !== "tester") {
+    throw new Error("taskAgent does not support native command subagent_type field");
+  }
+  if (!isDeterministicTransportProbe({
+    command: "v2-native-transport-probe",
+    subagent_type: "transport-probe",
+  })) {
+    throw new Error("transport probe does not recognize native command subtask shape");
   }
 
   const backgroundArgs = {};

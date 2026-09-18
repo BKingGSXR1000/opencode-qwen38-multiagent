@@ -278,7 +278,7 @@ def main():
     child_sid = ""
     command_error = ""
 
-    print("A2 native deterministic transport probe")
+    print("A2 native deterministic transport probe (subagent_type adapter)")
     print("=======================================")
     print(f"server pid      : {client.pid}")
     print(f"server port     : {client.port}")
@@ -308,6 +308,7 @@ def main():
         print(f"root agent      : {row[2]}")
 
         payload = {
+            "text": f"/{COMMAND}",
             "command": COMMAND,
             "arguments": "",
             "agent": "orchestrator",
