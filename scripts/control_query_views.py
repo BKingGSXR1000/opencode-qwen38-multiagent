@@ -15,6 +15,7 @@ from state_io import atomic_write_text
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
 MAX_DECISION_CHARS = 6000
+MAX_PROGRESS_CHARS = 4000
 DID_RE = re.compile(r"^D\d{3}(?:-[AB](?:[12])?)?$")
 
 
@@ -28,6 +29,16 @@ def _scheduler(raw):
         "active_deliverables": sorted(raw.get("active_deliverables") or []),
         "error": str(raw.get("error") or ""),
     }
+
+
+def _bounded_progress(text: str) -> str:
+    """Keep both the handoff header and its latest actionable conclusion."""
+    text = str(text or "")
+    if len(text) <= MAX_PROGRESS_CHARS:
+        return text
+    head = 1800
+    tail = MAX_PROGRESS_CHARS - head - len("\n\n[...progress truncated...]\n\n")
+    return text[:head] + "\n\n[...progress truncated...]\n\n" + text[-tail:]
 
 
 def _blockers(raw):
@@ -208,7 +219,9 @@ def build_leaf_contexts(project, manifest):
         )
         progress_path = project / ".opencode-v2" / "work" / f"{did}.progress.md"
         try:
-            current_progress = progress_path.read_text(errors="replace")[:4000]
+            current_progress = _bounded_progress(
+                progress_path.read_text(errors="replace")
+            )
         except OSError:
             current_progress = ""
         packet = {
