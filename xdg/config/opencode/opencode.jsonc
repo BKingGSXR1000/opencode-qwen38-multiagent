@@ -1,21 +1,24 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "syv/qwen38-orchestrator",
-  "default_agent": "orchestrator",
-  "providers": {
+  "tools": {
+    "execute": false
+  },
+  "model": "v2noop/root-noop",
+  "default_agent": "transport-root",
+  "provider": {
     "syv": {
       "name": "SYV Qwen3.8-27B RTX3090 MTP",
-      "package": "@opencode-ai/ai/providers/openai-compatible",
-      "settings": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
         "baseURL": "http://127.0.0.1:18033/v1",
         "apiKey": "{env:VLLM_API_KEY}"
       },
       "models": {
         "qwen38": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8-27B SYV MTP",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -29,10 +32,10 @@
           }
         },
         "qwen38-orchestrator": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2 Orchestrator 24K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -44,7 +47,7 @@
             "context": 49152,
             "output": 2048
           },
-          "body": {
+          "options": {
             "v2_max_tokens": 2048,
             "chat_template_kwargs": {
               "enable_thinking": false,
@@ -53,10 +56,10 @@
           }
         },
         "qwen38-worker": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2 Worker 28K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -68,22 +71,20 @@
             "context": 28672,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": true,
               "preserve_thinking": false,
               "reasoning_effort": "medium"
-            }
-          },
-          "settings": {
+            },
             "reasoningEffort": "medium"
           }
         },
         "qwen38-light": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2 Light 20K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -95,23 +96,21 @@
             "context": 20480,
             "output": 3072
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "reasoning_effort": "low",
               "enable_thinking": true,
               "preserve_thinking": false
             },
-            "reasoning_effort": "low"
-          },
-          "settings": {
+            "reasoning_effort": "low",
             "reasoningEffort": "low"
           }
         },
         "qwen38-integrator": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2 Integrator 32K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -123,23 +122,21 @@
             "context": 32768,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "reasoning_effort": "low",
               "enable_thinking": true,
               "preserve_thinking": false
             },
-            "reasoning_effort": "low"
-          },
-          "settings": {
+            "reasoning_effort": "low",
             "reasoningEffort": "low"
           }
         },
         "qwen38-worker-nothink": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.3 Worker NONTHINK PRESERVE 28K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -151,7 +148,7 @@
             "context": 28672,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": false,
               "preserve_thinking": false
@@ -159,10 +156,10 @@
           }
         },
         "qwen38-light-nothink": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.3 Light NONTHINK PRESERVE 20K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -174,7 +171,7 @@
             "context": 20480,
             "output": 3072
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": false,
               "preserve_thinking": false
@@ -182,10 +179,10 @@
           }
         },
         "qwen38-reasoning": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.3 Reasoning MEDIUM PRESERVE 28K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -197,22 +194,20 @@
             "context": 28672,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": true,
               "preserve_thinking": true,
               "reasoning_effort": "medium"
-            }
-          },
-          "settings": {
+            },
             "reasoningEffort": "medium"
           }
         },
         "qwen38-reference-nothink": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.3 Worker NONTHINK PRESERVE 28K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -224,7 +219,7 @@
             "context": 32768,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": false,
               "preserve_thinking": false
@@ -232,10 +227,10 @@
           }
         },
         "qwen38-validator-nothink": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.3 Worker NONTHINK PRESERVE 28K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -247,7 +242,7 @@
             "context": 40960,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": false,
               "preserve_thinking": false
@@ -255,10 +250,10 @@
           }
         },
         "qwen38-reasoning-48k": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.3 Reasoning MEDIUM PRESERVE 28K",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -270,23 +265,21 @@
             "context": 49152,
             "output": 4096
           },
-          "body": {
+          "options": {
             "chat_template_kwargs": {
               "enable_thinking": true,
               "preserve_thinking": false,
               "reasoning_effort": "medium"
             },
-            "reasoning_effort": "medium"
-          },
-          "settings": {
+            "reasoning_effort": "medium",
             "reasoningEffort": "medium"
           }
         },
         "qwen38-implementation-planner-48k": {
-          "modelID": "qwen3.8-27b",
+          "id": "qwen3.8-27b",
           "name": "Qwen3.8 V2.6.9 Planner NONTHINK bounded",
-          "capabilities": {
-            "tools": true,
+          "tool_call": true,
+          "modalities": {
             "input": [
               "text"
             ],
@@ -298,17 +291,42 @@
             "context": 49152,
             "output": 1536
           },
-          "body": {
+          "options": {
             "v2_max_tokens": 7168,
             "chat_template_kwargs": {
               "enable_thinking": true,
               "preserve_thinking": false,
               "reasoning_effort": "low"
             },
-            "reasoning_effort": "low"
-          },
-          "settings": {
+            "reasoning_effort": "low",
             "reasoningEffort": "low"
+          }
+        }
+      }
+    },
+    "v2noop": {
+      "name": "V2 deterministic technical-root no-op",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:57182/v1",
+        "apiKey": "v2-noop-local"
+      },
+      "models": {
+        "root-noop": {
+          "id": "root-noop",
+          "name": "V2 deterministic root no-op",
+          "tool_call": false,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 8192,
+            "output": 32
           }
         }
       }
@@ -316,54 +334,22 @@
   },
   "compaction": {
     "auto": true,
-    "keep": {
-      "tokens": 2500
-    },
-    "buffer": 6000
+    "preserve_recent_tokens": 2500,
+    "reserved": 6000
   },
-  "permissions": [
-    {
-      "action": "shell",
-      "resource": "*operator-control.py*",
-      "effect": "deny"
+  "permission": {
+    "bash": {
+      "*operator-control.py*": "deny",
+      "*operator_control.py*": "deny",
+      "*git push*": "deny",
+      "*git commit*": "deny",
+      "*git reset --hard*": "deny"
     },
-    {
-      "action": "shell",
-      "resource": "*operator_control.py*",
-      "effect": "deny"
+    "external_directory": {
+      "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/logs/*": "allow",
+      "/tmp/*": "allow"
     },
-    {
-      "action": "external_directory",
-      "resource": "/home/bking/AI/opencode-qwen38-multiagent-v2/logs/*",
-      "effect": "allow"
-    },
-    {
-      "action": "external_directory",
-      "resource": "/tmp/*",
-      "effect": "allow"
-    },
-    {
-      "action": "question",
-      "resource": "*",
-      "effect": "deny"
-    },
-    {
-      "action": "shell",
-      "resource": "*git push*",
-      "effect": "deny"
-    },
-    {
-      "action": "shell",
-      "resource": "*git commit*",
-      "effect": "deny"
-    },
-    {
-      "action": "shell",
-      "resource": "*git reset --hard*",
-      "effect": "deny"
-    }
-  ],
-  "tools": {
-    "execute": false
-  }
+    "question": "deny"
+  },
+  "subagent_depth": 1
 }

@@ -23,8 +23,9 @@ import tempfile
 import threading
 import time
 
-ROOT = Path.home() / "AI/opencode-qwen38-multiagent-v2"
-DB = ROOT / "xdg/data/opencode/opencode.db"
+ROOT = Path(os.environ.get("V2_ROOT", str(Path.home() / "AI/opencode-qwen38-multiagent-v2")))
+DB = Path(os.environ.get("V2_OPENCODE_DB", str(ROOT / "xdg/data/opencode/opencode.db")))
+SESSION_TABLE = os.environ.get("V2_OPENCODE_SESSION_TABLE", "session_v2")
 IMPLEMENTATION_AGENTS = {
     "probe-builder","implementer","core-builder","feature-builder",
     "reasoning-builder","integrator","tester","test-builder",
@@ -66,6 +67,46 @@ def _parse_did(text: str):
 def _db_connect():
     return sqlite3.connect(f"file:{DB}?mode=ro",uri=True,timeout=1)
 
+def _v1_history_enabled():
+    return SESSION_TABLE=="session"
+
+def _v1_first_user_text(session: str):
+    con=_db_connect()
+    try:
+        rows=con.execute(
+            "SELECT id,data FROM message "
+            "WHERE session_id=? ORDER BY time_created,id",
+            (session,),
+        ).fetchall()
+        for mid,raw in rows:
+            try:
+                info=json.loads(raw) if raw else {}
+            except Exception:
+                continue
+            if not isinstance(info,dict) or info.get("role")!="user":
+                continue
+            parts=con.execute(
+                "SELECT data FROM part WHERE message_id=? ORDER BY time_created,id",
+                (mid,),
+            ).fetchall()
+            texts=[]
+            for (part_raw,) in parts:
+                try:
+                    part=json.loads(part_raw) if part_raw else {}
+                except Exception:
+                    continue
+                if (
+                    isinstance(part,dict)
+                    and part.get("type")=="text"
+                    and isinstance(part.get("text"),str)
+                ):
+                    texts.append(part["text"])
+            return "\n".join(texts)
+        return ""
+    finally:
+        con.close()
+
+
 
 def _session_agent(session: str):
     if not session or not DB.exists():
@@ -73,7 +114,7 @@ def _session_agent(session: str):
     try:
         con=_db_connect()
         row=con.execute(
-            "SELECT coalesce(agent,'') FROM session_v2 WHERE id=?",
+            f"SELECT coalesce(agent,'') FROM {SESSION_TABLE} WHERE id=?",
             (session,),
         ).fetchone()
         con.close()
@@ -85,6 +126,11 @@ def _session_agent(session: str):
 def _first_user_text(session: str):
     if not session or not DB.exists():
         return ""
+    if _v1_history_enabled():
+        try:
+            return _v1_first_user_text(session)
+        except Exception:
+            return ""
     try:
         con=_db_connect()
         row=con.execute(
@@ -100,10 +146,34 @@ def _first_user_text(session: str):
     except Exception:
         return ""
 
-
 def _session_from_call_id(call_id: str):
-    """Best-effort compatibility fallback for hook runtimes lacking sessionID."""
     if not call_id or not DB.exists():
+        return ""
+    if _v1_history_enabled():
+        needle=f"%{call_id}%"
+        try:
+            con=_db_connect()
+            rows=con.execute(
+                "SELECT session_id,data FROM part "
+                "WHERE data LIKE ? ORDER BY time_created DESC,id DESC LIMIT 64",
+                (needle,),
+            ).fetchall()
+            con.close()
+        except Exception:
+            return ""
+        for sid,raw in rows:
+            try:
+                data=json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(data,dict) or data.get("type")!="tool":
+                continue
+            if call_id in {
+                str(data.get("callID","")),
+                str(data.get("callId","")),
+                str(data.get("id","")),
+            }:
+                return str(sid or "")
         return ""
     needle=f"%{call_id}%"
     try:
@@ -136,7 +206,6 @@ def _session_from_call_id(call_id: str):
             elif isinstance(item,list):
                 stack.extend(item)
     return ""
-
 
 def load_json(path: Path, label: str):
     try:

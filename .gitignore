@@ -31,3 +31,8 @@ api_key.txt
 *.swp
 *~
 .DS_Store
+
+# A2 v1.18.31 isolated runtime/state
+xdg/cache-v11831-a2/
+xdg/data-v11831-a2/
+xdg/state-v11831-a2/

@@ -37,8 +37,8 @@ from watchdog_telemetry import (
     visible_progress_marker,
 )
 
-ROOT=Path.home()/"AI"/"opencode-qwen38-multiagent-v2"
-DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
+ROOT=Path(os.environ.get("V2_ROOT", str(Path.home()/"AI"/"opencode-qwen38-multiagent-v2")))
+DB=Path(os.environ.get("V2_OPENCODE_DB", str(ROOT/"xdg"/"data"/"opencode"/"opencode.db")))
 LOG=ROOT/"logs"/"supervisor-events.log"; CSV=ROOT/"logs"/"supervisor-events.csv"; LIVE_STATUS=ROOT/"logs"/"supervisor-live.json"
 WATCHDOG_TELEMETRY=ROOT/"logs"/"watchdog-telemetry.jsonl"
 PROJECT=os.environ.get("V2_PROJECT","")
@@ -156,6 +156,54 @@ def csv(kind,sid="",agent="",detail=""):
 
 def db_connect(): return sqlite3.connect(f"file:{DB}?mode=ro",uri=True,timeout=1)
 
+def session_table_name():
+    name=str(os.environ.get("V2_OPENCODE_SESSION_TABLE") or "session_v2")
+    if name not in {"session","session_v2"}:
+        raise RuntimeError(f"unsupported OpenCode session table: {name}")
+    return name
+
+def stage_a_transport_mode():
+    # Isolated v1.18.31 transport mode: technical root, external scheduler.
+    return (
+        session_table_name()=="session"
+        and bool(str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip())
+    )
+
+
+def root_agent_name():
+    # Beta keeps the semantic orchestrator; v1 Stage A uses a technical root.
+    return "transport-root" if stage_a_transport_mode() else "orchestrator"
+
+def v1_session_status_snapshot(strict=False):
+    # OpenCode v1.18.31 keeps live busy/retry/idle state in the session status API,
+    # not in a persisted session.time_idle column.
+    base=str(os.environ.get('V2_OPENCODE_BASE_URL') or '').rstrip('/')
+    if not base:
+        if strict:
+            raise RuntimeError('V2_OPENCODE_BASE_URL is not configured')
+        return {}
+    query=urllib.parse.urlencode({'directory':PROJECT}) if PROJECT else ''
+    url=base+'/session/status'+(('?'+query) if query else '')
+    try:
+        req=urllib.request.Request(url,headers={'Accept':'application/json'})
+        with urllib.request.urlopen(req,timeout=2.0) as resp:
+            raw=resp.read()
+        data=json.loads(raw or b'{}')
+        if isinstance(data,dict) and set(data)=={'data'}:
+            data=data['data']
+        if not isinstance(data,dict):
+            raise RuntimeError('session status response is not an object')
+        return data
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f'v1 session status unavailable: {exc}') from exc
+        return {}
+
+
+def v1_runtime_enabled():
+    return str(os.environ.get('V2_OPENCODE_SESSION_TABLE') or '') == 'session'
+
+
 ROOT_READ_GUARDED_PHASES={"execution","recursive-split","execution-blocked"}
 ROOT_READ_LEAF_QUERY_RE=re.compile(
     r"^\.opencode-v2/query/leaves/D\d{3}(?:-[AB](?:[12])?)?\.json$"
@@ -168,9 +216,10 @@ def root_read_session_identity(sid):
         return False,"missing-session"
     try:
         con=db_connect()
+        table=session_table_name()
         row=con.execute(
-            "SELECT parent_id,coalesce(agent,''),coalesce(directory,'') "
-            "FROM session_v2 WHERE id=?",
+            f"SELECT parent_id,coalesce(agent,''),coalesce(directory,'') "
+            f"FROM {table} WHERE id=?",
             (sid,),
         ).fetchone()
         con.close()
@@ -182,14 +231,15 @@ def root_read_session_identity(sid):
     parent_id,agent,directory=row
     if parent_id is not None:
         return False,"child-session"
-    if agent!="orchestrator":
-        return False,f"non-orchestrator:{agent or 'unknown'}"
+    expected=root_agent_name()
+    if agent!=expected:
+        return False,f"non-root-agent:{agent or 'unknown'} expected={expected}"
     try:
         if PROJECT and Path(directory).resolve()!=Path(PROJECT).resolve():
             return False,"different-project"
     except Exception:
         return False,"invalid-session-directory"
-    return True,"root-orchestrator"
+    return True,f"root-{expected}"
 
 
 def root_read_relative_path(project,raw_path):
@@ -260,33 +310,268 @@ def root_control_read_state(sid,tool_args):
     return state,f"phase={phase or 'unknown'} {detail}"
 
 
-def first_user_text_db(sid):
+def _v1_message_records(sid):
+    con=db_connect()
     try:
-        con=db_connect(); row=con.execute("SELECT data FROM session_message WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1",(sid,)).fetchone(); con.close()
-        if not row: return ""
-        d=json.loads(row[0]); return d.get("text","") if isinstance(d,dict) else ""
-    except Exception: return ""
+        rows=con.execute(
+            "SELECT id,time_created,time_updated,data FROM message "
+            "WHERE session_id=? ORDER BY time_created,id",
+            (sid,),
+        ).fetchall()
+    finally:
+        con.close()
+    out=[]
+    for mid,created,updated,raw in rows:
+        try:
+            data=json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if not isinstance(data,dict):
+            continue
+        out.append({
+            "id":str(mid),
+            "created":int(created or 0),
+            "updated":int(updated or created or 0),
+            "data":data,
+        })
+    return out
 
-def last_assistant_text_db(sid):
-    """Return concatenated text parts from the latest assistant message."""
+def _v1_active_session_ids(strict=False):
+    supplied=v1_active_session_ids_from_env(strict=strict)
+    if supplied is not None:
+        return supplied
+    status=v1_session_status_snapshot(strict=strict)
+    return {
+        sid for sid,info in status.items()
+        if isinstance(info,dict)
+        and str(info.get("type") or "") in {"busy","retry"}
+    }
+
+def _v1_latest_assistant_record(sid):
+    for record in reversed(_v1_message_records(sid)):
+        if record["data"].get("role")=="assistant":
+            return record
+    return None
+
+def _v1_session_terminal(sid,active_ids=None):
+    active_ids=_v1_active_session_ids(strict=False) if active_ids is None else set(active_ids)
+    if sid in active_ids:
+        return False
+    record=_v1_latest_assistant_record(sid)
+    if not record:
+        return False
+    data=record["data"]
+    tm=data.get("time") if isinstance(data.get("time"),dict) else {}
+    return bool(
+        tm.get("completed")
+        or data.get("finish")
+        or isinstance(data.get("error"),dict)
+    )
+
+def _v1_session_end_ms(sid):
+    values=[]
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT time_created,time_updated FROM session WHERE id=?",
+            (sid,),
+        ).fetchone()
+        if row:
+            values.extend(int(x or 0) for x in row)
+        for table in ("message","part"):
+            row=con.execute(
+                f"SELECT COALESCE(MAX(time_updated),0),COALESCE(MAX(time_created),0) "
+                f"FROM {table} WHERE session_id=?",
+                (sid,),
+            ).fetchone()
+            if row:
+                values.extend(int(x or 0) for x in row)
+        con.close()
+    except Exception:
+        pass
+    try:
+        for record in _v1_message_records(sid):
+            data=record["data"]
+            tm=data.get("time") if isinstance(data.get("time"),dict) else {}
+            values.append(int(tm.get("completed") or 0))
+    except Exception:
+        pass
+    return max(values or [0])
+
+def _v1_compaction_count(sid):
+    count=0
     try:
         con=db_connect()
         rows=con.execute(
-            "SELECT data FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq DESC",
+            "SELECT data FROM part WHERE session_id=? ORDER BY time_created,id",
             (sid,),
         ).fetchall()
         con.close()
         for (raw,) in rows:
-            try: d=json.loads(raw)
-            except Exception: continue
+            try:
+                data=json.loads(raw) if raw else {}
+            except Exception:
+                continue
+            if isinstance(data,dict) and data.get("type")=="compaction":
+                count+=1
+    except Exception:
+        return 0
+    return count
+
+def _v1_latest_compaction_state(sid):
+    records=_v1_message_records(sid)
+    compactions=[]
+    for record in records:
+        if record["data"].get("role")!="user":
+            continue
+        try:
+            parts=_v1_message_parts(record["id"])
+        except Exception:
+            continue
+        if any(part.get("type")=="compaction" for part in parts):
+            compactions.append(record)
+    if not compactions:
+        return {"seq":0,"status":"","error_type":""}
+    latest=compactions[-1]
+    seq=len(compactions)
+    assistants=[
+        record for record in records
+        if record["data"].get("role")=="assistant"
+        and record["data"].get("parentID")==latest["id"]
+        and str(record["data"].get("mode") or "")=="compaction"
+    ]
+    if not assistants:
+        return {"seq":seq,"status":"running","error_type":""}
+    data=assistants[-1]["data"]
+    error=data.get("error") if isinstance(data.get("error"),dict) else {}
+    if error:
+        return {"seq":seq,"status":"failed","error_type":"compaction.failed"}
+    tm=data.get("time") if isinstance(data.get("time"),dict) else {}
+    if tm.get("completed") or data.get("finish"):
+        return {"seq":seq,"status":"completed","error_type":""}
+    return {"seq":seq,"status":"running","error_type":""}
+
+def _v1_message_rows(sid):
+    con=db_connect()
+    try:
+        rows=con.execute(
+            "SELECT id,time_created,data FROM message "
+            "WHERE session_id=? ORDER BY time_created,id",
+            (sid,),
+        ).fetchall()
+    finally:
+        con.close()
+    out=[]
+    for mid,created,raw in rows:
+        try:
+            data=json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if not isinstance(data,dict):
+            continue
+        out.append((str(mid),str(data.get("role") or ""),int(created or 0)))
+    return out
+
+def _v1_message_parts(mid):
+    con=db_connect()
+    try:
+        rows=con.execute(
+            "SELECT data FROM part WHERE message_id=? ORDER BY time_created,id",
+            (mid,),
+        ).fetchall()
+    finally:
+        con.close()
+    out=[]
+    for (raw,) in rows:
+        try:
+            data=json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if isinstance(data,dict):
+            out.append(data)
+    return out
+
+def _v1_first_user_text(sid):
+    for mid,role,_created in _v1_message_rows(sid):
+        if role!="user":
+            continue
+        texts=[
+            str(part.get("text") or "")
+            for part in _v1_message_parts(mid)
+            if part.get("type")=="text" and isinstance(part.get("text"),str)
+        ]
+        return "\n".join(x for x in texts if x)
+    return ""
+
+def first_user_text_db(sid):
+    if v1_runtime_enabled():
+        try:
+            return _v1_first_user_text(sid)
+        except Exception:
+            return ""
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1",
+            (sid,),
+        ).fetchone()
+        con.close()
+        if not row:
+            return ""
+        d=json.loads(row[0])
+        return d.get("text","") if isinstance(d,dict) else ""
+    except Exception:
+        return ""
+
+def last_assistant_text_db(sid):
+    """Return concatenated text parts from the latest assistant message."""
+    if v1_runtime_enabled():
+        try:
+            for record in reversed(_v1_message_records(sid)):
+                if record["data"].get("role")!="assistant":
+                    continue
+                texts=[
+                    str(part.get("text") or "")
+                    for part in _v1_message_parts(record["id"])
+                    if part.get("type")=="text"
+                    and isinstance(part.get("text"),str)
+                ]
+                text="\n".join(x for x in texts if x).strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+        return ""
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq DESC",
+            (sid,),
+        ).fetchall()
+        con.close()
+        for (raw,) in rows:
+            try:
+                d=json.loads(raw)
+            except Exception:
+                continue
             parts=d.get("content") if isinstance(d,dict) else None
-            if not isinstance(parts,list): continue
-            texts=[p.get("text","") for p in parts if isinstance(p,dict) and p.get("type")=="text" and isinstance(p.get("text"),str)]
+            if not isinstance(parts,list):
+                continue
+            texts=[
+                p.get("text","") for p in parts
+                if isinstance(p,dict)
+                and p.get("type")=="text"
+                and isinstance(p.get("text"),str)
+            ]
             text="\n".join(x for x in texts if x).strip()
-            if text: return text
+            if text:
+                return text
     except Exception:
         pass
     return ""
+
 
 def parse_split_parent(text):
     m=re.search(
@@ -2671,31 +2956,75 @@ def attempt_sequence_for_session(sid,did):
         return 0
 
 def session_window(sid):
+    if v1_runtime_enabled():
+        try:
+            con=db_connect()
+            row=con.execute(
+                "SELECT time_created FROM session WHERE id=?",
+                (sid,),
+            ).fetchone()
+            con.close()
+            if not row:
+                return None
+            start=int(row[0] or 0)
+            active=_v1_active_session_ids(strict=False)
+            if sid in active or not _v1_session_terminal(sid,active):
+                return start,int(time.time()*1000)
+            end=_v1_session_end_ms(sid) or int(time.time()*1000)
+            return start,end
+        except Exception:
+            return None
     try:
         con=db_connect()
-        row=con.execute("SELECT time_created,time_idle FROM session_v2 WHERE id=?",(sid,)).fetchone()
+        row=con.execute(
+            "SELECT time_created,time_idle FROM session_v2 WHERE id=?",
+            (sid,),
+        ).fetchone()
         con.close()
-        if not row: return None
-        start=int(row[0] or 0); end=int(row[1] or int(time.time()*1000))
+        if not row:
+            return None
+        start=int(row[0] or 0)
+        end=int(row[1] or int(time.time()*1000))
         return start,end
     except Exception:
         return None
 
+
 def session_tool_inputs(sid):
-    """Return only tool INPUTS issued by this session, never tool outputs."""
     out=[]
+    if v1_runtime_enabled():
+        try:
+            for mid,role,_created in _v1_message_rows(sid):
+                if role!="assistant":
+                    continue
+                for part in _v1_message_parts(mid):
+                    if part.get("type")!="tool":
+                        continue
+                    state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                    inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                    out.append((str(part.get("tool") or ""),inp))
+            return out
+        except Exception:
+            return []
     try:
         con=db_connect()
-        rows=con.execute("SELECT data FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq",(sid,)).fetchall()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq",
+            (sid,),
+        ).fetchall()
         con.close()
         for (raw,) in rows:
-            try: d=json.loads(raw)
-            except Exception: continue
+            try:
+                d=json.loads(raw)
+            except Exception:
+                continue
             for part in d.get("content",[]) if isinstance(d,dict) else []:
-                if not isinstance(part,dict) or part.get("type")!="tool": continue
+                if not isinstance(part,dict) or part.get("type")!="tool":
+                    continue
                 state=part.get("state") if isinstance(part.get("state"),dict) else {}
                 inp=state.get("input") if isinstance(state.get("input"),dict) else {}
-                out.append((str(part.get("name") or ""),inp))
+                out.append((str(part.get("name") or part.get("tool") or ""),inp))
     except Exception:
         pass
     return out
@@ -2747,24 +3076,53 @@ def session_explicitly_mutated_path(sid,path):
     return False
 
 def overlapping_other_owned_paths(sid,did):
-    """Owned paths of sibling sessions active after this leaf was dispatched.
-
-    Finalization can be deferred until Verify dependencies become READY. Once a
-    worker session is idle it cannot make new mutations, but sibling workers may
-    legitimately commit their own artifacts before this leaf is finalized. Use
-    the dispatch-to-finalization attribution window rather than freezing the end
-    at this worker's idle timestamp. Bubblewrap/direct-tool containment remains
-    authoritative for proving this worker explicitly targeted a sibling path.
-    """
+    """Owned paths of sibling sessions overlapping this leaf's attribution window."""
     win=session_window(sid)
-    if not win or not PROJECT: return set()
+    if not win or not PROJECT:
+        return set()
     start,_idle=win
     end=max(int(_idle or 0),int(time.time()*1000))
     result=set()
+
+    if v1_runtime_enabled():
+        try:
+            active=_v1_active_session_ids(strict=False)
+            con=db_connect()
+            rows=con.execute(
+                "SELECT id,time_created FROM session "
+                "WHERE parent_id IS NOT NULL AND directory=? "
+                "AND time_created>=? AND id<>?",
+                (PROJECT,START_MS,sid),
+            ).fetchall()
+            con.close()
+        except Exception:
+            return result
+        leaves=(load_manifest().get("leaves") or {})
+        for other,created in rows:
+            ostart=int(created or 0)
+            terminal=_v1_session_terminal(other,active)
+            oend=(
+                _v1_session_end_ms(other)
+                if terminal else int(time.time()*1000)
+            )
+            oend=int(oend or int(time.time()*1000))
+            if ostart>end or oend<start:
+                continue
+            odid=parse_deliverable(strip_subagent_prefix(first_user_text_db(other)))
+            if not odid or odid==did:
+                continue
+            leaf=leaves.get(odid)
+            if not isinstance(leaf,dict):
+                continue
+            result.update(owned_artifact_paths(leaf))
+        return result
+
     try:
         con=db_connect()
         rows=con.execute(
-            "SELECT id,time_created,time_idle FROM session_v2 WHERE parent_id IS NOT NULL AND directory=? AND time_created>=? AND id<>?",
+            "SELECT id,time_created,time_idle FROM session_v2 "
+            "WHERE parent_id IS NOT NULL AND directory=? "
+            "AND time_created>=? AND id<>?",
             (PROJECT,START_MS,sid),
         ).fetchall()
         con.close()
@@ -2772,14 +3130,19 @@ def overlapping_other_owned_paths(sid,did):
         return result
     leaves=(load_manifest().get("leaves") or {})
     for other,created,idle in rows:
-        ostart=int(created or 0); oend=int(idle or int(time.time()*1000))
-        if ostart>end or oend<start: continue
+        ostart=int(created or 0)
+        oend=int(idle or int(time.time()*1000))
+        if ostart>end or oend<start:
+            continue
         odid=parse_deliverable(strip_subagent_prefix(first_user_text_db(other)))
-        if not odid or odid==did: continue
+        if not odid or odid==did:
+            continue
         leaf=leaves.get(odid)
-        if not isinstance(leaf,dict): continue
+        if not isinstance(leaf,dict):
+            continue
         result.update(owned_artifact_paths(leaf))
     return result
+
 
 # V2.6.9 SUPERVISOR DYNAMIC OWNERSHIP EXEMPTION BEGIN
 SUPERVISOR_DYNAMIC_CONTROL_PATHS={
@@ -2846,19 +3209,33 @@ def ownership_violations(did,sid=""):
         violations.append(path)
     return violations
 def persisted_completed_tool_turns(sid):
-    """Count persisted assistant turns that completed at least one tool action.
-
-    Polling can miss fast tool transitions. New32 executed dozens of probe tools
-    while the old edge-based counter remained below its limit. The session DB is
-    the durable source of truth and survives compaction/restart.
-    """
+    if v1_runtime_enabled():
+        try:
+            turns=0
+            for mid,role,_created in _v1_message_rows(sid):
+                if role!="assistant":
+                    continue
+                completed=False
+                for part in _v1_message_parts(mid):
+                    if part.get("type")!="tool":
+                        continue
+                    state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                    if str(state.get("status") or "").lower() in {"completed","error"}:
+                        completed=True
+                        break
+                if completed:
+                    turns+=1
+            return turns
+        except Exception:
+            return 0
     try:
         con=db_connect()
         rows=con.execute(
             "SELECT data FROM session_message "
             "WHERE session_id=? AND type='assistant' ORDER BY seq",
             (sid,),
-        ).fetchall(); con.close()
+        ).fetchall()
+        con.close()
     except Exception:
         return 0
     turns=0
@@ -2870,20 +3247,22 @@ def persisted_completed_tool_turns(sid):
         content=data.get("content") if isinstance(data,dict) else []
         if not isinstance(content,list):
             continue
-        completed=False
-        for part in content:
-            if not isinstance(part,dict) or part.get("type")!="tool":
-                continue
-            state=part.get("state") if isinstance(part.get("state"),dict) else {}
-            if str(state.get("status") or "").lower() in {"completed","error"}:
-                completed=True; break
-        if completed:
+        if any(
+            isinstance(part,dict)
+            and part.get("type")=="tool"
+            and isinstance(part.get("state"),dict)
+            and str(part["state"].get("status") or "").lower() in {"completed","error"}
+            for part in content
+        ):
             turns+=1
     return turns
 
 def _session_agent_db(sid):
     try:
-        con=db_connect(); row=con.execute("SELECT agent FROM session_v2 WHERE id=?",(sid,)).fetchone(); con.close()
+        table=session_table_name()
+        con=db_connect()
+        row=con.execute(f"SELECT agent FROM {table} WHERE id=?",(sid,)).fetchone()
+        con.close()
         return str(row[0] or "") if row else ""
     except Exception:
         return ""
@@ -3021,6 +3400,22 @@ def _current_tool_mutates_owned_artifact(did,tool,args):
 
 def session_completed_tool_inputs(sid):
     out=[]
+    if v1_runtime_enabled():
+        try:
+            for mid,role,_created in _v1_message_rows(sid):
+                if role!="assistant":
+                    continue
+                for part in _v1_message_parts(mid):
+                    if part.get("type")!="tool":
+                        continue
+                    state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                    if str(state.get("status") or "").lower() not in {"completed","error"}:
+                        continue
+                    inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                    out.append((str(part.get("tool") or ""),inp))
+            return out
+        except Exception:
+            return []
     try:
         con=db_connect()
         rows=con.execute(
@@ -3044,11 +3439,10 @@ def session_completed_tool_inputs(sid):
                 if str(state.get("status") or "").lower() not in {"completed","error"}:
                     continue
                 inp=state.get("input") if isinstance(state.get("input"),dict) else {}
-                out.append((str(part.get("name") or ""),inp))
+                out.append((str(part.get("name") or part.get("tool") or ""),inp))
     except Exception:
         pass
     return out
-
 
 def _tool_targets_exact_project_path(tool,args,target):
     if tool not in {"read","write","edit","apply_patch","patch","multiedit"}:
@@ -3587,19 +3981,20 @@ def record_compaction_infrastructure_failure(sid,did):
     return record_infrastructure_abort(sid,did,"opencode-compaction-template","opencode-compaction-template")
 
 def latest_compaction_state(sid):
-    """Return the newest compaction row including its terminal status.
-
-    OpenCode creates the row before the summary request finishes, then updates
-    the SAME row to completed/failed. Therefore row count alone is not a safe
-    transition key.
-    """
+    """Return newest compaction transition in beta or native v1 history."""
+    if v1_runtime_enabled():
+        try:
+            return _v1_latest_compaction_state(sid)
+        except Exception:
+            return {"seq":0,"status":"","error_type":""}
     try:
         con=db_connect()
         row=con.execute(
             "SELECT seq,data FROM session_message "
             "WHERE session_id=? AND type='compaction' ORDER BY seq DESC LIMIT 1",
             (sid,),
-        ).fetchone(); con.close()
+        ).fetchone()
+        con.close()
         if not row:
             return {"seq":0,"status":"","error_type":""}
         data=json.loads(row[1]) if row[1] else {}
@@ -3611,6 +4006,7 @@ def latest_compaction_state(sid):
         }
     except Exception:
         return {"seq":0,"status":"","error_type":""}
+
 
 def compaction_failure(sid):
     state=latest_compaction_state(sid)
@@ -3640,23 +4036,41 @@ def durable_progress_signature(agent,did=""):
     return tuple(signature)
 
 def session_activity_signature(sid):
-    """Persisted OpenCode heartbeat for invisible-stream fallback.
-
-    A child can be healthy and actively producing completed model/tool turns
-    while the beta HTTP/SSE view is temporarily not observable.  MAX(seq) and
-    row count advance whenever such a turn is persisted, so they are a safe
-    heartbeat without pretending that read-only activity is durable work.
-    """
+    """Persisted OpenCode heartbeat for invisible-stream fallback."""
+    if v1_runtime_enabled():
+        try:
+            con=db_connect()
+            m=con.execute(
+                "SELECT COALESCE(MAX(time_updated),-1),COUNT(*) "
+                "FROM message WHERE session_id=?",
+                (sid,),
+            ).fetchone()
+            p=con.execute(
+                "SELECT COALESCE(MAX(time_updated),-1),COUNT(*) "
+                "FROM part WHERE session_id=?",
+                (sid,),
+            ).fetchone()
+            con.close()
+            return (
+                int((m or (-1,0))[0] or -1),
+                int((m or (-1,0))[1] or 0),
+                int((p or (-1,0))[0] or -1),
+                int((p or (-1,0))[1] or 0),
+            )
+        except Exception:
+            return (-1,0,-1,0)
     try:
         con=db_connect()
         row=con.execute(
-            "SELECT COALESCE(MAX(seq),-1),COUNT(*) FROM session_message WHERE session_id=?",
+            "SELECT COALESCE(MAX(seq),-1),COUNT(*) "
+            "FROM session_message WHERE session_id=?",
             (sid,),
         ).fetchone()
         con.close()
         return tuple(row or (-1,0))
     except Exception:
         return (-1,0)
+
 
 def fallback_no_progress_reason(
     sid,agent,did,observable,backend_snapshot=None,now=None
@@ -3797,11 +4211,51 @@ def validate_dispatch(agent,text,runtime=False):
     return did,""
 
 # V2.6.9 FIVE-SLOT IMPLEMENTATION SCHEDULER BEGIN
+def v1_active_session_ids_from_env(strict=False):
+    raw=os.environ.get("V2_OPENCODE_ACTIVE_SESSION_IDS_JSON")
+    if raw is None:
+        return None
+    try:
+        data=json.loads(raw)
+        if not isinstance(data,list) or not all(isinstance(x,str) and x for x in data):
+            raise ValueError("active session snapshot must be a list of non-empty strings")
+        return set(data)
+    except Exception as exc:
+        if strict:
+            raise RuntimeError(f"invalid hook active-session snapshot: {exc}") from exc
+        return set()
+
 def active_implementation_sessions(strict=False):
     """Return live implementation children; scheduler decisions fail closed."""
     if not PROJECT:
         return []
     try:
+        if v1_runtime_enabled():
+            active=v1_active_session_ids_from_env(strict=strict)
+            if active is None:
+                # Safe only for direct CLI/supervisor use. Parent tool hooks
+                # supply a snapshot because execFileSync blocks OpenCode while
+                # the Python subprocess is running.
+                status=v1_session_status_snapshot(strict=True)
+                active={
+                    sid for sid,info in status.items()
+                    if isinstance(info,dict)
+                    and str(info.get("type") or "") in {"busy","retry"}
+                }
+            if not active:
+                return []
+            con=db_connect()
+            rows=con.execute(
+                "SELECT id,coalesce(agent,'') FROM session "
+                "WHERE parent_id IS NOT NULL AND directory=?",
+                (PROJECT,),
+            ).fetchall()
+            con.close()
+            return [
+                (sid,agent) for sid,agent in rows
+                if sid in active and agent in IMPLEMENTATION_AGENTS
+            ]
+
         con=db_connect()
         rows=con.execute(
             "SELECT id,coalesce(agent,'') FROM session_v2 "
@@ -3809,11 +4263,11 @@ def active_implementation_sessions(strict=False):
             (PROJECT,),
         ).fetchall()
         con.close()
+        return [(sid,agent) for sid,agent in rows if agent in IMPLEMENTATION_AGENTS]
     except Exception as exc:
         if strict:
             raise RuntimeError(f"scheduler_db_unavailable: {exc}") from exc
         return []
-    return [(sid,agent) for sid,agent in rows if agent in IMPLEMENTATION_AGENTS]
 
 def active_implementation_deliverables(sessions=None):
     result={}
@@ -4094,61 +4548,125 @@ def durable_worker_execution(did,sid=""):
     return baseline["files"] != execution_scope_fingerprints(did)
 
 def meaningful_worker_execution(sid,did):
-    """Return the first durable or completed-tool execution boundary.
-
-    Durable owned state is preferred.  If verification later fails after a
-    completed child tool action, that is still real worker execution and must
-    consume the explicitly authorized retry rather than being mistaken for a
-    pre-provider cancellation.
-    """
+    """Return the first durable or completed-tool execution boundary."""
     if durable_worker_execution(did,sid):
         return "owned-artifact-or-progress"
+    if v1_runtime_enabled():
+        try:
+            if session_completed_tool_inputs(sid):
+                return "completed-worker-tool-action"
+        except Exception:
+            pass
+        return ""
     try:
-        con=db_connect(); rows=con.execute(
-            "SELECT data FROM session_message WHERE session_id=? ORDER BY seq",(sid,)
-        ).fetchall(); con.close()
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message WHERE session_id=? ORDER BY seq",
+            (sid,),
+        ).fetchall()
+        con.close()
         for (raw,) in rows:
             data=json.loads(raw) if raw else {}
             content=data.get("content") if isinstance(data,dict) else []
-            if not isinstance(content,list): continue
+            if not isinstance(content,list):
+                continue
             for part in content:
-                if not isinstance(part,dict) or part.get("type")!="tool": continue
+                if not isinstance(part,dict) or part.get("type")!="tool":
+                    continue
                 state=part.get("state") if isinstance(part.get("state"),dict) else {}
-                if state.get("status") != "running": return "completed-worker-tool-action"
+                if state.get("status")!="running":
+                    return "completed-worker-tool-action"
     except Exception:
         pass
     return ""
 
+
 def immediate_runtime_abort(sid):
-    """Return evidence only for an observed zero-work beta cancellation."""
+    """Return evidence only for an observed zero-work runtime cancellation."""
+    if v1_runtime_enabled():
+        try:
+            assistants=[
+                record for record in _v1_message_records(sid)
+                if record["data"].get("role")=="assistant"
+            ]
+            if len(assistants)!=1:
+                return ""
+            record=assistants[0]
+            msg=record["data"]
+            parts=_v1_message_parts(record["id"])
+            if any(part.get("type")=="tool" for part in parts):
+                return ""
+            meaningful=[
+                part for part in parts
+                if part.get("type") not in {"step-start","reasoning"}
+            ]
+            err=msg.get("error") if isinstance(msg.get("error"),dict) else {}
+            tokens=msg.get("tokens") if isinstance(msg.get("tokens"),dict) else {}
+            cache=tokens.get("cache") if isinstance(tokens.get("cache"),dict) else {}
+            total=(
+                int(tokens.get("input") or 0)
+                + int(tokens.get("output") or 0)
+                + int(tokens.get("reasoning") or 0)
+                + int(cache.get("read") or 0)
+                + int(cache.get("write") or 0)
+            )
+            if (
+                err.get("name")=="MessageAbortedError"
+                and not meaningful
+                and total==0
+            ):
+                return "immediate-runtime-cancel zero-token-zero-tool aborted"
+        except Exception:
+            return ""
+        return ""
     try:
-        con=db_connect(); rows=con.execute(
-            "SELECT type,data FROM session_message WHERE session_id=? ORDER BY seq",(sid,)
-        ).fetchall(); con.close()
+        con=db_connect()
+        rows=con.execute(
+            "SELECT type,data FROM session_message "
+            "WHERE session_id=? ORDER BY seq",
+            (sid,),
+        ).fetchall()
+        con.close()
         assistants=[]
         for kind,raw in rows:
             data=json.loads(raw) if raw else {}
-            if kind=="assistant": assistants.append(data if isinstance(data,dict) else {})
-            if isinstance(data,dict) and data.get("type")=="tool": return ""
-            if (isinstance(data,dict) and isinstance(data.get("content"),list) and
-                    any(isinstance(part,dict) and part.get("type")=="tool" for part in data["content"])):
+            if kind=="assistant":
+                assistants.append(data if isinstance(data,dict) else {})
+            if isinstance(data,dict) and data.get("type")=="tool":
                 return ""
-        if len(assistants)!=1: return ""
-        msg=assistants[0]; err=msg.get("error") if isinstance(msg.get("error"),dict) else {}
+            if (
+                isinstance(data,dict)
+                and isinstance(data.get("content"),list)
+                and any(
+                    isinstance(part,dict) and part.get("type")=="tool"
+                    for part in data["content"]
+                )
+            ):
+                return ""
+        if len(assistants)!=1:
+            return ""
+        msg=assistants[0]
+        err=msg.get("error") if isinstance(msg.get("error"),dict) else {}
         content=msg.get("content") if isinstance(msg.get("content"),list) else []
         tokens=msg.get("tokens") if isinstance(msg.get("tokens"),dict) else {}
-        if (msg.get("finish")=="error" and err.get("type")=="aborted" and not content and
-                not any(int(tokens.get(k) or 0) for k in ("input","output","reasoning","cache"))):
+        if (
+            msg.get("finish")=="error"
+            and err.get("type")=="aborted"
+            and not content
+            and not any(int(tokens.get(k) or 0) for k in ("input","output","reasoning","cache"))
+        ):
             return "immediate-runtime-cancel zero-token-zero-tool aborted"
     except Exception:
         return ""
     return ""
+
 
 class OpenCodeHTTP:
     def __init__(self):
         self.base=None
         self.password=None
         self.prefix=None
+        self.mode=None
         self.last_discover=0
         self.last_wait_log=0
 
@@ -4182,6 +4700,32 @@ class OpenCodeHTTP:
         return obj.get("data") if isinstance(obj,dict) and set(obj)=={"data"} else obj
 
     def discover(self):
+        explicit=str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip().rstrip("/")
+        if explicit:
+            self.base=explicit
+            self.password=(
+                os.environ.get("V2_OPENCODE_PASSWORD")
+                or os.environ.get("OPENCODE_PASSWORD")
+                or os.environ.get("OPENCODE_SERVER_PASSWORD")
+            )
+            self.prefix=""
+            self.mode="v1"
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            try:
+                obj=self.request("GET","/session/status"+q,timeout=2)
+                if not isinstance(obj,dict):
+                    raise RuntimeError("v1 /session/status did not return an object")
+                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+                return True
+            except Exception as exc:
+                self.base=self.password=self.prefix=None
+                self.mode=None
+                log(f"HTTP_CONTROL_V1_WAIT base={explicit} error={type(exc).__name__}")
+                return False
+
         target=os.path.realpath(str(ROOT/"xdg"/"config"))
         ss=""
         try:
@@ -4253,6 +4797,7 @@ class OpenCodeHTTP:
                             # isolated V2 OpenCode HTTP service. {} is valid.
                             self.request("GET",path,timeout=2)
                             self.prefix="/api"
+                            self.mode="beta"
                             log(
                                 f"HTTP_CONTROL_CONNECTED base={self.base} "
                                 f"prefix=/api probe={path} pid={pid}"
@@ -4268,6 +4813,7 @@ class OpenCodeHTTP:
                 continue
 
         self.base=self.password=self.prefix=None
+        self.mode=None
         return False
 
     def ensure(self):
@@ -4290,20 +4836,23 @@ class OpenCodeHTTP:
         if PROJECT:
             q="?" + urllib.parse.urlencode({"directory":PROJECT})
         try:
-            obj=self.request("GET","/api/session/active"+q)
+            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+            obj=self.request("GET",path)
             return obj if isinstance(obj,dict) else {}
         except Exception:
             self.base=self.prefix=None
+            self.mode=None
             raise
 
     def get_session(self,sid):
         if not self.ensure():
             return {}
         qsid=urllib.parse.quote(sid)
-        for path in (
-            f"/api/session/{qsid}",
-            f"/session/{qsid}",
-        ):
+        q=""
+        if PROJECT:
+            q="?" + urllib.parse.urlencode({"directory":PROJECT})
+        paths=((f"/session/{qsid}"+q,) if self.mode=="v1" else (f"/api/session/{qsid}",f"/session/{qsid}"))
+        for path in paths:
             try:
                 obj=self.request("GET",path)
                 return obj if isinstance(obj,dict) else {}
@@ -4315,32 +4864,70 @@ class OpenCodeHTTP:
         if not self.ensure():
             return []
         qsid=urllib.parse.quote(sid)
-        for path in (
-            f"/api/session/{qsid}/message",
-            f"/api/session/{qsid}/message?limit=32",
-            f"/session/{qsid}/message",
-            f"/session/{qsid}/message?limit=32",
-        ):
+        if self.mode=="v1":
+            q={"limit":"64"}
+            if PROJECT:
+                q["directory"]=PROJECT
+            paths=(f"/session/{qsid}/message?" + urllib.parse.urlencode(q),)
+        else:
+            paths=(
+                f"/api/session/{qsid}/message",
+                f"/api/session/{qsid}/message?limit=32",
+                f"/session/{qsid}/message",
+                f"/session/{qsid}/message?limit=32",
+            )
+        for path in paths:
             try:
                 obj=self.request("GET",path,timeout=4)
                 if isinstance(obj,list):
                     return obj
                 if isinstance(obj,dict):
-                    for k in ("messages","items","data"):
-                        value=obj.get(k)
+                    for key in ("messages","items","data"):
+                        value=obj.get(key)
                         if isinstance(value,list):
                             return value
                         if isinstance(value,dict):
-                            for sk in ("messages","items","data"):
-                                if isinstance(value.get(sk),list):
-                                    return value[sk]
+                            for subkey in ("messages","items","data"):
+                                if isinstance(value.get(subkey),list):
+                                    return value[subkey]
             except Exception:
                 pass
         return []
 
     def stream_session_events(self,sid,on_event,stop):
-        """Consume transient deltas that are intentionally absent from history."""
-        if not self.ensure(): return
+        if not self.ensure():
+            return
+        if self.mode=="v1":
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            req=urllib.request.Request(
+                self.base+"/event"+q,
+                method="GET",
+                headers={**self.headers(),"Accept":"text/event-stream"},
+            )
+            with urllib.request.urlopen(req,timeout=30) as response:
+                for raw in response:
+                    if stop.is_set():
+                        return
+                    line=raw.decode("utf-8","replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        payload=json.loads(line[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload,dict):
+                        continue
+                    props=payload.get("properties")
+                    if not isinstance(props,dict):
+                        continue
+                    event_sid=(props.get("sessionID") or props.get("sessionId") or props.get("session_id"))
+                    if event_sid!=sid:
+                        continue
+                    on_event({"type":payload.get("type"),"data":props})
+            return
+
         qsid=urllib.parse.quote(sid)
         req=urllib.request.Request(
             self.base+f"/api/session/{qsid}/event",
@@ -4348,17 +4935,31 @@ class OpenCodeHTTP:
         )
         with urllib.request.urlopen(req,timeout=30) as response:
             for raw in response:
-                if stop.is_set(): return
+                if stop.is_set():
+                    return
                 line=raw.decode("utf-8","replace").strip()
-                if not line.startswith("data:"): continue
-                try: event=json.loads(line[5:].strip())
-                except json.JSONDecodeError: continue
-                if isinstance(event,dict): on_event(event)
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event=json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event,dict):
+                    on_event(event)
 
     def interrupt(self,sid):
         if not self.ensure():
             return False
         qsid=urllib.parse.quote(sid)
+        if self.mode=="v1":
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            try:
+                self.request("POST",f"/session/{qsid}/abort"+q,payload=None,timeout=4)
+                return True
+            except Exception:
+                return False
         for path,payload in (
             (f"/api/session/{qsid}/interrupt",None),
             (f"/session/{qsid}/abort",{}),
@@ -4374,6 +4975,9 @@ class OpenCodeHTTP:
         """Create and steer a v2 session using the installed beta's SDK schema."""
         if not self.ensure():
             return False,"http-not-connected"
+        if self.mode=="v1":
+            # Direct v1 semantic creation bypasses transport-root TaskTool.
+            return False,"stage-a-controller-owned"
         try:
             created=self.request(
                 "POST","/api/session",
@@ -4401,6 +5005,9 @@ class OpenCodeHTTP:
         """Send another turn to an existing V2 session."""
         if not self.ensure():
             return False,"http-not-connected"
+        if self.mode=="v1":
+            # Never steer the technical root through legacy semantic continuation.
+            return False,"stage-a-controller-owned"
         try:
             qsid=urllib.parse.quote(sid)
             self.request(
@@ -4462,10 +5069,23 @@ def set_abort_intent(sid,reason,agent,state):
         save_abort_intents(data)
 
 def session_terminal_aborted(sid):
+    if v1_runtime_enabled():
+        try:
+            record=_v1_latest_assistant_record(sid)
+            if not record:
+                return False
+            error=record["data"].get("error")
+            return (
+                isinstance(error,dict)
+                and error.get("name")=="MessageAbortedError"
+            )
+        except Exception:
+            return False
     try:
         con=db_connect()
         rows=con.execute(
-            "SELECT data FROM session_message WHERE session_id=? AND type='assistant' ORDER BY seq DESC",
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq DESC",
             (sid,),
         ).fetchall()
         con.close()
@@ -4476,11 +5096,11 @@ def session_terminal_aborted(sid):
             err=data.get("error") if isinstance(data.get("error"),dict) else {}
             if data.get("finish")=="error" and err.get("type")=="aborted":
                 return True
-            # The newest assistant row is authoritative once parseable.
             return False
     except Exception:
         return False
     return False
+
 
 def persisted_abort_reason(sid):
     if not PROJECT or not sid:
@@ -4743,7 +5363,15 @@ def message_shape(messages,session_info):
     ci=int(ci) if isinstance(ci,(int,float)) else None
     output_tokens=token_int("output")
     reasoning_tokens=token_int("reasoning")
-    cache_tokens=token_int("cache")
+    cache_value=tokens.get("cache")
+    if isinstance(cache_value,dict):
+        cache_tokens=sum(
+            int(cache_value.get(k) or 0)
+            for k in ("read","write")
+            if isinstance(cache_value.get(k),(int,float))
+        )
+    else:
+        cache_tokens=token_int("cache")
     tm=info.get("time") if isinstance(info.get("time"),dict) else {}
     completed=isinstance(tm.get("completed"),(int,float))
 
@@ -4924,22 +5552,50 @@ def record_root_session(sid):
 
 def _valid_root_session(sid):
     try:
-        con=db_connect(); row=con.execute("SELECT id FROM session_v2 WHERE id=? AND agent='orchestrator' AND directory=?",(sid,PROJECT)).fetchone(); con.close(); return bool(row)
-    except Exception: return False
+        table=session_table_name()
+        con=db_connect()
+        row=con.execute(
+            f"SELECT id FROM {table} "
+            "WHERE id=? AND agent=? AND directory=?",
+            (sid,root_agent_name(),PROJECT),
+        ).fetchone()
+        con.close()
+        return bool(row)
+    except Exception:
+        return False
+
 
 def root_orchestrator_id():
-    if not PROJECT: return ""
+    if not PROJECT:
+        return ""
     try:
-        con=db_connect(); row=con.execute("SELECT id FROM session_v2 WHERE agent='orchestrator' AND directory=? AND time_created>=? ORDER BY time_created DESC LIMIT 1",(PROJECT,START_MS)).fetchone(); con.close()
+        table=session_table_name()
+        con=db_connect()
+        row=con.execute(
+            f"SELECT id FROM {table} "
+            "WHERE agent=? AND directory=? AND time_created>=? "
+            "ORDER BY time_created DESC LIMIT 1",
+            (root_agent_name(),PROJECT,START_MS),
+        ).fetchone()
+        con.close()
         if row:
-            record_root_session(row[0]); return row[0]
-        data=load_json_object(root_session_path(),default_missing={},label="root session tracker")
+            record_root_session(row[0])
+            return row[0]
+        data=load_json_object(
+            root_session_path(),default_missing={},label="root session tracker"
+        )
         sid=str(data.get("session") or "")
-        if data and (data.get("owner")!="supervisor" or data.get("protocol")!=ROOT_SESSION_PROTOCOL):
+        if data and (
+            data.get("owner")!="supervisor"
+            or data.get("protocol")!=ROOT_SESSION_PROTOCOL
+        ):
             raise StateCorruptionError("root session tracker is invalid")
         return sid if sid and _valid_root_session(sid) else ""
-    except StateCorruptionError: raise
-    except Exception: return ""
+    except StateCorruptionError:
+        raise
+    except Exception:
+        return ""
+
 
 def root_rollover_path(): return Path(PROJECT)/".opencode-v2"/"root-rollovers.json"
 def root_continuation_block_path(): return Path(PROJECT)/".opencode-v2"/"root-continuation-blocked.json"
@@ -5077,26 +5733,45 @@ def acceptance_reference_policy():
 
 
 def reference_session_mode(sid):
-    # Return foundation|validation for a reference-researcher session.
-    try:
-        con=db_connect()
-        row=con.execute(
-            "SELECT data FROM session_message "
-            "WHERE session_id=? AND type='user' ORDER BY seq LIMIT 1",
-            (sid,),
-        ).fetchone()
-        con.close()
-        data=json.loads(row[0]) if row else {}
-        text=str(data.get("text") or "")
-    except Exception:
-        text=""
+    text=first_user_text_db(sid)
     if "REFERENCE_MODE: VALIDATION" in text:
         return "validation"
     return "foundation"
 
 
+
 def reference_session_made_progress(sid):
-    # Did this completed reference slice persist authoritative durable state?
+    """Did this completed reference slice persist authoritative durable state?"""
+    if v1_runtime_enabled():
+        try:
+            for record in _v1_message_records(sid):
+                if record["data"].get("role")!="assistant":
+                    continue
+                for item in _v1_message_parts(record["id"]):
+                    if item.get("type")!="tool":
+                        continue
+                    if item.get("tool") not in {"edit","write"}:
+                        continue
+                    state=item.get("state") if isinstance(item.get("state"),dict) else {}
+                    if state.get("status")!="completed":
+                        continue
+                    inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                    path=str(
+                        inp.get("path")
+                        or inp.get("filePath")
+                        or inp.get("file_path")
+                        or inp.get("filename")
+                        or ""
+                    )
+                    if (
+                        ".opencode-v2/acceptance/" in path
+                        or path.endswith(".opencode-v2/REFERENCE_FOUNDATION.md")
+                    ):
+                        return True
+            return False
+        except Exception as exc:
+            log(f"REFERENCE_PROGRESS_DB_ERROR session={sid} error={exc!r}")
+            return False
     try:
         con=db_connect()
         rows=con.execute(
@@ -5105,10 +5780,9 @@ def reference_session_made_progress(sid):
             (sid,),
         ).fetchall()
         con.close()
-    except Exception as e:
-        log(f"REFERENCE_PROGRESS_DB_ERROR session={sid} error={e!r}")
+    except Exception as exc:
+        log(f"REFERENCE_PROGRESS_DB_ERROR session={sid} error={exc!r}")
         return False
-
     for (raw,) in rows:
         try:
             data=json.loads(raw)
@@ -5135,6 +5809,7 @@ def reference_session_made_progress(sid):
     return False
 
 
+
 def _reference_evidence():
     path=Path(PROJECT)/".opencode-v2/acceptance/reference-evidence.json"
     if not path.exists():
@@ -5148,6 +5823,26 @@ def _reference_evidence():
 
 def _reference_sessions(mode):
     rows=[]
+    if v1_runtime_enabled():
+        try:
+            active=_v1_active_session_ids(strict=False)
+            con=db_connect()
+            raw=con.execute(
+                "SELECT id,time_created FROM session "
+                "WHERE agent='reference-researcher' AND directory=? "
+                "ORDER BY time_created",
+                (PROJECT,),
+            ).fetchall()
+            con.close()
+            for sid,_created in raw:
+                if reference_session_mode(sid)!=mode:
+                    continue
+                terminal=_v1_session_terminal(sid,active)
+                idle_marker=(_v1_session_end_ms(sid) or 1) if terminal else None
+                rows.append((sid,idle_marker))
+        except Exception as exc:
+            log(f"REFERENCE_GATE_DB_ERROR {exc!r}")
+        return rows
     try:
         con=db_connect()
         rows=con.execute(
@@ -5157,9 +5852,10 @@ def _reference_sessions(mode):
             (PROJECT,),
         ).fetchall()
         con.close()
-    except Exception as e:
-        log(f"REFERENCE_GATE_DB_ERROR {e!r}")
+    except Exception as exc:
+        log(f"REFERENCE_GATE_DB_ERROR {exc!r}")
     return [r for r in rows if reference_session_mode(r[0])==mode]
+
 
 
 def _reference_progress_stats(mode):
@@ -5283,6 +5979,11 @@ def maybe_nudge_idle_root(active_sids,child_active):
     """Resume an idle completed root while durable work is still pending."""
     global root_same_session_idle_since
 
+    # Stage A: external deterministic controller owns semantic continuation.
+    if stage_a_transport_mode():
+        root_same_session_idle_since=None
+        return False
+
     if not PROJECT or child_active:
         root_same_session_idle_since=None
         return False
@@ -5352,6 +6053,11 @@ def maybe_continue_root(active_sids,child_active):
     """Replace only a terminated root; never copy its conversation or child prose."""
     global root_idle_since
 
+    # Stage A: external deterministic controller owns semantic continuation.
+    if stage_a_transport_mode():
+        root_idle_since=None
+        return False
+
     if not PROJECT:
         root_idle_since=None
         return False
@@ -5416,7 +6122,7 @@ def maybe_continue_root(active_sids,child_active):
             )
         sync_control_status_snapshot()
         return False
-    ok,detail=http.start_agent_session("orchestrator",ROOT_CONTINUATION_PROMPT)
+    ok,detail=http.start_agent_session(root_agent_name(),ROOT_CONTINUATION_PROMPT)
     if not ok:
         log(f"ROOT_CONTINUATION_FAILED phase={phase} detail={detail}")
         root_idle_since=time.time(); return False
@@ -5522,6 +6228,10 @@ def merge_lesson_candidates():
 
 def maybe_launch_lessons(active_sids,child_active):
     global root_seen_active,root_idle_since,lessons_started,lessons_launch_attempts
+
+    # Stage A: lessons-learner is semantic and controller-owned.
+    if stage_a_transport_mode():
+        return False
     if lessons_started or not PROJECT: return
     if normalized_state_snapshot(PROJECT).get("resume_phase")!="complete": return
     ctrl=Path(PROJECT)/".opencode-v2"
@@ -6201,46 +6911,75 @@ def reconcile_compaction_event(sid,agent,comps):
 
 
 def persisted_reconcile_loop():
-    while not DB.exists(): time.sleep(0.5)
+    while not DB.exists():
+        time.sleep(0.5)
     while True:
         try:
             reconcile_split_proposals()
             reconcile_split_parent_completions()
             sync_control_status_snapshot()
             pending_sessions=pending_ledger_session_ids()
-            con=db_connect()
-            rows=con.execute(
-                "SELECT s.id,coalesce(s.agent,''),"
-                "(SELECT count(*) FROM session_message m "
-                "WHERE m.session_id=s.id AND m.type='compaction'),"
-                "s.time_idle,s.time_created "
-                "FROM session_v2 s "
-                "WHERE s.parent_id IS NOT NULL AND s.directory=?",
-                (PROJECT,),
-            ).fetchall() if PROJECT else []
-            con.close()
-            for sid,agent,comps,time_idle,time_created in rows:
-                # Normal sessions belong to this supervisor epoch.  Additionally,
-                # reconcile the exact current unclassified ledger session even if
-                # it predates a supervisor restart.
-                if int(time_created or 0) < START_MS and sid not in pending_sessions:
-                    continue
-                prompt=first_user_text_db(sid)
-                if (
-                    agent in IMPLEMENTATION_AGENTS
-                    or parse_deliverable(strip_subagent_prefix(prompt))
-                ) and sid not in dispatch_seen:
-                    enforce_assignment(sid,agent,prompt)
-                if agent=="implementation-planner" and time_idle:
-                    reconcile_planner_completion(sid)
-                # Compaction terminal state must be classified before an idle
-                # implementation session. Otherwise a failed compaction can be
-                # misrecorded as a genuine leaf failure.
-                reconcile_compaction_event(sid,agent,comps)
-                if agent in IMPLEMENTATION_AGENTS and time_idle:
-                    reconcile_idle_implementation_session(sid,agent)
-        except Exception as e: log(f"PERSISTED_RECONCILE_ERROR {e!r}")
+
+            if v1_runtime_enabled():
+                active=_v1_active_session_ids(strict=True)
+                con=db_connect()
+                rows=con.execute(
+                    "SELECT id,coalesce(agent,''),time_created "
+                    "FROM session "
+                    "WHERE parent_id IS NOT NULL AND directory=?",
+                    (PROJECT,),
+                ).fetchall() if PROJECT else []
+                con.close()
+
+                for sid,agent,time_created in rows:
+                    if int(time_created or 0)<START_MS and sid not in pending_sessions:
+                        continue
+                    prompt=first_user_text_db(sid)
+                    if (
+                        agent in IMPLEMENTATION_AGENTS
+                        or parse_deliverable(strip_subagent_prefix(prompt))
+                    ) and sid not in dispatch_seen:
+                        enforce_assignment(sid,agent,prompt)
+
+                    terminal=_v1_session_terminal(sid,active)
+                    if agent=="implementation-planner" and terminal:
+                        reconcile_planner_completion(sid)
+
+                    comps=_v1_compaction_count(sid)
+                    reconcile_compaction_event(sid,agent,comps)
+
+                    if agent in IMPLEMENTATION_AGENTS and terminal:
+                        reconcile_idle_implementation_session(sid,agent)
+            else:
+                con=db_connect()
+                rows=con.execute(
+                    "SELECT s.id,coalesce(s.agent,''),"
+                    "(SELECT count(*) FROM session_message m "
+                    "WHERE m.session_id=s.id AND m.type='compaction'),"
+                    "s.time_idle,s.time_created "
+                    "FROM session_v2 s "
+                    "WHERE s.parent_id IS NOT NULL AND s.directory=?",
+                    (PROJECT,),
+                ).fetchall() if PROJECT else []
+                con.close()
+                for sid,agent,comps,time_idle,time_created in rows:
+                    if int(time_created or 0)<START_MS and sid not in pending_sessions:
+                        continue
+                    prompt=first_user_text_db(sid)
+                    if (
+                        agent in IMPLEMENTATION_AGENTS
+                        or parse_deliverable(strip_subagent_prefix(prompt))
+                    ) and sid not in dispatch_seen:
+                        enforce_assignment(sid,agent,prompt)
+                    if agent=="implementation-planner" and time_idle:
+                        reconcile_planner_completion(sid)
+                    reconcile_compaction_event(sid,agent,comps)
+                    if agent in IMPLEMENTATION_AGENTS and time_idle:
+                        reconcile_idle_implementation_session(sid,agent)
+        except Exception as exc:
+            log(f"PERSISTED_RECONCILE_ERROR {exc!r}")
         time.sleep(0.5)
+
 
 def main():
     global PROJECT

@@ -2,11 +2,11 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
-export const HARD_MAX_CHILD_RESULT_CHARS = 2500;
-export const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
+const HARD_MAX_CHILD_RESULT_CHARS = 2500;
+const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
 
-const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/worker_sandbox.py";
-const FINALIZE_ACCEPTANCE = "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/finalize-acceptance.py";
+const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/worker_sandbox.py";
+const FINALIZE_ACCEPTANCE = "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/finalize-acceptance.py";
 const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
 const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
 const deterministicTransportProbeRoots = new Set();
@@ -77,7 +77,7 @@ function hookCallID(event) {
   return String(event?.callID || event?.callId || event?.id || "");
 }
 
-export function implementationDispatchToken(event, did) {
+function implementationDispatchToken(event, did) {
   const callID = hookCallID(event);
   if (!callID) return "";
   const deliverable = String(did || "");
@@ -86,7 +86,7 @@ export function implementationDispatchToken(event, did) {
     : callID;
 }
 
-export function toolResultText(result) {
+function toolResultText(result) {
   if (!result || typeof result !== "object") return "";
   if (typeof result.output === "string" && result.output.length) return result.output;
   if (typeof result.content === "string") return result.content;
@@ -103,7 +103,7 @@ export function toolResultText(result) {
   return typeof result.output === "string" ? result.output : "";
 }
 
-export function markRequestPurpose(event) {
+function markRequestPurpose(event) {
   if (event?.kind !== "compaction") return false;
   if (!event.headers || typeof event.headers !== "object") return false;
   event.headers["x-v2-request-purpose"] = "compaction";
@@ -162,7 +162,7 @@ const NATIVE_BACKGROUND_IMPLEMENTATION_AGENTS = new Set([
   "reasoning-builder", "integrator", "tester", "test-builder",
 ]);
 
-export function enableNativeImplementationBackground(args, agent, did) {
+function enableNativeImplementationBackground(args, agent, did) {
   if (
     !args ||
     typeof args !== "object" ||
@@ -181,11 +181,32 @@ function splitParent(args) {
   return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/)?.[1] || "";
 }
 
-function supervisor(directory, args) {
+function supervisor(directory, args, extraEnv = {}) {
   return execFileSync("python3", [
-    "/home/bking/AI/opencode-qwen38-multiagent-v2/scripts/supervisor.py",
+    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
     "--project", directory, ...args,
-  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+}
+
+async function activeSessionIDsForSupervisor(client, directory) {
+  const response = await client.session.status({ query: { directory } });
+  if (response?.error) {
+    throw new Error(
+      `DISPATCH_STATUS_SNAPSHOT_ERROR ${String(
+        response.error?.message || response.error || "session.status failed"
+      )}`
+    );
+  }
+  const data = response?.data ?? response;
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error("DISPATCH_STATUS_SNAPSHOT_ERROR invalid session.status response");
+  }
+  return Object.entries(data)
+    .filter(([, info]) =>
+      info && typeof info === "object" &&
+      (info.type === "busy" || info.type === "retry")
+    )
+    .map(([sessionID]) => sessionID);
 }
 
 function guardRootControlRead(directory, event, output) {
@@ -210,7 +231,7 @@ function guardRootControlRead(directory, event, output) {
 
 const earlyWriteSatisfiedSessions = new Set();
 
-export async function interruptDeniedSession(api, sessionID) {
+async function interruptDeniedSession(api, sessionID) {
   if (!api?.session || typeof api.session.interrupt !== "function") {
     throw new Error("native session.interrupt API unavailable");
   }
@@ -293,7 +314,7 @@ function guardProgressHandoff(directory, event, output) {
   }
 }
 
-export function proposalFromOutput(output, parent, directory) {
+function proposalFromOutput(output, parent, directory) {
   if (typeof output !== "string") return null;
   const raw = output.trim();
   if (!raw || raw.startsWith("```") || raw.endsWith("```")) return null;
@@ -349,7 +370,7 @@ function ownedArtifacts(directory, did) {
   }
 }
 
-export function boundedChildResult({ directory, args = {}, metadata = {}, original = "" }) {
+function boundedChildResult({ directory, args = {}, metadata = {}, original = "" }) {
   const did = exactDeliverable(args);
   const childSessionID = metadata?.sessionID || metadata?.sessionId || "unknown";
   const readyPath = /^D\d{3}(?:-[AB](?:[12])?)?$/.test(did)
@@ -389,203 +410,237 @@ export function boundedChildResult({ directory, args = {}, metadata = {}, origin
   return result;
 }
 
-export const V2BoundedSubagentPlugin = async ({ directory, api }) => {
-  // Stamp OpenCode V2's deterministic request kind before provider dispatch.
-  const modelRequest = await api.session.hook("model.request", async (event) => {
-    markRequestPurpose(event);
-    const sessionID = hookSessionID(event);
-    if (sessionID && deterministicTransportProbeRoots.has(sessionID)) {
-      transportProbeLog(directory, {
-        event: "root-model-request",
-        session: sessionID,
-        kind: String(event?.kind || ""),
-      });
-    }
-  });
+export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
+  const compatApi = {
+    session: {
+      interrupt: async ({ sessionID }) => {
+        const response = await client.session.abort({
+          path: { id: sessionID },
+          query: { directory },
+        });
+        if (response?.error) {
+          throw new Error(
+            String(response.error?.message || response.error || "session abort failed")
+          );
+        }
+        return response;
+      },
+    },
+  };
 
-  const before = await api.tool.hook("execute.before", async (event, output) => {
-    const probeArgs = hookArgs(event, output);
-    if (String(event?.tool || "") === "read" && isDeterministicTransportToolRead(probeArgs)) {
-      const key = `${hookSessionID(event)}:${hookCallID(event)}`;
-      deterministicTransportToolProbeCalls.add(key);
-      transportProbeLog(directory, {
-        event: "child-tool-before",
-        session: hookSessionID(event),
-        call: hookCallID(event),
-        tool: "read",
-      });
-    }
-    guardRootControlRead(directory, event, output);
-    guardSplitterToolBoundary(directory, event, output);
-    guardProgressHandoff(directory, event, output);
-    await guardEarlyWrite(directory, event, output, api);
-    guardWorkerMutation(directory, event, output);
-    if (event.tool !== "subagent" && event.tool !== "task") return;
-    // Support both the beta combined event shape and the newer split
-    // input/output hook shape.
-    const args = hookArgs(event, output);
-    const agent = taskAgent(args);
-    if (isDeterministicTransportProbe(args)) {
-      const sessionID = hookSessionID(event);
-      if (!sessionID) throw new Error("TRANSPORT_PROBE_DENY missing parent session id");
-      deterministicTransportProbeRoots.add(sessionID);
-      args.background = true;
-      transportProbeLog(directory, {
-        event: "task-before",
-        session: sessionID,
-        call: hookCallID(event),
-        agent: String(agent || ""),
-        background: true,
-      });
-    }
-    const prompt = args.prompt;
-    if (agent === "acceptance-validator") {
-      execFileSync("python3", [FINALIZE_ACCEPTANCE, "--prepare", directory], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    }
-    if (agent === "task-splitter") {
-      const parent = splitParent(args);
-      if (!parent) throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
-      // This durable preclaim prevents a restarted root from launching another
-      // splitter for the same generation. It has no attempt/operator authority.
-      supervisor(directory, ["--agent", "task-splitter", "--prompt", prompt, "--claim-splitter", hookCallID(event)]);
-      return;
-    }
-    if (agent === "general") {
-      throw new Error("DISPATCH_DENY general is not a canonical implementation role");
-    }
-    const hasDeliverable = typeof prompt === "string" && /^DELIVERABLE:\s*D\d{3}(?:-[AB](?:[12])?)?\s*$/m.test(prompt);
-    const implementationAgents = NATIVE_BACKGROUND_IMPLEMENTATION_AGENTS;
-    if (!implementationAgents.has(agent) && !hasDeliverable) return;
-    // Render the exact post-preclaim runtime prompt before reserving an attempt.
-    // Rendering is read-only; the canonical five-line parent prompt remains the
-    // only text authorized to reserve an attempt.
-    const did = exactDeliverable(args);
-    const runtimePrompt = implementationAgents.has(agent) && did !== "unknown"
-      ? supervisor(directory, ["--agent", String(agent || ""), "--render-runtime-prompt", did]).replace(/\r?\n$/, "")
-      : null;
-
-    // This deterministic supervisor claim occurs before OpenCode materializes
-    // the child session or sends a provider request.
-    // OpenCode2 beta can expose one shared hook call ID to multiple subagent
-    // calls emitted in the same assistant response. Namespace implementation
-    // reservations by canonical Dxxx so C3 batch preclaims remain unique while
-    // repeated delivery of the same call+Dxxx stays idempotent.
-    const dispatchToken = implementationDispatchToken(event, did);
-    supervisor(directory, ["--agent", String(agent || ""), "--prompt", String(prompt || ""), "--claim-dispatch", dispatchToken]);
-
-    // Only after a successful canonical preclaim may deterministic supervisor
-    // text replace the child-visible prompt. No model/root-authored suffix is
-    // accepted here.
-    if (runtimePrompt !== null) args.prompt = runtimePrompt;
-
-    // Native OpenCode background subagents return their tool receipt
-    // immediately while OpenCode itself creates the correctly parented child.
-    // The supervisor preclaim above remains authoritative for eligibility,
-    // attempts and the five-worker limit.
-    enableNativeImplementationBackground(args, agent, did);
-  });
-  const after = await api.tool.hook("execute.after", async (event, output) => {
-    const result = event?.result || output;
-    const probeKey = `${hookSessionID(event)}:${hookCallID(event)}`;
-    if (deterministicTransportToolProbeCalls.has(probeKey)) {
-      deterministicTransportToolProbeCalls.delete(probeKey);
-      transportProbeLog(directory, {
-        event: "child-tool-after",
-        session: hookSessionID(event),
-        call: hookCallID(event),
-        tool: String(event?.tool || ""),
-      });
-    }
-    if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
-    const args = hookArgs(event, output);
-    const rawResult = toolResultText(result);
-    const transportProbe = isDeterministicTransportProbe(args);
-    const splitterParent = taskAgent(args) === "task-splitter" ? splitParent(args) : "";
-    if (transportProbe) {
-      transportProbeLog(directory, {
-        event: "task-after",
-        session: hookSessionID(event),
-        call: hookCallID(event),
-        child: String(result?.metadata?.sessionID || result?.metadata?.sessionId || ""),
-        background: result?.metadata?.background === true,
-      });
-    }
-    if (splitterParent) {
-      // The completion event is the deterministic validation trigger. The
-      // supervisor reads only the splitter's durable proposal and records an
-      // explicit failure if it is absent or invalid; no root cycle is needed.
-      const session = String(result.metadata?.sessionID || "");
-      const token = hookCallID(event);
-      const encoded = Buffer.from(rawResult, "utf8").toString("base64");
-      try {
-        supervisor(directory, ["--complete-splitter", splitterParent, "--prompt", session, "--dispatch-token", token, "--splitter-output-b64", encoded]);
-      } catch {
-        // Status/lease state is durable; stale or invalid completions cannot commit.
+  return {
+    "chat.headers": async (input, output) => {
+      const agent = String(input?.agent || input?.message?.agent || "");
+      if (agent === "compaction") {
+        output.headers["x-v2-request-purpose"] = "compaction";
       }
-    }
-    let receipt;
-    if (transportProbe) {
-      const child = String(result?.metadata?.sessionID || result?.metadata?.sessionId || "unknown");
-      receipt = [
-        "V2_NATIVE_TRANSPORT_PROBE_STARTED",
-        `CHILD: ${child}`,
-        `BACKGROUND: ${result?.metadata?.background === true}`,
-      ].join("\n");
-    } else if (taskAgent(args) === "acceptance-validator") {
-      const raw = rawResult.trim();
-      const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
-      if (!modelPass) {
-        receipt = "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS";
-      } else {
+    },
+
+    "chat.params": async (input, _output) => {
+      const sessionID = hookSessionID(input);
+      if (sessionID && deterministicTransportProbeRoots.has(sessionID)) {
+        transportProbeLog(directory, {
+          event: "root-model-request",
+          session: sessionID,
+          agent: String(input?.agent || ""),
+          provider: String(input?.model?.providerID || ""),
+          model: String(input?.model?.id || input?.model?.modelID || ""),
+        });
+      }
+    },
+
+    "tool.execute.before": async (event, output) => {
+      const probeArgs = hookArgs(event, output);
+      if (String(event?.tool || "") === "read" && isDeterministicTransportToolRead(probeArgs)) {
+        const key = `${hookSessionID(event)}:${hookCallID(event)}`;
+        deterministicTransportToolProbeCalls.add(key);
+        transportProbeLog(directory, {
+          event: "child-tool-before",
+          session: hookSessionID(event),
+          call: hookCallID(event),
+          tool: "read",
+        });
+      }
+
+      guardRootControlRead(directory, event, output);
+      guardSplitterToolBoundary(directory, event, output);
+      guardProgressHandoff(directory, event, output);
+      await guardEarlyWrite(directory, event, output, compatApi);
+      guardWorkerMutation(directory, event, output);
+
+      if (event.tool !== "subagent" && event.tool !== "task") return;
+
+      const args = hookArgs(event, output);
+      const agent = taskAgent(args);
+
+      if (isDeterministicTransportProbe(args)) {
+        const sessionID = hookSessionID(event);
+        if (!sessionID) throw new Error("TRANSPORT_PROBE_DENY missing parent session id");
+        deterministicTransportProbeRoots.add(sessionID);
+        args.background = true;
+        transportProbeLog(directory, {
+          event: "task-before",
+          session: sessionID,
+          call: hookCallID(event),
+          agent: String(agent || ""),
+          background: true,
+        });
+      }
+
+      const prompt = args.prompt;
+
+      if (agent === "acceptance-validator") {
+        execFileSync(
+          "python3",
+          [FINALIZE_ACCEPTANCE, "--prepare", directory],
+          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+      }
+
+      if (agent === "task-splitter") {
+        const parent = splitParent(args);
+        if (!parent) {
+          throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
+        }
+        supervisor(directory, [
+          "--agent", "task-splitter",
+          "--prompt", prompt,
+          "--claim-splitter", hookCallID(event),
+        ]);
+        return;
+      }
+
+      if (agent === "general") {
+        throw new Error("DISPATCH_DENY general is not a canonical implementation role");
+      }
+
+      const hasDeliverable =
+        typeof prompt === "string" &&
+        /^DELIVERABLE:\s*D\d{3}(?:-[AB](?:[12])?)?\s*$/m.test(prompt);
+
+      const implementationAgents = NATIVE_BACKGROUND_IMPLEMENTATION_AGENTS;
+      if (!implementationAgents.has(agent) && !hasDeliverable) return;
+
+      const did = exactDeliverable(args);
+      const runtimePrompt =
+        implementationAgents.has(agent) && did !== "unknown"
+          ? supervisor(directory, [
+              "--agent", String(agent || ""),
+              "--render-runtime-prompt", did,
+            ]).replace(/\r?\n$/, "")
+          : null;
+
+      const dispatchToken = implementationDispatchToken(event, did);
+      const activeSessionIDs = await activeSessionIDsForSupervisor(client, directory);
+      supervisor(directory, [
+        "--agent", String(agent || ""),
+        "--prompt", String(prompt || ""),
+        "--claim-dispatch", dispatchToken,
+      ], {
+        V2_OPENCODE_ACTIVE_SESSION_IDS_JSON: JSON.stringify(activeSessionIDs),
+      });
+
+      if (runtimePrompt !== null) args.prompt = runtimePrompt;
+      enableNativeImplementationBackground(args, agent, did);
+    },
+
+    "tool.execute.after": async (event, output) => {
+      const result = event?.result || output;
+
+      const probeKey = `${hookSessionID(event)}:${hookCallID(event)}`;
+      if (deterministicTransportToolProbeCalls.has(probeKey)) {
+        deterministicTransportToolProbeCalls.delete(probeKey);
+        transportProbeLog(directory, {
+          event: "child-tool-after",
+          session: hookSessionID(event),
+          call: hookCallID(event),
+          tool: String(event?.tool || ""),
+        });
+      }
+
+      if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
+
+      const args = hookArgs(event, output);
+      const rawResult = toolResultText(result);
+      const transportProbe = isDeterministicTransportProbe(args);
+      const splitterParent =
+        taskAgent(args) === "task-splitter" ? splitParent(args) : "";
+
+      if (transportProbe) {
+        transportProbeLog(directory, {
+          event: "task-after",
+          session: hookSessionID(event),
+          call: hookCallID(event),
+          child: String(result?.metadata?.sessionID || result?.metadata?.sessionId || ""),
+          background: result?.metadata?.background === true,
+        });
+      }
+
+      if (splitterParent) {
+        const session = String(
+          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+        );
+        const token = hookCallID(event);
+        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
         try {
-          execFileSync("python3", [FINALIZE_ACCEPTANCE, directory], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-          receipt = "ACCEPTANCE_PASS";
-        } catch (error) {
-          const detail = String(error?.stderr || error?.message || error).trim().replace(/\s+/g, " ").slice(0, 1200);
-          receipt = `ACCEPTANCE_FAIL\nDETERMINISTIC_GATE: ${detail || "failed"}`;
+          supervisor(directory, [
+            "--complete-splitter", splitterParent,
+            "--prompt", session,
+            "--dispatch-token", token,
+            "--splitter-output-b64", encoded,
+          ]);
+        } catch {
         }
       }
-    } else {
-      receipt = boundedChildResult({ directory, args, metadata: result.metadata, original: rawResult });
-    }
-    // The beta constructs the parent-visible tool response from `content`.
-    // Updating `output` alone only changed hook metadata, not the text the root
-    // receives, so replace both representations with the same bounded receipt.
-    result.output = receipt;
-    result.content = [{ type: "text", text: receipt }];
-    result.metadata = {
-      ...result.metadata,
-      parentResultBounded: true,
-      parentResultChars: receipt.length,
-      fullOutputStorage: "session_history",
-    };
-    if (transportProbe) {
-      const sessionID = hookSessionID(event);
-      try {
-        await interruptDeniedSession(api, sessionID);
-        transportProbeLog(directory, {
-          event: "root-interrupt",
-          session: sessionID,
-          call: hookCallID(event),
-          status: "ok",
-        });
-      } catch (error) {
-        transportProbeLog(directory, {
-          event: "root-interrupt",
-          session: sessionID,
-          call: hookCallID(event),
-          status: "error",
-          detail: String(error?.message || error).slice(0, 500),
+
+      let receipt;
+      if (transportProbe) {
+        const child = String(
+          result?.metadata?.sessionID || result?.metadata?.sessionId || "unknown"
+        );
+        receipt = [
+          "V2_NATIVE_TRANSPORT_PROBE_STARTED",
+          `CHILD: ${child}`,
+          `BACKGROUND: ${result?.metadata?.background === true}`,
+        ].join("\n");
+      } else if (taskAgent(args) === "acceptance-validator") {
+        const raw = rawResult.trim();
+        const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
+        if (!modelPass) {
+          receipt = "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS";
+        } else {
+          try {
+            execFileSync(
+              "python3",
+              [FINALIZE_ACCEPTANCE, directory],
+              { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+            );
+            receipt = "ACCEPTANCE_PASS";
+          } catch (error) {
+            const detail = String(
+              error?.stderr || error?.message || error
+            ).trim().replace(/\s+/g, " ").slice(0, 1200);
+            receipt =
+              `ACCEPTANCE_FAIL\nDETERMINISTIC_GATE: ${detail || "failed"}`;
+          }
+        }
+      } else {
+        receipt = boundedChildResult({
+          directory,
+          args,
+          metadata: result.metadata,
+          original: rawResult,
         });
       }
-    }
-    // Batch 8: supervisor Verify still needs this exact attempt's
-    // ephemeral runtime environment. Terminal cleanup is supervisor-owned.
-  });
-  return () => {
-    modelRequest.dispose();
-    before.dispose();
-    after.dispose();
+
+      result.output = receipt;
+      result.metadata = {
+        ...result.metadata,
+        parentResultBounded: true,
+        parentResultChars: receipt.length,
+        fullOutputStorage: "session_history",
+      };
+    },
   };
 };
 
@@ -672,8 +727,3 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
 
   console.log("v2-bounded-subagent selftest: OK");
 }
-
-export default {
-  id: "v2-bounded-subagent",
-  setup: async (api) => V2BoundedSubagentPlugin({ directory: api.location.directory, api }),
-};
