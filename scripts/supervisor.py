@@ -76,6 +76,7 @@ IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=5
 MAX_SPLITTER_ATTEMPTS=2
+MAX_SPLITTER_OUTPUT_LIMIT_RECOVERIES=1
 SPLITTER_LEASE_SECONDS=600
 # execute.after can run before the child final text is durable in the session DB.
 # Give the persisted reconcile loop a short bounded window after the hook returns.
@@ -838,7 +839,8 @@ def save_split_status(did, state, **detail):
     keep={}
     for key in (
         "claim_count","proposal_failures","parent_finalize_failures",
-        "children","generation","transaction_id"
+        "children","generation","transaction_id","recovery_claim_budget",
+        "recovery_history"
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -1142,7 +1144,7 @@ def record_splitter_failure(did, reason, session="", validation=False):
     claims=int(status.get("claim_count") or 0)
     failures=int(status.get("proposal_failures") or 0)+1
     archived=archive_failed_split_proposal(did)
-    retryable=claims < MAX_SPLITTER_ATTEMPTS
+    retryable=claims < splitter_claim_limit(status)
     if retryable:
         state="split-retryable"
     else:
@@ -1157,6 +1159,29 @@ def record_splitter_failure(did, reason, session="", validation=False):
         lease_until_epoch=0,
     )
     return retryable,state
+
+
+def splitter_claim_limit(status):
+    return MAX_SPLITTER_ATTEMPTS + int(status.get("recovery_claim_budget") or 0)
+
+
+def recover_splitter_output_limit(parent):
+    """Authorize one audited replacement claim after repeated output truncation."""
+    if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
+        return False,"split-request-missing"
+    with splitter_state_lock(parent):
+        status=load_split_status(parent)
+        if status.get("state") != "splitter-failed": return False,"state-not-splitter-failed"
+        if status.get("reason") != "splitter-completed-without-json-proposal":
+            return False,"failure-not-output-missing"
+        if leaf_children(parent) or split_proposal_path(parent).exists():
+            return False,"split-already-materialized"
+        if int(status.get("recovery_claim_budget") or 0) >= MAX_SPLITTER_OUTPUT_LIMIT_RECOVERIES:
+            return False,"output-limit-recovery-exhausted"
+        history=list(status.get("recovery_history") or [])
+        history.append({"prior_claim_count":int(status.get("claim_count") or 0),"prior_proposal_failures":int(status.get("proposal_failures") or 0),"reason":"model-profile-repair"})
+        save_split_status(parent,"split-retryable",recovery_claim_budget=1,recovery_history=history,reason="operator-authorized-output-limit-recovery",lease_until_epoch=0)
+    return True,"recovered"
 
 
 def split_transaction_id(parent,generation,children):
@@ -1927,14 +1952,14 @@ def claim_splitter(parent, dispatch_token):
                 try: lease_until=float(status.get("lease_until_epoch") or 0)
                 except (TypeError,ValueError): lease_until=0
                 if lease_until>now: return False,"splitter-active"
-                if claims>=MAX_SPLITTER_ATTEMPTS:
+                if claims>=splitter_claim_limit(status):
                     save_split_status(parent,"splitter-failed",claim_count=claims,reason="splitter lease expired and claim budget is exhausted",lease_until_epoch=0)
                     return False,"splitter-failed"
                 save_split_status(parent,"split-retryable",claim_count=claims,reason="splitter lease expired",lease_until_epoch=0)
                 state="split-retryable"
             if state in {"split-validation-failed","splitter-failed","split-unavailable-read-only-parent","parent-finalize-failed"}: return False,state
             if leaf_children(parent): return False,"already-split"
-            if claims>=MAX_SPLITTER_ATTEMPTS:
+            if claims>=splitter_claim_limit(status):
                 save_split_status(parent,"splitter-failed",claim_count=claims,reason="splitter claim budget exhausted",lease_until_epoch=0)
                 return False,"splitter-failed"
             claims+=1
@@ -2099,7 +2124,7 @@ def reconcile_split_proposals():
                         expired=True
                     if expired:
                         claims=int(status.get("claim_count") or 0)
-                        if claims >= MAX_SPLITTER_ATTEMPTS:
+                        if claims >= splitter_claim_limit(status):
                             save_split_status(
                                 did,"splitter-failed",claim_count=claims,
                                 reason="splitter lease expired and claim budget is exhausted",
@@ -7069,7 +7094,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
     ap.add_argument("--root-read-check")
@@ -7233,6 +7258,15 @@ def main():
         ok,detail=claim_splitter(match.group(1),args.claim_splitter)
         if not ok: raise SystemExit(f"SPLIT_DENY parent={match.group(1)} reason={detail}")
         print(f"SPLIT_ALLOW parent={match.group(1)} generation=1")
+        return
+    if args.recover_splitter_output_limit:
+        if unknown or not args.project:
+            raise SystemExit("splitter output-limit recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_splitter_output_limit(args.recover_splitter_output_limit)
+        if not ok:
+            raise SystemExit(f"SPLIT_RECOVERY_DENY parent={args.recover_splitter_output_limit} reason={detail}")
+        print(f"SPLIT_RECOVERY_ALLOW parent={args.recover_splitter_output_limit} reason={detail}")
         return
     if args.complete_splitter:
         if unknown or not args.project or not args.dispatch_token:

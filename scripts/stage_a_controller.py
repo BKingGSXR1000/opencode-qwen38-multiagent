@@ -122,6 +122,14 @@ def canonical_execution_action(action: dict) -> dict:
     }
     if normalized["kind"] != "launch" or not normalized["agent"] or not normalized["deliverable"]:
         raise ControllerError(f"invalid implementation execution action: {action!r}")
+    if normalized["agent"] == "task-splitter":
+        try:
+            generation = int(action.get("generation"))
+        except (TypeError, ValueError) as exc:
+            raise ControllerError("task-splitter launch lacks a valid generation") from exc
+        if generation < 1:
+            raise ControllerError("task-splitter launch generation must be positive")
+        normalized["generation"] = generation
     return normalized
 
 
@@ -415,6 +423,44 @@ def build_implementation_subtask(action: dict, prompt: str) -> dict:
     }
 
 
+def build_task_splitter_subtask(action: dict) -> dict:
+    agent = str(action.get("agent") or "")
+    did = str(action.get("deliverable") or "")
+    if agent != "task-splitter" or not did:
+        raise ControllerError("task-splitter launch lacks canonical agent/deliverable")
+    canonical_execution_action(action)
+    return {
+        "type": "subtask",
+        "prompt": f"SPLIT_PARENT: {did}",
+        "description": f"Split {did}",
+        "agent": "task-splitter",
+        "command": "stage-a-controller",
+    }
+
+
+def unsupported_task_splitter_actions(actions: list, selected: dict) -> list:
+    """Return actions outside the intentionally narrow splitter executor slice."""
+    unsupported = []
+    for action in actions:
+        if not isinstance(action, dict):
+            unsupported.append(action)
+            continue
+        if action.get("kind") in {"wait", "rescan"}:
+            continue
+        if action.get("kind") != "launch" or not action.get("deliverable"):
+            unsupported.append(action)
+            continue
+        if action.get("agent") != "task-splitter":
+            continue
+        try:
+            is_selected = canonical_execution_action(action) == selected
+        except ControllerError:
+            is_selected = False
+        if not is_selected:
+            unsupported.append(action)
+    return unsupported
+
+
 def execute_first_implementation(
     project: Path,
     base_url: str,
@@ -500,6 +546,126 @@ def execute_first_implementation(
                 "AMBIGUOUS_EXECUTION replay forbidden: "
                 f"execution_id={execution_id} state_version={result['state_version']} "
                 f"deliverable={did} no preclaim/child evidence observed"
+            )
+
+        ensure_root_idle(project, base_url, root)
+        baseline_attempt = attempt_snapshot(project, did)
+        baseline_children = child_snapshot(project, base_url, root)
+        intent = {
+            "execution_id": execution_id,
+            "state_version": result["state_version"],
+            "root_session": root,
+            "action": canonical_action,
+            "transport": "prompt_async+SubtaskPart",
+            "transport_may_have_been_attempted": True,
+            "created_at_ms": int(time.time() * 1000),
+            "baseline_attempt": baseline_attempt,
+            "baseline_child_ids": sorted(
+                str(item.get("id"))
+                for item in baseline_children
+                if isinstance(item, dict) and item.get("id")
+            ),
+        }
+        executions[execution_id] = intent
+        save_execution_ledger(project, ledger)
+
+        url = workspace_url(
+            base_url,
+            f"/session/{urllib.parse.quote(root)}/prompt_async",
+            project,
+        )
+        try:
+            payload = {
+                "agent": "transport-root",
+                "model": {"providerID": "v2noop", "modelID": "root-noop"},
+                "parts": [part],
+            }
+            status, body = http_json("POST", url, payload, timeout=10.0)
+        except ControllerError as exc:
+            raise ControllerError(
+                f"{exc}; execution_id={execution_id}; transport outcome is ambiguous; "
+                "blind replay is forbidden; use --reconcile-execution with this execution_id"
+            ) from exc
+        if status != 204:
+            raise ControllerError(
+                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+                f"execution_id={execution_id} remains ambiguous and cannot be replayed blindly"
+            )
+
+        return {
+            "protocol": EXECUTION_RECEIPT_PROTOCOL,
+            "state_version": result["state_version"],
+            "root_session": root,
+            "action": canonical_action,
+            "execution_id": execution_id,
+            "http_status": status,
+            "transport": "prompt_async+SubtaskPart",
+            "idempotency_intent_persisted": True,
+            "replay_suppressed": False,
+        }
+
+
+def execute_first_task_splitter(
+    project: Path,
+    base_url: str,
+    result: dict,
+    explicit_root: str = "",
+) -> dict:
+    actions = result["actions"]
+    split_actions = [
+        action
+        for action in actions
+        if isinstance(action, dict)
+        and action.get("kind") == "launch"
+        and action.get("agent") == "task-splitter"
+        and action.get("deliverable")
+    ]
+    if len(split_actions) != 1:
+        raise ControllerError(
+            "task-splitter executor requires exactly one deterministic splitter launch: "
+            + json.dumps(split_actions, sort_keys=True)
+        )
+    launch = split_actions[0]
+    canonical_action = canonical_execution_action(launch)
+    unsupported = unsupported_task_splitter_actions(actions, canonical_action)
+    if unsupported:
+        raise ControllerError(
+            "mixed/unsupported deterministic actions in task-splitter slice: "
+            + json.dumps(unsupported, sort_keys=True)
+        )
+
+    part = build_task_splitter_subtask(launch)
+    root = resolve_root_session(project, base_url, explicit_root)
+    execution_id = execution_action_id(result["state_version"], root, canonical_action)
+    did = str(canonical_action["deliverable"])
+
+    with execution_lock(project):
+        current = evaluate(project)
+        if current["state_version"] != result["state_version"]:
+            raise ControllerError(
+                f"state changed before dispatch: selected={result['state_version']} "
+                f"current={current['state_version']}"
+            )
+        if current["actions"] != result["actions"]:
+            raise ControllerError("deterministic actions changed before dispatch")
+
+        ledger = load_execution_ledger(project)
+        executions = ledger["executions"]
+        existing = executions.get(execution_id)
+        if existing is not None:
+            if not isinstance(existing, dict):
+                raise ControllerError(f"execution ledger entry invalid: {execution_id}")
+            if existing.get("action") != canonical_action:
+                raise ControllerError(f"execution ledger action mismatch: {execution_id}")
+            attempts = attempt_snapshot(project, did)
+            children = child_snapshot(project, base_url, root)
+            evidence = reconcile_execution_evidence(existing, attempts, children)
+            if evidence:
+                return replay_receipt(existing, evidence)
+            raise ControllerError(
+                "AMBIGUOUS_EXECUTION replay forbidden: "
+                f"execution_id={execution_id} state_version={result['state_version']} "
+                f"deliverable={did} no child evidence observed"
             )
 
         ensure_root_idle(project, base_url, root)
@@ -653,6 +819,34 @@ def selftest() -> None:
             f"subtask payload mismatch actual={payload!r} expected={expected_payload!r}"
         )
 
+    split_action = {
+        "kind": "launch", "agent": "task-splitter", "deliverable": "D042", "generation": 3,
+    }
+    split_payload = build_task_splitter_subtask(split_action)
+    if split_payload != {
+        "type": "subtask", "prompt": "SPLIT_PARENT: D042", "description": "Split D042",
+        "agent": "task-splitter", "command": "stage-a-controller",
+    }:
+        raise ControllerError(f"task-splitter payload mismatch actual={split_payload!r}")
+    if canonical_execution_action(split_action).get("generation") != 3:
+        raise ControllerError("task-splitter execution action did not bind generation")
+    if unsupported_task_splitter_actions(
+        [
+            split_action,
+            {"kind": "launch", "agent": "probe-builder", "deliverable": "D043"},
+        ],
+        canonical_execution_action(split_action),
+    ):
+        raise ControllerError("task-splitter slice rejected its selected action")
+    if not unsupported_task_splitter_actions(
+        [
+            split_action,
+            {"kind": "launch", "agent": "task-splitter", "deliverable": "D043", "generation": 1},
+        ],
+        canonical_execution_action(split_action),
+    ):
+        raise ControllerError("task-splitter slice allowed a second splitter action")
+
     try:
         build_implementation_subtask(
             {"kind": "launch", "agent": "task-splitter", "deliverable": "D042"},
@@ -738,6 +932,7 @@ def main() -> int:
     ap.add_argument("--poll", type=float, default=POLL_DEFAULT)
     ap.add_argument("--require-supervisor-shadow", action="store_true")
     ap.add_argument("--execute-first-implementation", action="store_true")
+    ap.add_argument("--execute-first-task-splitter", action="store_true")
     ap.add_argument("--reconcile-execution", default="")
     ap.add_argument("--base-url", default=os.environ.get("V2_OPENCODE_BASE_URL", ""))
     ap.add_argument("--root-session", default="")
@@ -764,6 +959,9 @@ def main() -> int:
         print(json.dumps(receipt, sort_keys=True, indent=2))
         return 0
 
+    if ns.execute_first_implementation and ns.execute_first_task_splitter:
+        ap.error("choose at most one explicit executor")
+
     if ns.execute_first_implementation:
         if not ns.once or ns.watch:
             ap.error("--execute-first-implementation requires --once and forbids --watch")
@@ -776,6 +974,26 @@ def main() -> int:
             ap.error("--execute-first-implementation requires --base-url")
         result = one_pass(project, True)
         receipt = execute_first_implementation(
+            project,
+            ns.base_url,
+            result,
+            explicit_root=ns.root_session,
+        )
+        print(json.dumps(receipt, sort_keys=True, indent=2))
+        return 0
+
+    if ns.execute_first_task_splitter:
+        if not ns.once or ns.watch:
+            ap.error("--execute-first-task-splitter requires --once and forbids --watch")
+        if not ns.require_supervisor_shadow:
+            ap.error(
+                "--execute-first-task-splitter currently requires "
+                "--require-supervisor-shadow"
+            )
+        if not ns.base_url:
+            ap.error("--execute-first-task-splitter requires --base-url")
+        result = one_pass(project, True)
+        receipt = execute_first_task_splitter(
             project,
             ns.base_url,
             result,
