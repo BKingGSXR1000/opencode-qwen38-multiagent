@@ -617,7 +617,9 @@ def verify_reporting_rule():
         "Only report or write `exact Verify passed` when you ran the context packet's "
         "verify_command UNCHANGED and that exact command exited 0. Any modified, "
         "equivalent, diagnostic, or smoke check must be labeled `noncanonical check`; "
-        "never claim it proves the canonical Verify. Supervisor Verify evidence is authoritative."
+        "never claim it proves the canonical Verify. Run verification commands directly; "
+        "do not create helper scripts, temporary files, or wrapper files outside your owned "
+        "artifacts. Supervisor Verify evidence is authoritative."
     )
 
 
@@ -656,6 +658,23 @@ def implementation_runtime_prompt(did,agent):
         return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])+verify_reporting_rule()
 
     owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
+
+    if agent in IMPLEMENTATION_AGENTS and owned:
+        implementer_direct_write=(
+            "\n\nIMPLEMENTER DIRECT-WRITE ORDER — EXACT:\n"
+            "1. Read the authoritative context packet exactly once. If a named owned artifact "
+            "already exists, inspect only that artifact; do not explore the plan, repository, "
+            "or unrelated runtime state before making progress.\n"
+            "2. Your NEXT tool-bearing response MUST write or edit an owned project artifact. "
+            "Start with the smallest contract-shaped, valid artifact that records the facts "
+            "available from the packet and permitted dependency outputs. Missing evidence is "
+            "a value to record or validate after the artifact exists, not permission for more "
+            "unbounded discovery.\n"
+            "3. After the first owned-artifact change, inspect only direct dependencies needed "
+            "to complete it, run the exact Verify command, and repair only owned artifacts.\n"
+            "The Early Write Gate below is a ceiling, not a target."
+        )
+        base=base+implementer_direct_write
 
     if agent=="probe-builder" and owned:
         direct_write=(
@@ -3609,8 +3628,55 @@ def probe_direct_write_gate_state(sid,tool="",args=None):
     )
 
 
+def implementation_direct_write_gate_state(sid,tool="",args=None):
+    """After context inspection, steer implementation leaves to an owned write.
+
+    Unlike the later early-write deadline, this is a recoverable boundary: the
+    rejected discovery call is shown to the worker and it can immediately make
+    the required owned-artifact write without losing the attempt.
+    """
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS or agent in READ_ONLY_SPLIT_ROLES:
+        return "na","not-writing-implementation-worker"
+    did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if not did or not isinstance(leaf,dict) or not owned_artifact_paths(leaf):
+        return "na","not-owned-artifact-implementation"
+    turns=persisted_completed_tool_turns(sid)
+    if turns < 1:
+        return "allow",f"implementation_direct_write completed_tool_turns={turns} required=1"
+    if ready_info(did):
+        return "satisfied","implementation leaf-ready"
+    attempt=attempt_sequence_for_session(sid,did)
+    if not attempt:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+    changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
+    if changed:
+        return "satisfied",f"implementation owned-artifact-delta attempt={attempt}"
+    if _current_tool_directly_mutates_owned_artifact(did,tool,args):
+        return "implementation-write-only",(
+            f"implementation_direct_write completed_tool_turns={turns} "
+            f"owned_artifact_write={did}"
+        )
+    return "implementation-write-required",(
+        f"IMPLEMENTATION_WRITE_REQUIRED deliverable={did} completed_tool_turns={turns} "
+        f"required=1 detail={detail} next_tool=direct-owned-artifact-write"
+    )
+
+
 def enforce_early_write_gate(sid,tool="",args=None):
     """Retire at the exact S/M deadline, except one final progress-file write."""
+    implementation_state,implementation_detail=implementation_direct_write_gate_state(
+        sid,tool,args
+    )
+    if implementation_state=="implementation-write-required":
+        log(f"IMPLEMENTATION_WRITE_REQUIRED session={sid} {implementation_detail}")
+        csv("IMPLEMENTATION_WRITE_REQUIRED",sid,_session_agent_db(sid),implementation_detail)
+        return implementation_state,implementation_detail
+    if implementation_state in {"implementation-write-only","satisfied"}:
+        return implementation_state,implementation_detail
+
     probe_state,probe_detail=probe_direct_write_gate_state(sid,tool,args)
     if probe_state=="probe-write-required":
         log(f"PROBE_WRITE_REQUIRED session={sid} {probe_detail}")

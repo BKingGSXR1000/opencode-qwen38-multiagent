@@ -270,7 +270,7 @@ async function guardEarlyWrite(directory, event, output, api) {
     throw new Error(detail || `EARLY_WRITE_DENY session=${sessionID}`);
   }
   const earlyWriteResult = String(raw || "").trim();
-  if (/^EARLY_WRITE_PROBE_WRITE_REQUIRED\b/.test(earlyWriteResult)) {
+  if (/^EARLY_WRITE_(?:PROBE|IMPLEMENTATION)_WRITE_REQUIRED\b/.test(earlyWriteResult)) {
     // Recoverable deterministic steering: reject this one tool, but do not
     // abort the child. The model can immediately retry with the required
     // direct owned-artifact write/edit.
@@ -662,6 +662,11 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
     "EARLY_WRITE_PROBE_WRITE_REQUIRED session=ses-test PROBE_WRITE_REQUIRED deliverable=D001";
   if (!/^EARLY_WRITE_PROBE_WRITE_REQUIRED\b/.test(probeWriteRequired)) {
     throw new Error("probe direct-write recoverable guard marker changed");
+  }
+  const implementationWriteRequired =
+    "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED session=ses-test IMPLEMENTATION_WRITE_REQUIRED deliverable=D004";
+  if (!/^EARLY_WRITE_(?:PROBE|IMPLEMENTATION)_WRITE_REQUIRED\b/.test(implementationWriteRequired)) {
+    throw new Error("implementation direct-write recoverable guard marker changed");
   }
   const event = { kind: "compaction", headers: {} };
   if (!markRequestPurpose(event) || event.headers["x-v2-request-purpose"] !== "compaction") {
