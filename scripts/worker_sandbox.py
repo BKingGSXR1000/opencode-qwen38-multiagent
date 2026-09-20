@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -1117,6 +1118,51 @@ def replacement_command(project: Path, ctx, command: str):
     return " ".join(shell_quote(str(part)) for part in parts)
 
 
+def normalize_worker_bash_command(project: Path, ctx, command: str):
+    """Collapse model-reflected canonical run-bash wrappers back to one layer.
+
+    OpenCode persists tool arguments after the plugin's before-hook rewrite.
+    A worker can therefore see the canonical worker_sandbox.py run-bash wrapper
+    in its own previous tool history and imitate it on a later bash call.
+    Re-wrapping that reflected wrapper nests shell quoting and can corrupt the
+    inner command. Only the exact canonical argv for this project/session/agent
+    is unwrapped; the decoded payload still executes through run_bash().
+    """
+    current=str(command)
+    prefix=[
+        "python3",str(Path(__file__).resolve()),"run-bash",
+        "--project",str(project.resolve()),
+        "--session",ctx["session"],
+        "--agent",ctx.get("agent",""),
+        "--command-b64",
+    ]
+    for _ in range(8):
+        try:
+            parts=shlex.split(current,posix=True)
+        except ValueError:
+            return current
+        if len(parts)!=len(prefix)+1 or parts[:-1]!=prefix:
+            return current
+        token=parts[-1]
+        try:
+            raw=base64.b64decode(token,validate=True)
+            current=raw.decode("utf-8")
+        except Exception as exc:
+            raise SandboxError(
+                "WORKER_FIREWALL_DENY malformed canonical sandbox wrapper"
+            ) from exc
+
+    try:
+        parts=shlex.split(current,posix=True)
+    except ValueError:
+        return current
+    if len(parts)==len(prefix)+1 and parts[:-1]==prefix:
+        raise SandboxError(
+            "WORKER_FIREWALL_DENY excessive canonical sandbox wrapper nesting"
+        )
+    return current
+
+
 def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str, args):
     ctx=resolve_worker(project,session,call_id,agent)
     if not ctx.get("worker"):
@@ -1153,6 +1199,7 @@ def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str,
         command=args.get("command") if isinstance(args,dict) else None
         if not isinstance(command,str) or not command.strip():
             raise SandboxError("bash command missing")
+        command=normalize_worker_bash_command(project,ctx,command)
         return {
             "action":"replace-bash",
             "worker":True,
@@ -1222,6 +1269,34 @@ def selftest(require_bwrap=False):
         })
         ctx=resolve_worker(project,"ses_test","","implementer")
         assert ctx["worker"] and ctx["did"]=="D001"
+
+        # Regression: OpenCode persists the plugin-rewritten bash command.
+        # If the model mirrors that canonical wrapper, collapse it back to the
+        # raw payload before producing exactly one fresh wrapper.
+        raw_cmd="printf 'wrapped-ok\\n' > src/owned.txt"
+        wrapped=replacement_command(project,ctx,raw_cmd)
+        double_wrapped=replacement_command(project,ctx,wrapped)
+        assert normalize_worker_bash_command(project,ctx,raw_cmd)==raw_cmd
+        assert normalize_worker_bash_command(project,ctx,wrapped)==raw_cmd
+        assert normalize_worker_bash_command(project,ctx,double_wrapped)==raw_cmd
+
+        tampered=wrapped+" ; printf bad > other.txt"
+        assert normalize_worker_bash_command(project,ctx,tampered)==tampered
+
+        malformed_prefix=[
+            "python3",str(Path(__file__).resolve()),"run-bash",
+            "--project",str(project.resolve()),
+            "--session",ctx["session"],
+            "--agent",ctx.get("agent",""),
+            "--command-b64","not_base64!",
+        ]
+        malformed=" ".join(shell_quote(str(part)) for part in malformed_prefix)
+        try:
+            normalize_worker_bash_command(project,ctx,malformed)
+            raise AssertionError("malformed canonical wrapper was accepted")
+        except SandboxError as exc:
+            assert "malformed canonical sandbox wrapper" in str(exc), exc
+
         authorize_paths(project,ctx,["src/owned.txt"],"edit")
         try:
             authorize_paths(project,ctx,["other.txt"],"edit")

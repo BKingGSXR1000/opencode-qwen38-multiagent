@@ -655,6 +655,23 @@ def implementation_runtime_prompt(did,agent):
         return "\n".join(lines[:2])+"\n\n"+action_order+"\n\n"+"\n".join(lines[3:])+verify_reporting_rule()
 
     owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
+
+    if agent=="probe-builder" and owned:
+        direct_write=(
+            "\n\nPROBE DIRECT-WRITE ORDER — EXACT:\n"
+            "1. Context/progress reads are inspection turn 1.\n"
+            "2. Use at most ONE more tool-bearing response for measurements required by Done-when/Verify. "
+            "No general root/.opencode-v2/cache/venv exploration.\n"
+            "3. The NEXT tool-bearing response MUST use write or edit on the primary owned artifact. "
+            "For JSON include every Done-when key; a missing component/path is a measured false/not-present "
+            "result, not a reason for more discovery.\n"
+            "4. Bash measures only; never use it to create the primary artifact. Any shell/tool/optional-import "
+            "error means persist known facts next instead of escalating the shell command.\n"
+            "5. After the artifact exists, run exact Verify and repair only the owned artifact with write/edit.\n"
+            "The Early Write Gate below is a ceiling, not a target."
+        )
+        base=base+direct_write
+
     if agent not in READ_ONLY_SPLIT_ROLES and owned:
         deadline=early_write_completed_turn_limit(leaf)
         gate=(
@@ -3150,6 +3167,8 @@ SUPERVISOR_DYNAMIC_CONTROL_PATHS={
     ".opencode-v2/reference-gate.json",
     ".opencode-v2/reference-validation-gate.json",
     ".opencode-v2/IMPLEMENTATION_PLAN.guard.json",
+    ".opencode-v2/work/stage-a-controller-executions.json",
+    ".opencode-v2/work/stage-a-controller.lock",
 }
 SUPERVISOR_DYNAMIC_CONTROL_PREFIXES=(
     ".opencode-v2/query/",
@@ -3515,8 +3534,66 @@ def progress_handoff_tool_state(sid,tool,args):
     return "deny","PROGRESS_CHECKPOINT_REQUIRED"
 
 
+def _current_tool_directly_mutates_owned_artifact(did,tool,args):
+    """Probe direct-write boundary: editor mutation only, never shell mutation."""
+    if tool not in {"write","edit","apply_patch","patch","multiedit"}:
+        return False
+    return _current_tool_mutates_owned_artifact(did,tool,args)
+
+
+def probe_direct_write_gate_state(sid,tool="",args=None):
+    """After two probe turns without owned progress, require a direct editor write.
+
+    This is a recoverable tool boundary, unlike the later hard early-write
+    retirement. A denied discovery tool remains visible to the model so its
+    next response can switch to the required owned-artifact write.
+    """
+    agent=_session_agent_db(sid)
+    if agent!="probe-builder":
+        return "na","not-probe-builder"
+    did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if (
+        not did or not isinstance(leaf,dict)
+        or leaf.get("split_handoff_only")
+        or not owned_artifact_paths(leaf)
+    ):
+        return "na","not-owned-artifact-probe"
+
+    turns=persisted_completed_tool_turns(sid)
+    if turns < 2:
+        return "allow",f"probe_direct_write completed_tool_turns={turns} required=2"
+    if ready_info(did):
+        return "satisfied","probe leaf-ready"
+
+    attempt=attempt_sequence_for_session(sid,did)
+    if not attempt:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+    changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
+    if changed:
+        return "satisfied",f"probe owned-artifact-delta attempt={attempt}"
+    if _current_tool_directly_mutates_owned_artifact(did,tool,args):
+        return "probe-write-only",(
+            f"probe_direct_write completed_tool_turns={turns} "
+            f"owned_artifact_write={did}"
+        )
+    return "probe-write-required",(
+        f"PROBE_WRITE_REQUIRED deliverable={did} completed_tool_turns={turns} "
+        f"required=2 detail={detail} next_tool=direct-owned-artifact-write"
+    )
+
+
 def enforce_early_write_gate(sid,tool="",args=None):
     """Retire at the exact S/M deadline, except one final progress-file write."""
+    probe_state,probe_detail=probe_direct_write_gate_state(sid,tool,args)
+    if probe_state=="probe-write-required":
+        log(f"PROBE_WRITE_REQUIRED session={sid} {probe_detail}")
+        csv("PROBE_WRITE_REQUIRED",sid,"probe-builder",probe_detail)
+        return probe_state,probe_detail
+    if probe_state in {"probe-write-only","satisfied"}:
+        return probe_state,probe_detail
+
     state,detail=early_write_gate_state(sid)
     if state!="deny":
         return state,detail
@@ -3524,7 +3601,7 @@ def enforce_early_write_gate(sid,tool="",args=None):
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     deadline=early_write_completed_turn_limit(leaf)
     turns=persisted_completed_tool_turns(sid)
-    if did and turns==deadline:
+    if did and turns>=deadline:
         if _tool_targets_exact_progress_file(did,tool,args):
             return "final-progress",(
                 f"completed_tool_turns={turns} deadline={deadline} exact_progress_write={did}"
@@ -3607,9 +3684,17 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
         # Do not recycle the whole session for a denied second discovery.
         return ""
     limit=PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS
-    state=worker_progress.setdefault(
-        sid,{"signature":signature,"baseline_turns":0,"turns":persisted_turns}
-    )
+    state=worker_progress.get(sid)
+    if state is None:
+        # First observation establishes the durable-progress baseline at the
+        # already-persisted tool-turn count. Do not retroactively charge turns
+        # that happened before this signature was first observed.
+        worker_progress[sid]={
+            "signature":signature,
+            "baseline_turns":persisted_turns,
+            "turns":0,
+        }
+        return ""
     if signature!=state["signature"]:
         state.update(
             signature=signature,baseline_turns=persisted_turns,turns=0
@@ -6986,6 +7071,7 @@ def main():
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter")
     ap.add_argument("--render-runtime-prompt")
+    ap.add_argument("--render-dispatch-prompt")
     ap.add_argument("--root-read-check")
     ap.add_argument("--early-write-check")
     ap.add_argument("--tool-name",default="")
@@ -7091,6 +7177,25 @@ def main():
             )
         print(f"SPLITTER_TOOL_{state.upper()} session={args.splitter_tool_check} {detail}")
         return
+    if args.render_dispatch_prompt:
+        if unknown or not args.project or not args.agent:
+            raise SystemExit("dispatch prompt render requires --project --agent --render-dispatch-prompt")
+        PROJECT=args.project
+        did=args.render_dispatch_prompt
+        if not valid_deliverable_id(did):
+            raise SystemExit(f"DISPATCH_PROMPT_DENY invalid_deliverable={did}")
+        leaf=(load_manifest().get("leaves") or {}).get(did)
+        if not isinstance(leaf,dict):
+            raise SystemExit(f"DISPATCH_PROMPT_DENY unknown_deliverable={did}")
+        if leaf.get("split_children"):
+            raise SystemExit(f"DISPATCH_PROMPT_DENY split_parent={did}")
+        expected=leaf.get("role","")
+        if expected!=args.agent:
+            raise SystemExit(
+                f"DISPATCH_PROMPT_DENY role_mismatch expected={expected} actual={args.agent}"
+            )
+        print(implementation_prompt(did))
+        return
     if args.render_runtime_prompt:
         if unknown or not args.project or not args.agent:
             raise SystemExit("runtime prompt render requires --project --agent --render-runtime-prompt")
@@ -7140,6 +7245,10 @@ def main():
         if not ok: raise SystemExit(3)
         return
         return
+    if args.project:
+        PROJECT=args.project
+    if not PROJECT:
+        raise SystemExit("supervisor daemon requires --project or V2_PROJECT")
     ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} implementation_compactions=3 fourth_compaction=retire")
     threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()
 if __name__=="__main__": main()

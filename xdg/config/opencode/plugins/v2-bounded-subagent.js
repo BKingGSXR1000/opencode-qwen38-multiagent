@@ -269,7 +269,14 @@ async function guardEarlyWrite(directory, event, output, api) {
     }
     throw new Error(detail || `EARLY_WRITE_DENY session=${sessionID}`);
   }
-  if (/^EARLY_WRITE_(?:NA|SATISFIED)\b/.test(String(raw || "").trim())) {
+  const earlyWriteResult = String(raw || "").trim();
+  if (/^EARLY_WRITE_PROBE_WRITE_REQUIRED\b/.test(earlyWriteResult)) {
+    // Recoverable deterministic steering: reject this one tool, but do not
+    // abort the child. The model can immediately retry with the required
+    // direct owned-artifact write/edit.
+    throw new Error(earlyWriteResult);
+  }
+  if (/^EARLY_WRITE_(?:NA|SATISFIED)\b/.test(earlyWriteResult)) {
     earlyWriteSatisfiedSessions.add(sessionID);
   }
 }
@@ -650,6 +657,11 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
   if (toolResultText(contentOnly) !== proposal) throw new Error("content-only tool result was not extracted");
   if (toolResultText({ content: "ACCEPTANCE_PASS" }) !== "ACCEPTANCE_PASS") {
     throw new Error("string content tool result was not extracted");
+  }
+  const probeWriteRequired =
+    "EARLY_WRITE_PROBE_WRITE_REQUIRED session=ses-test PROBE_WRITE_REQUIRED deliverable=D001";
+  if (!/^EARLY_WRITE_PROBE_WRITE_REQUIRED\b/.test(probeWriteRequired)) {
+    throw new Error("probe direct-write recoverable guard marker changed");
   }
   const event = { kind: "compaction", headers: {} };
   if (!markRequestPurpose(event) || event.headers["x-v2-request-purpose"] !== "compaction") {
