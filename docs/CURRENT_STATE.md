@@ -56,21 +56,37 @@ Disposable live canary:
 
 The acceptance-only fixture intentionally has no `TEST_CHECKS.json`; the full project `run-checks.py --project` complaint is not a canary blocker.
 
+### Current recovery state
+The D004 provenance audit established that its two semantic failures were later
+reclassified as `bad-plan` during a parent-contract repair, but old code still
+counted those immutable dispatches against the automatic retry budget. The
+repair packet was also discarded after syntax compilation without proving an
+affected leaf changed.
+
+`93c1e13` fixes both generic control-plane defects and binds readiness to the
+exact Verify command. On 2026-09-21 the retained supervisor reconciled only
+the stale `D002` and `D003` readiness markers, recording one bounded
+plan-contract replacement credit for each. No session, attempt, failure, or
+split record was reset or removed.
+
+- D003 is now the next eligible semantic producer.
+- D002 remains an accepted historical split parent whose current parent Verify
+  must be re-established before downstream use.
+- D004 remains blocked on D002 and D003; it is not eligible to retry or to
+  fabricate producer artifacts.
+
 ### Next action
-Perform the read-only D004 provenance/blocker audit in `ROADMAP.md`, then apply only the deterministic recovery policy supported by durable state and architecture. Preserve D002 and every valid historical attempt/split record.
+Run the normal live consolidated preflight, then advance only the deterministic
+next action. Preserve D002 and every valid historical attempt/split record.
 
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 
 D002 is complete historical evidence; do not reset/replay it.
 
-Current known blocker:
-- D004
-- attempts 3
-- allowed attempts 3
-- `attempt_limit_reached = true`
-
-After permission stabilization, audit D004 provenance and apply intended deterministic recovery policy; do not mutate history merely to clear the blocker.
+Current downstream blocker: D004 awaits valid current-contract completion of
+D002 and D003. Its three historical dispatches remain intact; stale readiness
+does not authorize a retry by itself.
 
 ## Configuration freeze
 Until explicitly requested, keep worker/planner models (except restoring documented values), context sizes, concurrency, MTP, reasoning settings, and production vLLM tuning unchanged.

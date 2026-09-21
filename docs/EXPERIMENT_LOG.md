@@ -84,3 +84,23 @@ Runtime evidence: `/tmp/a2-absolute-permission-canary-20260921-v2/runtime/result
 - no unowned project file was created; deterministic acceptance finalization produced `ACCEPTANCE.ready`
 
 The fixture deliberately has no `TEST_CHECKS.json`; the full project `run-checks.py --project` complaint is expected and does not weaken this permission or acceptance-finalization evidence.
+
+## D004 provenance and deterministic recovery — 2026-09-21
+Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
+
+- D004's immutable ledger remains at three dispatches: one infrastructure
+  dispatch and two later reclassified `bad-plan` entries from the runtime
+  parent-contract repair. No D004 attempt was reset or replayed.
+- The archived D004 split proved its child handoff found no VECTORS files.
+  The current D004 Verify therefore cannot be satisfied by its manifest-only
+  ownership; it must wait for producer recovery.
+- The audit found D002 and D003 had readiness from earlier, weaker Verify
+  commands, while the current plan requires real VECTORS artifacts. The
+  retained filesystem has no vector files.
+- `93c1e13` adds bounded, auditable replacement credits for changed Verify
+  contracts and rejects no-op runtime plan repairs. The supervisor reconciled
+  exactly `D002` and `D003` readiness markers; both ledgers retain their full
+  dispatch/failure histories and gained one plan-contract revision credit.
+- Resulting route: D003 is eligible; D002 remains an accepted split parent;
+  D004 is correctly blocked on both producers. No semantic child was launched
+  by the audit or reconciliation.
