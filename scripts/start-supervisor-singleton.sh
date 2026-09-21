@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT="$HOME/AI/opencode-qwen38-multiagent-v2"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SUP="$ROOT/scripts/supervisor.py"
 PROJECT="${V2_PROJECT:-${1:-}}"
 
@@ -28,7 +28,7 @@ if ((${#OLD[@]})); then
   fi
 fi
 
-V2_PROJECT="$PROJECT" python3 "$SUP" >/dev/null 2>>"$ROOT/logs/supervisor-stderr.log" &
+V2_ROOT="$ROOT" V2_PROJECT="$PROJECT" python3 "$SUP" >/dev/null 2>>"$ROOT/logs/supervisor-stderr.log" &
 PID=$!
 
 sleep 0.5

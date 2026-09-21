@@ -278,6 +278,61 @@ def reconcile_execution_evidence(intent: dict, attempts: dict, children: list[di
     return None
 
 
+def native_child_ids(intent: dict, children: list[dict]) -> list[str]:
+    """Return only the new, correctly parented child sessions for one intent."""
+    baseline = set(intent.get("baseline_child_ids") or [])
+    root = str(intent.get("root_session") or "")
+    action = intent.get("action") or {}
+    agent = str(action.get("agent") or "")
+    result = []
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        sid = str(child.get("id") or "")
+        if (
+            sid
+            and sid not in baseline
+            and str(child.get("parentID") or "") == root
+            and str(child.get("agent") or "") == agent
+        ):
+            result.append(sid)
+    return sorted(set(result))
+
+
+def materialize_native_child(project: Path, base_url: str, sid: str, agent: str) -> None:
+    """Bind an observed child to its preclaim through supervisor-owned state."""
+    supervisor = Path(__file__).with_name("supervisor.py")
+    env = dict(os.environ)
+    root = supervisor.parent.parent
+    env["V2_ROOT"] = str(root)
+    env["V2_OPENCODE_BASE_URL"] = base_url.rstrip("/")
+    env["V2_OPENCODE_SESSION_TABLE"] = "session"
+    default_db = root / "xdg" / "data-v11831-a2" / "opencode" / "opencode.db"
+    if not default_db.is_file():
+        raise ControllerError(f"canonical Stage-A database is missing: {default_db}")
+    env["V2_OPENCODE_DB"] = str(default_db)
+    proc = subprocess.run(
+        [
+            sys.executable, str(supervisor), "--project", str(project),
+            "--agent", agent, "--materialize-dispatch-child", sid,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        timeout=15,
+    )
+    if proc.returncode:
+        raise ControllerError(
+            "native child materialization failed: " + proc.stdout.strip()[:1600]
+        )
+    if not proc.stdout.startswith("DISPATCH_MATERIALIZED "):
+        raise ControllerError(
+            "native child materialization returned unexpected output: "
+            + proc.stdout.strip()[:1600]
+        )
+
+
 def replay_receipt(intent: dict, evidence: dict) -> dict:
     return {
         "protocol": EXECUTION_RECEIPT_PROTOCOL,
@@ -930,6 +985,16 @@ def reconcile_execution(project: Path, base_url: str, execution_id: str) -> dict
             raise ControllerError(f"execution intent incomplete: {execution_id}")
         attempts = attempt_snapshot(project, did)
         children = child_snapshot(project, base_url, root)
+        current_sessions = set(str(item) for item in attempts.get("sessions") or [])
+        unbound = [sid for sid in native_child_ids(intent, children) if sid not in current_sessions]
+        if unbound:
+            if len(unbound) != 1:
+                raise ControllerError(
+                    "AMBIGUOUS_EXECUTION multiple unbound native children observed: "
+                    + json.dumps(unbound)
+                )
+            materialize_native_child(project, base_url, unbound[0], agent)
+            attempts = attempt_snapshot(project, did)
         evidence = reconcile_execution_evidence(intent, attempts, children)
         if not evidence:
             raise ControllerError(
@@ -994,6 +1059,20 @@ def selftest() -> None:
             raise ControllerError(
                 f"selftest case {idx} mismatch: actual={actual!r} expected={expected!r}"
             )
+
+    child_intent = {
+        "root_session": "root-a",
+        "action": {"agent": "feature-builder", "deliverable": "D042"},
+        "baseline_child_ids": ["old-child"],
+    }
+    child_rows = [
+        {"id": "old-child", "parentID": "root-a", "agent": "feature-builder"},
+        {"id": "new-child", "parentID": "root-a", "agent": "feature-builder"},
+        {"id": "wrong-agent", "parentID": "root-a", "agent": "probe-builder"},
+        {"id": "wrong-parent", "parentID": "root-b", "agent": "feature-builder"},
+    ]
+    if native_child_ids(child_intent, child_rows) != ["new-child"]:
+        raise ControllerError("native-child filtering selftest failed")
 
     payload = build_implementation_subtask(
         {"kind": "launch", "agent": "probe-builder", "deliverable": "D042"},

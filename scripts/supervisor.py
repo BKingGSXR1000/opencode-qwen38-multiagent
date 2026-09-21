@@ -5715,6 +5715,25 @@ def enforce_assignment(sid,agent,first_user):
     csv("DISPATCH_ALLOW",sid,agent,f"{did} attempt={n}")
 
 
+def materialize_dispatch_child(sid,agent):
+    """Bind one controller-observed native child to its durable reservation."""
+    if agent not in IMPLEMENTATION_AGENTS:
+        raise ValueError(f"unsupported implementation agent: {agent!r}")
+    prompt=first_user_text_db(sid)
+    if not prompt:
+        raise ValueError(f"native child prompt is not durable yet: {sid}")
+    did,violation=validate_dispatch(agent,prompt,runtime=True)
+    if violation:
+        raise ValueError(f"native child dispatch is invalid: {violation}")
+    enforce_assignment(sid,agent,prompt)
+    attempt=attempt_sequence_for_session(sid,did)
+    if attempt < 1:
+        raise StateCorruptionError(
+            f"native child was not bound to a durable attempt: {sid} {did}"
+        )
+    print(f"DISPATCH_MATERIALIZED session={sid} deliverable={did} attempt={attempt}")
+
+
 # 20260911 ORIGINAL_TASK_DURABILITY_FIX
 
 ORIGINAL_TASK_BEGIN = "=== ORIGINAL_USER_TASK_BEGIN ==="
@@ -7289,10 +7308,23 @@ def main():
     ap.add_argument("--splitter-tool-check")
     ap.add_argument("--progress-handoff-tool-check")
     ap.add_argument("--confirm-plugin-interrupt")
+    ap.add_argument("--materialize-dispatch-child")
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     args,unknown=ap.parse_known_args()
+    if args.materialize_dispatch_child:
+        if unknown or not args.project or not args.agent:
+            raise SystemExit(
+                "native child materialization requires --project --agent "
+                "--materialize-dispatch-child"
+            )
+        PROJECT=args.project
+        try:
+            materialize_dispatch_child(args.materialize_dispatch_child,args.agent)
+        except (ValueError,StateCorruptionError) as exc:
+            raise SystemExit(f"DISPATCH_MATERIALIZE_DENY {exc}") from exc
+        return
     if args.root_read_check:
         if unknown or not args.project:
             raise SystemExit("root read check requires --project --root-read-check")
