@@ -388,6 +388,36 @@ def materialize_native_child(project: Path, base_url: str, sid: str, agent: str)
         )
 
 
+def bind_unbound_native_child(
+    project: Path,
+    base_url: str,
+    intent: dict,
+    did: str,
+    agent: str,
+    attempts: dict,
+    children: list[dict],
+) -> dict:
+    """Bind exactly one observed native child to its durable preclaim.
+
+    A native child can be visible before the plugin's materialization hook has
+    run.  Reporting that child as replay evidence without binding it leaves a
+    dispatch placeholder as the current attempt, which makes restart recovery
+    unable to classify the real session.  Binding is safe only for the one
+    child created by this intent and never creates another child or attempt.
+    """
+    current = set(str(s) for s in attempts.get("sessions") or [])
+    unbound = [sid for sid in native_child_ids(intent, children) if sid not in current]
+    if not unbound:
+        return attempts
+    if len(unbound) != 1:
+        raise ControllerError(
+            "AMBIGUOUS_EXECUTION multiple unbound native children observed: "
+            + json.dumps(sorted(unbound))
+        )
+    materialize_native_child(project, base_url, unbound[0], agent)
+    return attempt_snapshot(project, did)
+
+
 def replay_receipt(intent: dict, evidence: dict) -> dict:
     return {
         "protocol": EXECUTION_RECEIPT_PROTOCOL,
@@ -1128,6 +1158,9 @@ def execute_first_implementation(
                 raise ControllerError(f"execution ledger action mismatch: {execution_id}")
             attempts = attempt_snapshot(project, did)
             children = child_snapshot(project, base_url, root)
+            attempts = bind_unbound_native_child(
+                project, base_url, existing, did, agent, attempts, children
+            )
             evidence = reconcile_execution_evidence(existing, attempts, children)
             if evidence:
                 return replay_receipt(existing, evidence)
@@ -1248,6 +1281,9 @@ def execute_first_task_splitter(
                 raise ControllerError(f"execution ledger action mismatch: {execution_id}")
             attempts = attempt_snapshot(project, did)
             children = child_snapshot(project, base_url, root)
+            attempts = bind_unbound_native_child(
+                project, base_url, existing, did, agent, attempts, children
+            )
             evidence = reconcile_execution_evidence(existing, attempts, children)
             if evidence:
                 return replay_receipt(existing, evidence)
@@ -1358,16 +1394,9 @@ def reconcile_execution(project: Path, base_url: str, execution_id: str) -> dict
             raise ControllerError(f"execution intent incomplete: {execution_id}")
         attempts = attempt_snapshot(project, did)
         children = child_snapshot(project, base_url, root)
-        current_sessions = set(str(item) for item in attempts.get("sessions") or [])
-        unbound = [sid for sid in native_child_ids(intent, children) if sid not in current_sessions]
-        if unbound:
-            if len(unbound) != 1:
-                raise ControllerError(
-                    "AMBIGUOUS_EXECUTION multiple unbound native children observed: "
-                    + json.dumps(unbound)
-                )
-            materialize_native_child(project, base_url, unbound[0], agent)
-            attempts = attempt_snapshot(project, did)
+        attempts = bind_unbound_native_child(
+            project, base_url, intent, did, agent, attempts, children
+        )
         evidence = reconcile_execution_evidence(intent, attempts, children)
         if not evidence:
             raise ControllerError(

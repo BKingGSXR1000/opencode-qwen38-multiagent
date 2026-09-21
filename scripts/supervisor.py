@@ -764,15 +764,20 @@ def implementation_prompt_violation(text):
 
 def implementation_runtime_prompt_violation(agent,text):
     # Validate deterministic post-preclaim prompt seen by a materialized child.
-    if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
-        return f"oversized_first_user_prompt chars={len(text)} max={MAX_IMPLEMENTATION_PROMPT_CHARS}"
     text=normalize_implementation_prompt(text)
     did=parse_deliverable(text)
     if not did:
         return "missing_exact_DELIVERABLE_Dxxx"
-    if text!=implementation_runtime_prompt(did,agent):
-        return "noncanonical_runtime_handoff"
-    return ""
+    # The preclaim already bounds the canonical controller prompt.  OpenCode
+    # then appends this role's deterministic direct-write/gate protocol before
+    # persisting the native child's first user message, so the exact runtime
+    # form may legitimately exceed that transport cap.  Accept only the exact
+    # derived runtime form; an oversized noncanonical form remains denied.
+    if text==implementation_runtime_prompt(did,agent):
+        return ""
+    if len(text)>MAX_IMPLEMENTATION_PROMPT_CHARS:
+        return f"oversized_first_user_prompt chars={len(text)} max={MAX_IMPLEMENTATION_PROMPT_CHARS}"
+    return "noncanonical_runtime_handoff"
 
 def split_leaf_overlay_path():
     return Path(PROJECT)/".opencode-v2"/"work"/"split-leaves.json"
@@ -4859,6 +4864,7 @@ def claim_attempt(sid,did):
                     count > state["automatic_limit"]
                     + state["infrastructure_retry_grants"]
                     + int(state.get("bad_plan_retry_grants") or 0)
+                    + int(state.get("plan_contract_retry_grants") or 0)
                 )
                 if uses_operator:
                     # This is a reservation, not consumption.  Only the
@@ -4881,8 +4887,12 @@ def consume_operator_reservation(sid,did,evidence):
         with attempt_lock():
             data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
             if not isinstance(entry,dict): return False,"missing-ledger-entry"
+            state=attempt_state(entry)
             for item in entry.get("operator_retry_attempts",[]):
                 if isinstance(item,dict) and item.get("session")==sid and item.get("state")=="reserved":
+                    sequence=int(item.get("sequence") or 0)
+                    if sequence <= (int(state.get("automatic_limit") or 0)+int(state.get("infrastructure_retry_grants") or 0)+int(state.get("bad_plan_retry_grants") or 0)+int(state.get("plan_contract_retry_grants") or 0)):
+                        return False,"supervisor-replacement-not-operator"
                     item.update({"state":"consumed", "outcome":"meaningful_execution",
                                  "consumes_operator_grant":True, "evidence":evidence,
                                  "consumed_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())})
@@ -4907,6 +4917,9 @@ def release_operator_reservation(sid,did,reason):
             for item in entry.get("operator_retry_attempts",[]):
                 if not (isinstance(item,dict) and item.get("session")==sid and item.get("state")=="reserved"):
                     continue
+                sequence=int(item.get("sequence") or 0)
+                if sequence <= (int(state.get("automatic_limit") or 0)+int(state.get("infrastructure_retry_grants") or 0)+int(state.get("bad_plan_retry_grants") or 0)+int(state.get("plan_contract_retry_grants") or 0)):
+                    return False,"supervisor-replacement-not-operator"
                 released=state["operator_infrastructure_aborted"] < MAX_OPERATOR_INFRASTRUCTURE_ABORTS
                 item.update({
                     "state":"infrastructure_abort" if released else "infrastructure_blocked",
@@ -5836,7 +5849,35 @@ def materialize_dispatch_child(sid,agent):
         raise StateCorruptionError(
             f"native child was not bound to a durable attempt: {sid} {did}"
         )
+    normalize_supervisor_replacement_record(did)
     print(f"DISPATCH_MATERIALIZED session={sid} deliverable={did} attempt={attempt}")
+
+
+def normalize_supervisor_replacement_record(did):
+    """Keep a stale replacement reservation, but record its true authority."""
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict): return False
+            state=attempt_state(entry)
+            plan=int(state.get("plan_contract_retry_grants") or 0)
+            bad=int(state.get("bad_plan_retry_grants") or 0)
+            ceiling=(int(state.get("automatic_limit") or 0)+int(state.get("infrastructure_retry_grants") or 0)+plan+bad)
+            changed=False
+            for item in entry.get("operator_retry_attempts",[]):
+                if not isinstance(item,dict): continue
+                try: sequence=int(item.get("sequence") or 0)
+                except (TypeError,ValueError): continue
+                if sequence <= int(state.get("automatic_limit") or 0) or sequence>ceiling:
+                    continue
+                label="plan_contract_replacement" if plan else "bad_plan_replacement"
+                item.update({"state":label,"outcome":label,"consumes_operator_grant":False,"normalized_by":"supervisor-credit-authority-v1","normalized_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())})
+                changed=True
+            if changed: save_attempts(data)
+    if changed:
+        log(f"SUPERVISOR_REPLACEMENT_NORMALIZED deliverable={did}")
+        csv("SUPERVISOR_REPLACEMENT_NORMALIZED",detail=did)
+    return changed
 
 
 # 20260911 ORIGINAL_TASK_DURABILITY_FIX
@@ -7245,6 +7286,40 @@ def reconcile_idle_implementation_session(sid,agent):
     post_finalize_seen.add(sid)
 
 
+def reconcile_restart_orphaned_implementation_session(sid,agent):
+    """Classify an in-flight child left behind by a restarted OpenCode server.
+
+    v1 keeps active session execution in the server process.  A child created
+    before this supervisor process, absent from the fresh server's active set,
+    and lacking a terminal assistant record cannot resume.  It is an
+    infrastructure abort, never a semantic failure.  This path preserves any
+    partial artifact and releases only the bounded infrastructure recovery
+    defined by the attempt ledger.
+    """
+    if sid in post_finalize_seen:
+        return
+    did=session_task.get(sid,(parse_deliverable(first_user_text_db(sid)),0))[0]
+    if not did or ready_info(did):
+        return
+    reason="opencode-server-restart-incomplete-session"
+    granted,detail=record_infrastructure_abort(
+        sid,did,reason,"opencode-server-restart"
+    )
+    if granted or detail=="already-recorded":
+        record_leaf_failure(did,reason,"infrastructure")
+    release_operator_reservation(sid,did,reason)
+    log(
+        f"LEAF_RESTART_ORPHANED_INFRASTRUCTURE session={sid} "
+        f"deliverable={did} granted={str(granted).lower()} detail={detail}"
+    )
+    csv(
+        "LEAF_RESTART_ORPHANED_INFRASTRUCTURE",sid,agent,
+        f"{did} granted={str(granted).lower()} detail={detail}",
+    )
+    worker_sandbox_cleanup_session(sid)
+    post_finalize_seen.add(sid)
+
+
 def reconcile_compaction_event(sid,agent,comps):
     latest=latest_compaction_state(sid)
     status=latest.get("status","")
@@ -7370,6 +7445,12 @@ def persisted_reconcile_loop():
 
                     if agent in IMPLEMENTATION_AGENTS and terminal:
                         reconcile_idle_implementation_session(sid,agent)
+                    elif (
+                        agent in IMPLEMENTATION_AGENTS
+                        and sid in pending_sessions
+                        and int(time_created or 0) < START_MS
+                    ):
+                        reconcile_restart_orphaned_implementation_session(sid,agent)
             else:
                 con=db_connect()
                 rows=con.execute(

@@ -75,9 +75,25 @@ split record was reset or removed.
 - D004 remains blocked on D002 and D003; it is not eligible to retry or to
   fabricate producer artifacts.
 
+### Latest retained recovery — D003
+The stale current-contract D003 readiness was intentionally revoked under the
+bounded Verify-revision policy. Its existing attempt 3 was then reconciled
+without creating another child:
+- root `ses_f3bcdf631ffe0pkyK0YvvvAkEP`
+- child `ses_f3bcd87c3ffe6FeRyO7dY4TB7Q` (`probe-builder`,
+  `syv/qwen38-worker-nothink`)
+- execution `e04c1e8f6de07063a8192c10ff7cfc3ae439c047e10ea77783a9dda660c53003`
+
+The native child completed, wrote its owned probe artifact, and failed the
+exact current Verify because required vector artifacts remain absent. This is
+the second genuine D003 failure; `split_required generation=1` is durable.
+Attempt 3 is a supervisor plan-contract replacement, not an operator retry.
+The current deterministic action is `task-splitter` for D003 generation 1.
+
 ### Next action
-Run the normal live consolidated preflight, then advance only the deterministic
-next action. Preserve D002 and every valid historical attempt/split record.
+Refresh the live supervisor projection, run consolidated preflight, then
+advance only the deterministic D003 task-splitter action. Preserve D002 and
+every valid historical attempt/split record.
 
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`

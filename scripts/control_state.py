@@ -213,6 +213,48 @@ def split_status(project, did):
     )
 
 
+def _plan_contract_revision_credit_count(entry, count):
+    rows=entry.get("plan_contract_revisions") or [] if isinstance(entry,dict) else []
+    if not isinstance(rows,list):
+        return 0
+    seen=set()
+    for row in rows:
+        if not isinstance(row,dict) or row.get("source")!="supervisor-plan-contract-revision":
+            continue
+        try:
+            attempt=int(row.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        if 1 <= attempt <= count:
+            seen.add((attempt,str(row.get("current_verify_sha256") or "")))
+    return len(seen)
+
+
+def _parent_contract_repair_credit_count(entry, count):
+    if not isinstance(entry,dict):
+        return 0
+    history=entry.get("failure_history") or []
+    resolution=entry.get("parent_contract_repair_resolution")
+    approved=resolution.get("reclassified_attempts") if isinstance(resolution,dict) else None
+    if not isinstance(history,list) or not isinstance(approved,list):
+        return 0
+    approved={item for item in approved if isinstance(item,int) and item>0}
+    seen=set()
+    for item in history:
+        if not isinstance(item,dict) or not (
+            item.get("classification")=="bad-plan"
+            and item.get("reclassified_by")=="runtime-parent-contract-repair"
+        ):
+            continue
+        try:
+            attempt=int(item.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        if 1 <= attempt <= count and attempt in approved:
+            seen.add(attempt)
+    return len(seen)
+
+
 def _attempt_state_v2612_original(entry):
     """Validate and project one supervisor-owned attempt ledger entry.
 
@@ -283,6 +325,14 @@ def _attempt_state_v2612_original(entry):
                 if grant != 1:
                     infrastructure_failures = None; break
                 failure_grants += grant
+    # These supervisor-only credits replace an already recorded dispatch. They
+    # must be projected before validating a later replacement attempt; doing
+    # it afterwards incorrectly turns that legal replacement into an invalid
+    # operator reservation.
+    plan_contract_credits=_plan_contract_revision_credit_count(entry,count)
+    bad_plan_credits=_parent_contract_repair_credit_count(entry,count)
+    non_operator_credits=infrastructure_grants+plan_contract_credits+bad_plan_credits
+
     operator_attempts = entry.get("operator_retry_attempts", [])
     if not isinstance(operator_attempts, list):
         operator_attempts = None
@@ -290,6 +340,7 @@ def _attempt_state_v2612_original(entry):
     consumed_operator_attempts = reserved_operator_attempts = 0
     aborted_operator_attempts = blocked_operator_attempts = 0
     seen_operator_sequences = set()
+    operator_record_count=0
     if operator_attempts is not None:
         for item in operator_attempts:
             if not isinstance(item, dict):
@@ -302,9 +353,15 @@ def _attempt_state_v2612_original(entry):
             if (sequence <= automatic_limit or sequence in seen_operator_sequences or
                     not isinstance(item.get("session"), str) or not item["session"] or
                     item.get("source") != "supervisor" or
-                    status not in {"reserved", "consumed", "infrastructure_abort", "infrastructure_blocked"}):
+                    status not in {"reserved", "consumed", "infrastructure_abort", "infrastructure_blocked", "plan_contract_replacement", "bad_plan_replacement"}):
                 valid_operator_attempts = False; break
             seen_operator_sequences.add(sequence)
+            # A prior buggy controller could create a reserved record for a
+            # plan-revision/repair replacement.  That sequence is covered by
+            # the durable supervisor credit, not by human authorization.
+            if sequence <= automatic_limit + non_operator_credits:
+                continue
+            operator_record_count += 1
             if status == "consumed":
                 if item.get("consumes_operator_grant") is not True:
                     valid_operator_attempts = False; break
@@ -328,12 +385,12 @@ def _attempt_state_v2612_original(entry):
     # the old meaning. In a new ledger, only excess not represented by a record
     # is legacy consumption, so an infrastructure-aborted dispatch remains
     # truthful without spending another human authorization.
-    operator_dispatches = max(0, count - automatic_limit - infrastructure_grants)
-    record_count = len(operator_attempts) if operator_attempts is not None else 0
+    operator_dispatches = max(0, count - automatic_limit - non_operator_credits)
+    record_count = operator_record_count if operator_attempts is not None else 0
     legacy_operator_used = max(0, operator_dispatches - record_count)
     operator_used = legacy_operator_used + consumed_operator_attempts
     operator_remaining = operator_grants - operator_used - reserved_operator_attempts - blocked_operator_attempts
-    allowed = automatic_limit + operator_grants + infrastructure_grants + aborted_operator_attempts
+    allowed = automatic_limit + operator_grants + non_operator_credits + aborted_operator_attempts
     valid = (
         count >= 0
         and automatic_limit in (2, AUTOMATIC_ATTEMPT_LIMIT)
@@ -372,12 +429,14 @@ def _attempt_state_v2612_original(entry):
         # credit represents one dispatch that never became a real autonomous
         # implementation attempt, so derive the latter rather than rewriting
         # history.
-        "automatic_attempts_consumed": max(0, min(count - infrastructure_grants, automatic_limit)) if valid else 0,
+        "automatic_attempts_consumed": max(0, min(count - non_operator_credits, automatic_limit)) if valid else 0,
         "infrastructure_retry_grants": infrastructure_grants,
         "infrastructure_grants_remaining": infrastructure_remaining if valid else 0,
         "allowed_attempts": allowed,
         "infrastructure_authorized_attempt": valid and excess > 0 and excess <= infrastructure_grants,
         "operator_authorized_attempt": valid and operator_dispatches > 0,
+        "bad_plan_retry_grants": bad_plan_credits,
+        "plan_contract_retry_grants": plan_contract_credits,
     }
 
 # V2.6.12 INFRASTRUCTURE LEDGER REPAIR BEGIN
@@ -537,49 +596,10 @@ def _apply_parent_contract_repair_credits(entry, state):
     """Release only the retry slots explicitly invalidated by plan repair."""
     state=dict(state) if isinstance(state,dict) else {}
     state["bad_plan_retry_grants"]=0
-    if not state.get("valid") or not isinstance(entry,dict):
-        return state
-    history=entry.get("failure_history") or []
-    if not isinstance(history,list):
-        return state
-    try:
-        count=int(state.get("count") or 0)
-        automatic_limit=int(state.get("automatic_limit") or AUTOMATIC_ATTEMPT_LIMIT)
-        infrastructure=int(state.get("infrastructure_retry_grants") or 0)
-        allowed=int(state.get("allowed_attempts") or 0)
-    except (TypeError,ValueError):
-        return state
-    resolution=entry.get("parent_contract_repair_resolution")
-    approved=(
-        resolution.get("reclassified_attempts")
-        if isinstance(resolution,dict) else None
-    )
-    if not isinstance(approved,list):
-        return state
-    approved={item for item in approved if isinstance(item,int) and item>0}
-    if not approved:
-        return state
-    seen=set(); credits=0
-    for item in history:
-        if not isinstance(item,dict) or not (
-            item.get("classification")=="bad-plan"
-            and item.get("reclassified_by")=="runtime-parent-contract-repair"
-        ):
-            continue
-        try:
-            attempt=int(item.get("attempt") or 0)
-        except (TypeError,ValueError):
-            continue
-        if 1 <= attempt <= count and attempt in approved and attempt not in seen:
-            seen.add(attempt); credits+=1
-    if credits:
-        state.update({
-            "bad_plan_retry_grants":credits,
-            "allowed_attempts":allowed+credits,
-            "automatic_attempts_consumed":max(
-                0,min(count-infrastructure-credits,automatic_limit)
-            ),
-        })
+    if state.get("valid") and isinstance(entry,dict):
+        state["bad_plan_retry_grants"]=_parent_contract_repair_credit_count(
+            entry,int(state.get("count") or 0)
+        )
     return state
 
 
@@ -587,35 +607,10 @@ def _apply_plan_contract_revision_credits(entry, state):
     """Project one replacement slot for each supervisor-recorded plan revision."""
     state=dict(state) if isinstance(state,dict) else {}
     state["plan_contract_retry_grants"]=0
-    if not state.get("valid") or not isinstance(entry,dict):
-        return state
-    rows=entry.get("plan_contract_revisions") or []
-    if not isinstance(rows,list):
-        return state
-    try:
-        count=int(state.get("count") or 0)
-        allowed=int(state.get("allowed_attempts") or 0)
-    except (TypeError,ValueError):
-        return state
-    seen=set()
-    for row in rows:
-        if not isinstance(row,dict) or row.get("source")!="supervisor-plan-contract-revision":
-            continue
-        try:
-            attempt=int(row.get("attempt") or 0)
-        except (TypeError,ValueError):
-            continue
-        if 1 <= attempt <= count:
-            seen.add((attempt,str(row.get("current_verify_sha256") or "")))
-    credits=len(seen)
-    if credits:
-        state.update({
-            "plan_contract_retry_grants":credits,
-            "allowed_attempts":allowed+credits,
-            "automatic_attempts_consumed":max(
-                0,int(state.get("automatic_attempts_consumed") or 0)-credits
-            ),
-        })
+    if state.get("valid") and isinstance(entry,dict):
+        state["plan_contract_retry_grants"]=_plan_contract_revision_credit_count(
+            entry,int(state.get("count") or 0)
+        )
     return state
 
 

@@ -288,6 +288,32 @@ class AttemptLedgerTests(unittest.TestCase):
         self.assertEqual(projected["automatic_attempts_consumed"],1)
         self.assertEqual(projected["allowed_attempts"],3)
 
+    def test_plan_contract_revision_validates_its_materialized_replacement(self):
+        entry={
+            "count":3,"sessions":["one","two","dispatch:three"],"automatic_limit":2,
+            "plan_contract_revisions":[{
+                "attempt":2,"source":"supervisor-plan-contract-revision",
+                "current_verify_sha256":"abc",
+            }],
+            # Historical buggy projection recorded this replacement as reserved;
+            # it must not consume a human grant after the durable credit exists.
+            "operator_retry_attempts":[{
+                "sequence":3,"session":"dispatch:three","state":"reserved",
+                "consumes_operator_grant":False,"source":"supervisor",
+            }],
+        }
+        projected=control_state.attempt_state(entry)
+        self.assertTrue(projected["valid"])
+        self.assertEqual(projected["plan_contract_retry_grants"],1)
+        self.assertEqual(projected["operator_grants_reserved"],0)
+        self.assertEqual(projected["allowed_attempts"],3)
+
+    def test_plan_contract_replacement_is_not_operator_authorized(self):
+        entry={"count":3,"sessions":["one","two","three"],"automatic_limit":2,
+               "plan_contract_revisions":[{"attempt":2,"source":"supervisor-plan-contract-revision","current_verify_sha256":"abc"}],
+               "operator_retry_attempts":[{"sequence":3,"session":"three","state":"reserved","consumes_operator_grant":False,"source":"supervisor"}]}
+        self.assertFalse(control_state.attempt_state(entry)["operator_authorized_attempt"])
+
     def test_reconcile_plan_revision_revokes_only_stale_ready(self):
         old_root,old_log,old_csv=supervisor.ROOT,supervisor.LOG,supervisor.CSV
         try:

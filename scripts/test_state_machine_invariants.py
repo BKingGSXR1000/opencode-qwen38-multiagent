@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 import hashlib,json,multiprocessing,runpy,subprocess,sys,tempfile,unittest
+from unittest import mock
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
-import control_state,leaf_contract,supervisor,state_io,worker_sandbox,watchdog_telemetry
+import control_state,leaf_contract,stage_a_controller,supervisor,state_io,worker_sandbox,watchdog_telemetry
 
 def ready_text(did,attempt=1,owner="supervisor",protocol=None):
     protocol=protocol or control_state.LEAF_READY_PROTOCOL
@@ -42,6 +43,83 @@ class RuntimePlanRepairTests(unittest.TestCase):
             source["leaves"][0]["name"]="after"
             (ctrl/"IMPLEMENTATION_PLAN.structured.json").write_text(json.dumps(source))
             self.assertEqual(guard["runtime_repair_change_errors"](ctrl),[])
+
+
+class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
+    def test_exact_derived_runtime_prompt_may_exceed_transport_cap(self):
+        prompt="DELIVERABLE: D001\n" + ("x" * supervisor.MAX_IMPLEMENTATION_PROMPT_CHARS)
+        with mock.patch.object(supervisor,"implementation_runtime_prompt",return_value=prompt):
+            self.assertEqual(
+                supervisor.implementation_runtime_prompt_violation("probe-builder",prompt),""
+            )
+            self.assertIn(
+                "oversized_first_user_prompt",
+                supervisor.implementation_runtime_prompt_violation("probe-builder",prompt+"x"),
+            )
+
+    def test_controller_binds_exactly_one_observed_child_to_preclaim(self):
+        intent={
+            "root_session":"root", "baseline_child_ids":[],
+            "action":{"agent":"probe-builder","deliverable":"D001"},
+        }
+        attempts={"count":1,"sessions":["dispatch:token"]}
+        children=[{"id":"child","parentID":"root","agent":"probe-builder"}]
+        bound={"count":1,"sessions":["child"]}
+        with mock.patch.object(stage_a_controller,"materialize_native_child") as materialize, \
+             mock.patch.object(stage_a_controller,"attempt_snapshot",return_value=bound):
+            actual=stage_a_controller.bind_unbound_native_child(
+                Path("/tmp/project"),"http://127.0.0.1:1",intent,"D001",
+                "probe-builder",attempts,children,
+            )
+        self.assertEqual(actual,bound)
+        materialize.assert_called_once_with(
+            Path("/tmp/project"),"http://127.0.0.1:1","child","probe-builder"
+        )
+
+    def test_controller_refuses_multiple_unbound_children(self):
+        intent={
+            "root_session":"root", "baseline_child_ids":[],
+            "action":{"agent":"probe-builder","deliverable":"D001"},
+        }
+        children=[
+            {"id":"child-a","parentID":"root","agent":"probe-builder"},
+            {"id":"child-b","parentID":"root","agent":"probe-builder"},
+        ]
+        with self.assertRaisesRegex(stage_a_controller.ControllerError,"multiple unbound"):
+            stage_a_controller.bind_unbound_native_child(
+                Path("/tmp/project"),"http://127.0.0.1:1",intent,"D001",
+                "probe-builder",{"count":1,"sessions":["dispatch:token"]},children,
+            )
+
+    def test_restart_orphan_is_infrastructure_not_genuine(self):
+        sid="orphan"; did="D001"
+        old_project=supervisor.PROJECT
+        supervisor.PROJECT=tempfile.mkdtemp()
+        supervisor.session_task[sid]=(did,1)
+        supervisor.post_finalize_seen.discard(sid)
+        try:
+            with mock.patch.object(supervisor,"ready_info",return_value={}), \
+                 mock.patch.object(supervisor,"record_infrastructure_abort",return_value=(True,"granted")) as infra, \
+                 mock.patch.object(supervisor,"record_leaf_failure") as failure, \
+                 mock.patch.object(supervisor,"release_operator_reservation") as release, \
+                 mock.patch.object(supervisor,"worker_sandbox_cleanup_session") as cleanup, \
+                 mock.patch.object(supervisor,"log"), \
+                 mock.patch.object(supervisor,"csv"):
+                supervisor.reconcile_restart_orphaned_implementation_session(sid,"probe-builder")
+            infra.assert_called_once_with(
+                sid,did,"opencode-server-restart-incomplete-session",
+                "opencode-server-restart",
+            )
+            failure.assert_called_once_with(
+                did,"opencode-server-restart-incomplete-session","infrastructure"
+            )
+            release.assert_called_once()
+            cleanup.assert_called_once_with(sid)
+            self.assertIn(sid,supervisor.post_finalize_seen)
+        finally:
+            supervisor.session_task.pop(sid,None)
+            supervisor.post_finalize_seen.discard(sid)
+            supervisor.PROJECT=old_project
 
 class ReadyTrustBoundaryTests(unittest.TestCase):
     def setUp(self):

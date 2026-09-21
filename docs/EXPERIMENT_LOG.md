@@ -104,3 +104,24 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - Resulting route: D003 is eligible; D002 remains an accepted split parent;
   D004 is correctly blocked on both producers. No semantic child was launched
   by the audit or reconciliation.
+
+## D003 current-contract recovery — 2026-09-21
+Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
+
+- The retained native child `ses_f3bcd87c3ffe6FeRyO7dY4TB7Q` was created by
+  root `ses_f3bcdf631ffe0pkyK0YvvvAkEP` for execution
+  `e04c1e8f6de07063a8192c10ff7cfc3ae439c047e10ea77783a9dda660c53003`.
+  It completed its OpenCode loop; no second child was created.
+- Recovery exposed two generic reconciliation defects: controller replay did
+  not bind an observed native child to its preclaim, and the exact
+  role-expanded runtime prompt exceeded the canonical transport-prompt cap.
+  Both are fixed with deterministic regression tests.
+- The bounded plan-contract replacement credit is now applied before attempt
+  validation. It preserves attempt 3 while recording its true
+  `plan_contract_replacement` authority rather than consuming an operator
+  retry.
+- Exact current D003 Verify failed (`verify-failed-1`) because the required
+  moon VECTORS files remain absent. With the historical genuine attempt 1,
+  this produced durable `split_required generation=1`.
+- Current dry routing selects only `task-splitter` for D003 generation 1.
+  D002 and D004 were neither reset nor replayed.
