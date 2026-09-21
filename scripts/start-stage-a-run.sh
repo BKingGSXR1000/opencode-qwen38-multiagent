@@ -21,7 +21,7 @@ TASK_FILE="$(cd -- "$(dirname -- "$TASK_FILE")" && pwd -P)/$(basename -- "$TASK_
 [[ "$PORT" =~ ^[0-9]+$ ]] || { echo "ERROR: port must be numeric" >&2; exit 1; }
 [[ -x "$ROOT/scripts/bootstrap-stage-a-project.py" ]] || { echo "ERROR: bootstrap utility missing" >&2; exit 1; }
 [[ -x "$ROOT/scripts/create-stage-a-root.py" ]] || { echo "ERROR: root utility missing" >&2; exit 1; }
-[[ -x "$ROOT/scripts/run-stage-a-tick.py" ]] || { echo "ERROR: tick utility missing" >&2; exit 1; }
+[[ -x "$ROOT/scripts/drive-stage-a-run.py" ]] || { echo "ERROR: driver utility missing" >&2; exit 1; }
 
 CONFIG="$ROOT/xdg/config/opencode/opencode.jsonc"
 grep -Fq '"default_agent": "transport-root"' "$CONFIG" || { echo "ERROR: canonical transport-root config missing" >&2; exit 1; }
@@ -67,4 +67,4 @@ done
 [[ -s "$PROJECT/.opencode-v2/work/root-session.json" ]] || { echo "ERROR: supervisor did not adopt the technical root" >&2; exit 1; }
 [[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] || { echo "ERROR: supervisor did not materialize deterministic shadow" >&2; exit 1; }
 
-python3 "$ROOT/scripts/run-stage-a-tick.py" --project "$PROJECT" --base-url "$BASE_URL" --root-session "$ROOT_SESSION"
+exec python3 "$ROOT/scripts/drive-stage-a-run.py" --project "$PROJECT" --base-url "$BASE_URL" --root-session "$ROOT_SESSION"
