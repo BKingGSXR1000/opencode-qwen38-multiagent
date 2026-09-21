@@ -19,6 +19,7 @@ from pathlib import Path
 from deterministic_dispatch import select_actions
 
 POLL_DEFAULT = 0.5
+SEMANTIC_TERMINAL_GRACE_SECONDS = 10.0
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
@@ -637,6 +638,28 @@ def semantic_reconcile_evidence(intent: dict, children: list[dict]) -> dict | No
     return None
 
 
+def session_is_active(project: Path, base_url: str, sid: str) -> bool:
+    status, body = http_json("GET", workspace_url(base_url, "/session/status", project))
+    if status != 200 or not isinstance(body, dict):
+        raise ControllerError(f"session status lookup failed status={status}")
+    return sid in body
+
+
+def semantic_child_may_still_transition(
+    project: Path, base_url: str, intent: dict, evidence: dict
+) -> bool:
+    sessions = evidence.get("sessions") if isinstance(evidence, dict) else []
+    sid = str(sessions[0]) if isinstance(sessions, list) and sessions else ""
+    if sid and session_is_active(project, base_url, sid):
+        return True
+    created = intent.get("created_at_ms")
+    try:
+        age = time.time() - (int(created) / 1000.0)
+    except (TypeError, ValueError):
+        return False
+    return age < SEMANTIC_TERMINAL_GRACE_SECONDS
+
+
 def final_tests_reconcile_evidence(project: Path, intent: dict) -> dict | None:
     """Return evidence only for the exact report recorded by this executor."""
     expected = str(intent.get("test_report_sha256") or "")
@@ -823,6 +846,14 @@ def execute_first_semantic(
                 existing, child_snapshot(project, base_url, root)
             )
             if evidence:
+                if not semantic_child_may_still_transition(
+                    project, base_url, existing, evidence
+                ):
+                    raise ControllerError(
+                        "SEMANTIC_CHILD_TERMINATED_WITHOUT_STATE_TRANSITION; "
+                        f"execution_id={execution_id}; inspect durable guard errors "
+                        "before issuing a new deterministic action"
+                    )
                 return replay_receipt(existing, evidence)
             raise ControllerError(
                 "AMBIGUOUS_EXECUTION semantic launch has no child evidence; "
@@ -1491,6 +1522,8 @@ def selftest() -> None:
         })
         if not evidence or evidence.get("status") != "pass":
             raise ControllerError("final-tests report reconciliation mismatch")
+    if semantic_child_may_still_transition.__name__ != "semantic_child_may_still_transition":
+        raise ControllerError("semantic transition guard is unavailable")
     for action in (
         {"kind": "launch", "agent": "reference-researcher", "mode": "foundation"},
         {"kind": "launch", "agent": "reference-researcher", "mode": "validation"},
