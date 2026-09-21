@@ -18,8 +18,12 @@ Use `--preflight` before a real run to verify the project, task file, and
 canonical transport configuration without changing the project or starting any
 runtime process.
 
+For a bounded integration check, add `--max-ticks 1`; ordinary runs omit that
+option and continue until acceptance or a durable blocker.
+
 The launcher starts the canonical local runtime, a project-scoped supervisor,
-and a fresh pinned technical root. It then runs the quiet deterministic driver.
+and a fresh pinned technical root. It passes that root explicitly to the quiet
+deterministic driver rather than relying on ambient session selection.
 The driver prints only phase changes, not child model transcripts, and stops at
 either `ACCEPTANCE_PASS` or a durable blocker.
 

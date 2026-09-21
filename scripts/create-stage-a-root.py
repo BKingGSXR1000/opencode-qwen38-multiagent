@@ -49,7 +49,7 @@ def create_root(project: Path, base_url: str, request=http_json) -> dict:
         "root_session": sid,
         "agent": "transport-root",
         "model": "v2noop/root-noop",
-        "tracker": "await-supervisor",
+        "tracker": "explicit-caller-session",
     }
 
 

@@ -5,12 +5,19 @@ set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PREFLIGHT=false
-if [[ "${1:-}" == "--preflight" ]]; then
-  PREFLIGHT=true
-  shift
-fi
-PROJECT="${1:?usage: $0 [--preflight] /absolute/project/path /absolute/task-file [port]}"
-TASK_FILE="${2:?usage: $0 [--preflight] /absolute/project/path /absolute/task-file [port]}"
+MAX_TICKS=0
+while [[ "${1:-}" == --* ]]; do
+  case "$1" in
+    --preflight) PREFLIGHT=true; shift ;;
+    --max-ticks)
+      MAX_TICKS="${2:?--max-ticks requires a positive integer}"
+      shift 2
+      ;;
+    *) echo "ERROR: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+PROJECT="${1:?usage: $0 [--preflight] [--max-ticks N] /absolute/project/path /absolute/task-file [port]}"
+TASK_FILE="${2:?usage: $0 [--preflight] [--max-ticks N] /absolute/project/path /absolute/task-file [port]}"
 PORT="${3:-57042}"
 BASE_URL="http://127.0.0.1:$PORT"
 PROJECT="$(cd -- "$PROJECT" && pwd -P)"
@@ -19,6 +26,7 @@ TASK_FILE="$(cd -- "$(dirname -- "$TASK_FILE")" && pwd -P)/$(basename -- "$TASK_
 [[ -d "$PROJECT" ]] || { echo "ERROR: project does not exist: $PROJECT" >&2; exit 1; }
 [[ -f "$TASK_FILE" ]] || { echo "ERROR: task file does not exist: $TASK_FILE" >&2; exit 1; }
 [[ "$PORT" =~ ^[0-9]+$ ]] || { echo "ERROR: port must be numeric" >&2; exit 1; }
+[[ "$MAX_TICKS" =~ ^[0-9]+$ ]] || { echo "ERROR: --max-ticks must be >= 0" >&2; exit 1; }
 [[ -x "$ROOT/scripts/bootstrap-stage-a-project.py" ]] || { echo "ERROR: bootstrap utility missing" >&2; exit 1; }
 [[ -x "$ROOT/scripts/create-stage-a-root.py" ]] || { echo "ERROR: root utility missing" >&2; exit 1; }
 [[ -x "$ROOT/scripts/drive-stage-a-run.py" ]] || { echo "ERROR: driver utility missing" >&2; exit 1; }
@@ -61,10 +69,9 @@ ROOT_RECEIPT="$(python3 "$ROOT/scripts/create-stage-a-root.py" --project "$PROJE
 ROOT_SESSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["root_session"])' <<<"$ROOT_RECEIPT")"
 
 for _ in {1..120}; do
-  [[ -s "$PROJECT/.opencode-v2/work/root-session.json" ]] && [[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] && break
+  [[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] && break
   sleep 0.25
 done
-[[ -s "$PROJECT/.opencode-v2/work/root-session.json" ]] || { echo "ERROR: supervisor did not adopt the technical root" >&2; exit 1; }
 [[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] || { echo "ERROR: supervisor did not materialize deterministic shadow" >&2; exit 1; }
 
-exec python3 "$ROOT/scripts/drive-stage-a-run.py" --project "$PROJECT" --base-url "$BASE_URL" --root-session "$ROOT_SESSION"
+exec python3 "$ROOT/scripts/drive-stage-a-run.py" --project "$PROJECT" --base-url "$BASE_URL" --root-session "$ROOT_SESSION" --max-ticks "$MAX_TICKS"
