@@ -24,6 +24,16 @@ ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
 EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
 PLANNER_PROMPTS = {
+    "fresh": """Create the first structured implementation plan for this project.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md, .opencode-v2/ACCEPTANCE.md, and
+.opencode-v2/CONTROL_CONTRACT.md. Inspect only project files needed to create a
+concrete, dependency-aware plan.
+
+Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Follow the
+implementation-planner protocol exactly. Do not create readiness markers,
+generated IMPLEMENTATION_PLAN.md, test reports, or supervisor-owned runtime
+state. Stop after the durable structured plan edit.""",
     "repair": """Repair structured implementation planning for this project.
 
 This is a bounded repair, not a request to rewrite the plan. FIRST read
@@ -1438,6 +1448,11 @@ def selftest() -> None:
     }
     if canonical_execution_action(planner_action) != planner_action:
         raise ControllerError("planner execution action did not retain repair mode")
+    fresh_planner_action = {
+        "kind": "launch", "agent": "implementation-planner", "mode": "fresh",
+    }
+    if canonical_execution_action(fresh_planner_action) != fresh_planner_action:
+        raise ControllerError("planner execution action did not retain fresh mode")
     planner_payload = build_planner_subtask(planner_action)
     if planner_payload["agent"] != "implementation-planner" or not planner_payload[
         "prompt"
