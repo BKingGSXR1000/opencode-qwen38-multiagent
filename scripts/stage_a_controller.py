@@ -19,6 +19,7 @@ from pathlib import Path
 from deterministic_dispatch import select_actions
 
 POLL_DEFAULT = 0.5
+HARNESS_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
 EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
@@ -171,6 +172,14 @@ def canonical_execution_action(action: dict) -> dict:
     if not isinstance(action, dict):
         raise ControllerError("execution action is not an object")
     agent = str(action.get("agent") or "")
+    if str(action.get("kind") or "") == "run_final_tests":
+        normalized = {
+            "kind": "run_final_tests",
+            "command": str(action.get("command") or ""),
+        }
+        if normalized["command"] != ".opencode-v2/bin/run-checks":
+            raise ControllerError(f"invalid final-tests action: {action!r}")
+        return normalized
     if agent == "implementation-planner":
         normalized = {
             "kind": str(action.get("kind") or ""),
@@ -618,6 +627,26 @@ def semantic_reconcile_evidence(intent: dict, children: list[dict]) -> dict | No
     return None
 
 
+def final_tests_reconcile_evidence(project: Path, intent: dict) -> dict | None:
+    """Return evidence only for the exact report recorded by this executor."""
+    expected = str(intent.get("test_report_sha256") or "")
+    if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+        return None
+    path = project / ".opencode-v2" / "TEST_REPORT.json"
+    try:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        report = load_json(path, "final test report")
+    except ControllerError:
+        return None
+    if actual != expected or report.get("status") not in {"pass", "fail"}:
+        return None
+    return {
+        "kind": "final-test-report",
+        "status": report["status"],
+        "test_report_sha256": actual,
+    }
+
+
 def execute_first_planner(
     project: Path,
     base_url: str,
@@ -834,6 +863,124 @@ def execute_first_semantic(
             "execution_id": execution_id,
             "http_status": status,
             "transport": "prompt_async+SubtaskPart",
+            "idempotency_intent_persisted": True,
+            "replay_suppressed": False,
+        }
+
+
+def execute_first_final_tests(project: Path, result: dict) -> dict:
+    """Run the selected final-test action with the repository-owned harness.
+
+    The project-local wrapper is deliberately not trusted here: an implementation
+    worker can edit project files, while this controller must execute the known
+    harness that created the protocol.  The intent is durable before subprocess
+    execution; an interrupted/unknown invocation therefore cannot be replayed.
+    """
+    actions = result["actions"]
+    selected = [
+        action for action in actions
+        if isinstance(action, dict) and action.get("kind") == "run_final_tests"
+    ]
+    if len(selected) != 1:
+        raise ControllerError(
+            "final-tests executor requires exactly one deterministic final-test action: "
+            + json.dumps(selected, sort_keys=True)
+        )
+    launch = selected[0]
+    canonical_action = canonical_execution_action(launch)
+    unsupported = [
+        action for action in actions
+        if not (
+            action == launch
+            or (isinstance(action, dict) and action.get("kind") in {"wait", "rescan"})
+        )
+    ]
+    if unsupported:
+        raise ControllerError(
+            "mixed/unsupported deterministic actions in final-tests slice: "
+            + json.dumps(unsupported, sort_keys=True)
+        )
+    execution_id = execution_action_id(
+        result["state_version"], "deterministic-final-tests", canonical_action
+    )
+    runner = HARNESS_ROOT / "scripts" / "run-checks.py"
+    if not runner.is_file():
+        raise ControllerError(f"trusted final-test harness is missing: {runner}")
+
+    with execution_lock(project):
+        current = evaluate(project)
+        if current["state_version"] != result["state_version"]:
+            raise ControllerError(
+                f"state changed before final tests: selected={result['state_version']} "
+                f"current={current['state_version']}"
+            )
+        if current["actions"] != result["actions"]:
+            raise ControllerError("deterministic actions changed before final tests")
+        ledger = load_execution_ledger(project)
+        executions = ledger["executions"]
+        existing = executions.get(execution_id)
+        if existing is not None:
+            if not isinstance(existing, dict) or existing.get("action") != canonical_action:
+                raise ControllerError(f"execution ledger action mismatch: {execution_id}")
+            evidence = final_tests_reconcile_evidence(project, existing)
+            if evidence:
+                return replay_receipt(existing, evidence)
+            raise ControllerError(
+                "AMBIGUOUS_EXECUTION final-test invocation has no matching durable "
+                f"report; execution_id={execution_id} cannot be replayed blindly"
+            )
+
+        intent = {
+            "execution_id": execution_id,
+            "state_version": result["state_version"],
+            "root_session": "deterministic-final-tests",
+            "action": canonical_action,
+            "transport": "trusted-run-checks",
+            "transport_may_have_been_attempted": True,
+            "created_at_ms": int(time.time() * 1000),
+        }
+        executions[execution_id] = intent
+        save_execution_ledger(project, ledger)
+        completed = subprocess.run(
+            [sys.executable, str(runner), "--project", str(project)],
+            cwd=project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        path = project / ".opencode-v2" / "TEST_REPORT.json"
+        try:
+            report = load_json(path, "final test report")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        except ControllerError as exc:
+            raise ControllerError(
+                f"final-test harness exited {completed.returncode} without a durable report; "
+                f"execution_id={execution_id} remains ambiguous and cannot be replayed blindly"
+            ) from exc
+        if report.get("status") not in {"pass", "fail"}:
+            raise ControllerError(
+                f"final-test report has invalid status: {report.get('status')!r}; "
+                f"execution_id={execution_id} remains ambiguous"
+            )
+        if (completed.returncode == 0) != (report["status"] == "pass"):
+            raise ControllerError(
+                "final-test process/result mismatch; "
+                f"execution_id={execution_id} remains ambiguous"
+            )
+        intent["test_report_sha256"] = digest
+        intent["returncode"] = completed.returncode
+        save_execution_ledger(project, ledger)
+        return {
+            "protocol": EXECUTION_RECEIPT_PROTOCOL,
+            "state_version": result["state_version"],
+            "root_session": "deterministic-final-tests",
+            "action": canonical_action,
+            "execution_id": execution_id,
+            "transport": "trusted-run-checks",
+            "returncode": completed.returncode,
+            "test_status": report["status"],
+            "test_report_sha256": digest,
             "idempotency_intent_persisted": True,
             "replay_suppressed": False,
         }
@@ -1136,6 +1283,14 @@ def reconcile_execution(project: Path, base_url: str, execution_id: str) -> dict
         did = str(action.get("deliverable") or "")
         root = str(intent.get("root_session") or "")
         agent = str(action.get("agent") or "")
+        if action.get("kind") == "run_final_tests":
+            evidence = final_tests_reconcile_evidence(project, intent)
+            if not evidence:
+                raise ControllerError(
+                    "AMBIGUOUS_EXECUTION no matching final-test report observed; "
+                    f"execution_id={execution_id} replay remains forbidden"
+                )
+            return replay_receipt(intent, evidence)
         if not root:
             raise ControllerError(f"execution intent incomplete: {execution_id}")
         if agent == "implementation-planner":
@@ -1298,6 +1453,29 @@ def selftest() -> None:
         "command"
     ] != "stage-a-controller":
         raise ControllerError("semantic subtask payload mismatch")
+    final_tests_action = {
+        "kind": "run_final_tests", "command": ".opencode-v2/bin/run-checks",
+    }
+    if canonical_execution_action(final_tests_action) != final_tests_action:
+        raise ControllerError("final-tests execution action was not canonical")
+    try:
+        canonical_execution_action({"kind": "run_final_tests", "command": "true"})
+    except ControllerError:
+        pass
+    else:
+        raise ControllerError("unsafe final-tests command was accepted")
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        ctrl = project / ".opencode-v2"
+        ctrl.mkdir()
+        report = ctrl / "TEST_REPORT.json"
+        report.write_text('{"status":"pass"}\n', encoding="utf-8")
+        digest = hashlib.sha256(report.read_bytes()).hexdigest()
+        evidence = final_tests_reconcile_evidence(project, {
+            "test_report_sha256": digest,
+        })
+        if not evidence or evidence.get("status") != "pass":
+            raise ControllerError("final-tests report reconciliation mismatch")
     for action in (
         {"kind": "launch", "agent": "reference-researcher", "mode": "foundation"},
         {"kind": "launch", "agent": "reference-researcher", "mode": "validation"},
@@ -1414,6 +1592,7 @@ def main() -> int:
     ap.add_argument("--execute-first-task-splitter", action="store_true")
     ap.add_argument("--execute-first-planner", action="store_true")
     ap.add_argument("--execute-first-semantic", action="store_true")
+    ap.add_argument("--execute-first-final-tests", action="store_true")
     ap.add_argument("--reconcile-execution", default="")
     ap.add_argument("--base-url", default=os.environ.get("V2_OPENCODE_BASE_URL", ""))
     ap.add_argument("--root-session", default="")
@@ -1434,10 +1613,12 @@ def main() -> int:
     if ns.reconcile_execution:
         if (ns.once or ns.watch or ns.execute_first_implementation
                 or ns.execute_first_task_splitter or ns.execute_first_planner
-                or ns.execute_first_semantic):
+                or ns.execute_first_semantic or ns.execute_first_final_tests):
             ap.error("--reconcile-execution is a standalone read-only operation")
         if not ns.base_url:
-            ap.error("--reconcile-execution requires --base-url")
+            intent = load_execution_ledger(project)["executions"].get(ns.reconcile_execution)
+            if not isinstance(intent, dict) or (intent.get("action") or {}).get("kind") != "run_final_tests":
+                ap.error("--reconcile-execution requires --base-url except for final tests")
         receipt = reconcile_execution(project, ns.base_url, ns.reconcile_execution)
         print(json.dumps(receipt, sort_keys=True, indent=2))
         return 0
@@ -1447,6 +1628,7 @@ def main() -> int:
         ns.execute_first_task_splitter,
         ns.execute_first_planner,
         ns.execute_first_semantic,
+        ns.execute_first_final_tests,
     ))
     if selected_executors > 1:
         ap.error("choose at most one explicit executor")
@@ -1526,6 +1708,19 @@ def main() -> int:
             result,
             explicit_root=ns.root_session,
         )
+        print(json.dumps(receipt, sort_keys=True, indent=2))
+        return 0
+
+    if ns.execute_first_final_tests:
+        if not ns.once or ns.watch:
+            ap.error("--execute-first-final-tests requires --once and forbids --watch")
+        if not ns.require_supervisor_shadow:
+            ap.error(
+                "--execute-first-final-tests currently requires "
+                "--require-supervisor-shadow"
+            )
+        result = one_pass(project, True)
+        receipt = execute_first_final_tests(project, result)
         print(json.dumps(receipt, sort_keys=True, indent=2))
         return 0
 
