@@ -1,6 +1,6 @@
 ---
-description: Resume and finish an unfinished one-shot project in a fresh parent session with mandatory workers.
-agent: orchestrator
+description: Retired legacy command. Continue with scripts/drive-stage-a-run.py.
+agent: transport-root
 ---
 
 RESUME AND FINISH the unfinished project in the CURRENT directory.

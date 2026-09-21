@@ -1,6 +1,6 @@
 ---
-description: Solve a substantial task in an existing project with mandatory delegation.
-agent: orchestrator
+description: Retired legacy command. Start generic Stage-A runs with scripts/start-stage-a-run.sh.
+agent: transport-root
 ---
 
 Solve this task in the CURRENT project:

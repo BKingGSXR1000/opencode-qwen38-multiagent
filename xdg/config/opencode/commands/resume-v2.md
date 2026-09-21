@@ -1,6 +1,6 @@
 ---
-description: Continue a V2.2 project with a fresh dispatcher.
-agent: orchestrator
+description: Retired legacy command. Continue with scripts/drive-stage-a-run.py.
+agent: transport-root
 ---
 
 Resume and finish the CURRENT project:

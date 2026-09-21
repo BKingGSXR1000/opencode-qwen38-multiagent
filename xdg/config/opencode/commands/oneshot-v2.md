@@ -1,6 +1,6 @@
 ---
-description: V2 autonomous acceptance-planned, DAG-executed, acceptance-gated build.
-agent: orchestrator
+description: Retired legacy command. Start generic Stage-A runs with scripts/start-stage-a-run.sh.
+agent: transport-root
 ---
 
 Build this project in the CURRENT directory:

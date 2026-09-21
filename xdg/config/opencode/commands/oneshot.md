@@ -1,6 +1,6 @@
 ---
-description: Build a new runnable project from scratch with mandatory parallel workers.
-agent: orchestrator
+description: Retired legacy command. Start generic Stage-A runs with scripts/start-stage-a-run.sh.
+agent: transport-root
 ---
 
 ONE-SHOT this project in the CURRENT directory:
