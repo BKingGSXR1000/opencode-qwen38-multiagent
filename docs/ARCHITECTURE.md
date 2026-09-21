@@ -77,4 +77,6 @@ Fail closed if actual OpenCode project/worktree differs from predicted projectio
 
 Unless explicitly requested, do not change model choices, context sizes, concurrency, MTP, reasoning mode/budget, or production vLLM tuning.
 
-Task-splitter model: `syv/qwen38-implementation-planner-48k`.
+Task-splitter profile: `syv/qwen38-task-splitter-nothink`. It uses the same
+underlying Qwen ID, context, output cap, and v2 cap as the historic planner
+profile, but intentionally disables thinking for bounded JSON splitting.

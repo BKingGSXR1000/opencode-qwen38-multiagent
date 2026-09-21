@@ -578,7 +578,7 @@ def last_assistant_text_db(sid):
 
 def parse_split_parent(text):
     m=re.search(
-        r"(?m)^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$",
+        r"(?m)^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?$|\r?\n)",
         str(text or ""),
     )
     return m.group(1) if m else ""
@@ -7861,11 +7861,11 @@ def main():
         if unknown or not args.project or args.agent!="task-splitter" or args.prompt is None:
             raise SystemExit("splitter claim requires --project --agent task-splitter --prompt --claim-splitter")
         PROJECT=args.project
-        match=re.fullmatch(r"\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*",args.prompt)
-        if not match: raise SystemExit("SPLIT_DENY invalid splitter prompt")
-        ok,detail=claim_splitter(match.group(1),args.claim_splitter)
-        if not ok: raise SystemExit(f"SPLIT_DENY parent={match.group(1)} reason={detail}")
-        print(f"SPLIT_ALLOW parent={match.group(1)} generation=1")
+        parent=parse_split_parent(args.prompt)
+        if not parent: raise SystemExit("SPLIT_DENY invalid splitter prompt")
+        ok,detail=claim_splitter(parent,args.claim_splitter)
+        if not ok: raise SystemExit(f"SPLIT_DENY parent={parent} reason={detail}")
+        print(f"SPLIT_ALLOW parent={parent} generation=1")
         return
     if args.recover_splitter_output_limit:
         if unknown or not args.project:

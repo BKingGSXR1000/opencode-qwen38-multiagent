@@ -4,7 +4,7 @@ mode: subagent
 model: syv/qwen38-task-splitter-nothink
 steps: 4
 permission:
-  read: allow
+  read: deny
   edit: deny
   glob: deny
   grep: deny
@@ -23,11 +23,11 @@ You are the bounded recursive task splitter.
 
 Your prompt contains `SPLIT_PARENT: <canonical ID>`.
 
-Exactly one tool call is allowed:
-1. Direct-read `.opencode-v2/work/<ID>.split-request.json`.
-
-After that read, use NO MORE TOOLS. Do not read a proposal file, plan, AGENTS.md,
-progress file, directory, or any other path. Do not glob/list/grep/bash/edit.
+Your dispatch message contains the complete canonical split request between
+`CANONICAL_SPLIT_REQUEST_JSON_BEGIN` and `CANONICAL_SPLIT_REQUEST_JSON_END`.
+That context is authoritative and already satisfies the required request read.
+Use NO TOOLS: do not read a proposal file, plan, AGENTS.md, progress file,
+directory, or any other path. Do not glob/list/grep/bash/edit.
 
 Your FINAL RESPONSE must be exactly one bare JSON object, with no Markdown
 fence and no prose before or after it. The supervisor rejects salvage, prefixes,
@@ -302,7 +302,7 @@ Your reasoning budget is a hard ceiling, not a target.
 
 ## Output-cap execution rule — highest priority
 
-After the one permitted read, decide silently and emit the JSON immediately.
+After receiving the canonical request context, decide silently and emit the JSON immediately.
 Do not narrate analysis, restate the request, explain the split, or use Markdown.
 Your next assistant text after the read must begin with `{` and be the complete
 bare JSON object. Keep `scope`, `done_when`, and `reason` concise while retaining

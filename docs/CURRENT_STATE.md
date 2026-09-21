@@ -129,6 +129,29 @@ remaining authorized splitter claim. A future change to its split contract or
 ownership decomposition requires a new architectural decision; D004 remains
 blocked through ordinary dependency resolution.
 
+### Disposable splitter execution proof — 2026-09-21
+`3770308` normalizes canonical directory ownership roots only for containment;
+it does not broaden ownership. The follow-up splitter repair projects the
+already-materialized canonical split request into the initial child context and
+removes the splitter read capability. This prevents a denied duplicate read
+from consuming the finite native step budget. Multiline prompt parsing is
+consistent at the controller plugin and supervisor claim boundary.
+
+The evidence-complete disposable canary
+`/tmp/a2-splitter-directory-canary-20260921-v6/project` passed full preflight
+with zero preflight POSTs/workers, then dispatched technical root
+`ses_f3a72d505ffeWU3iyp1DKPmyL2` and splitter child
+`ses_f3a7200ddffejayuckvdQo3tUZ`. The child used the intentional
+`syv/qwen38-task-splitter-nothink` profile, made zero tool calls, emitted bare
+proposal JSON, and was accepted as D001-A/D001-B. D001-B owns the exact
+canonical directory root `fixtures/vectors/moons/`; exact-root containment is
+also covered by the focused deterministic regression. The fixture supplied
+authoritative failed-Verify evidence (exact command, exit 1, stderr, attempt
+and session), preventing false parent-contract-invalid routing.
+
+Retained D002, D003, and D004 were untouched. D003 remains at splitter
+claim/failure 5 and worker attempt count 3. Claim 6 requires explicit approval.
+
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 

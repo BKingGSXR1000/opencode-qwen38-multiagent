@@ -175,10 +175,23 @@ class TaskSplitterOutputCapTests(unittest.TestCase):
     def test_role_ends_with_a_no_analysis_json_only_output_rule(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/task-splitter.md").read_text()
         self.assertIn("steps: 4",role)
+        self.assertIn("read: deny",role)
+        self.assertIn("CANONICAL_SPLIT_REQUEST_JSON_BEGIN",role)
         self.assertIn("## Output-cap execution rule — highest priority",role)
         self.assertIn("Do not narrate analysis",role)
         self.assertIn("must begin with `{`",role)
         self.assertLess(len(role), 15_000)
+
+    def test_direct_context_prevents_the_duplicate_read_step_loop_without_salvage(self):
+        action={"kind":"launch","agent":"task-splitter","deliverable":"D001","generation":1}
+        request={"parent_id":"D001","depth":0,"generation":1,"ownership_items":["a.txt"]}
+        prompt=controller.build_task_splitter_subtask(action,request)["prompt"]
+        self.assertTrue(prompt.startswith("SPLIT_PARENT: D001\nCANONICAL_SPLIT_REQUEST_JSON_BEGIN\n"))
+        self.assertIn('"ownership_items":["a.txt"]',prompt)
+        self.assertTrue(prompt.endswith("\nCANONICAL_SPLIT_REQUEST_JSON_END"))
+        self.assertEqual(supervisor.parse_split_parent(prompt),"D001")
+        stranded='Maximum steps reached. Intended final JSON: {"protocol":"v2-task-split-proposal-v2"}'
+        self.assertIsNone(supervisor.parse_splitter_final_json(stranded))
 
 
 class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
@@ -237,7 +250,8 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         actions = deterministic_dispatch.select_actions(state)
         splitter = {"kind": "launch", "agent": "task-splitter", "deliverable": "D001", "generation": 1}
         self.assertIn(splitter, actions)
-        self.assertEqual(controller.build_task_splitter_subtask(splitter)["prompt"], "SPLIT_PARENT: D001")
+        request={"parent_id":"D001","depth":0,"generation":1}
+        self.assertIn("CANONICAL_SPLIT_REQUEST_JSON_BEGIN",controller.build_task_splitter_subtask(splitter,request)["prompt"])
         self.assertEqual(supervisor.claim_splitter("D001", "split-session"), (True, "claimed"))
         proposal = {
             "protocol": supervisor.SPLIT_PROPOSAL_PROTOCOL, "parent_id": "D001", "depth": 0,

@@ -602,15 +602,38 @@ def build_implementation_subtask(action: dict, prompt: str) -> dict:
     }
 
 
-def build_task_splitter_subtask(action: dict) -> dict:
+def build_task_splitter_subtask(action: dict, split_request: dict) -> dict:
+    """Build a no-tool splitter dispatch from its already-materialized request.
+
+    A denied duplicate read can consume the finite native step budget even
+    though the first result contains every fact needed for the proposal.
+    Projecting the canonical, state-bound request into initial child context
+    removes that mutable tool-use boundary; ownership remains project-relative.
+    """
     agent = str(action.get("agent") or "")
     did = str(action.get("deliverable") or "")
     if agent != "task-splitter" or not did:
         raise ControllerError("task-splitter launch lacks canonical agent/deliverable")
-    canonical_execution_action(action)
+    canonical = canonical_execution_action(action)
+    if not isinstance(split_request, dict):
+        raise ControllerError("task-splitter canonical split request is not an object")
+    if str(split_request.get("parent_id") or "") != did:
+        raise ControllerError("task-splitter canonical split request parent mismatch")
+    try:
+        request_generation = int(split_request.get("generation"))
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("task-splitter canonical split request generation is invalid") from exc
+    if request_generation != int(canonical["generation"]):
+        raise ControllerError("task-splitter canonical split request generation mismatch")
+    rendered = json.dumps(split_request, sort_keys=True, separators=(",", ":"))
     return {
         "type": "subtask",
-        "prompt": f"SPLIT_PARENT: {did}",
+        "prompt": (
+            f"SPLIT_PARENT: {did}\n"
+            "CANONICAL_SPLIT_REQUEST_JSON_BEGIN\n"
+            f"{rendered}\n"
+            "CANONICAL_SPLIT_REQUEST_JSON_END"
+        ),
         "description": f"Split {did}",
         "agent": "task-splitter",
         "command": "stage-a-controller",
@@ -1256,7 +1279,6 @@ def execute_first_task_splitter(
             + json.dumps(unsupported, sort_keys=True)
         )
 
-    part = build_task_splitter_subtask(launch)
     root = resolve_root_session(project, base_url, explicit_root)
     execution_id = execution_action_id(result["state_version"], root, canonical_action)
     did = str(canonical_action["deliverable"])
@@ -1294,6 +1316,10 @@ def execute_first_task_splitter(
             )
 
         ensure_root_idle(project, base_url, root)
+        request_path = project / ".opencode-v2" / "work" / f"{did}.split-request.json"
+        part = build_task_splitter_subtask(
+            canonical_action, load_json(request_path, f"canonical split request {did}")
+        )
         baseline_attempt = attempt_snapshot(project, did)
         baseline_children = child_snapshot(project, base_url, root)
         intent = {
@@ -1507,10 +1533,16 @@ def selftest() -> None:
     split_action = {
         "kind": "launch", "agent": "task-splitter", "deliverable": "D042", "generation": 3,
     }
-    split_payload = build_task_splitter_subtask(split_action)
+    split_request = {"parent_id":"D042","generation":3,"depth":0}
+    split_payload = build_task_splitter_subtask(split_action, split_request)
     if split_payload != {
-        "type": "subtask", "prompt": "SPLIT_PARENT: D042", "description": "Split D042",
-        "agent": "task-splitter", "command": "stage-a-controller",
+        "type": "subtask",
+        "prompt": (
+            "SPLIT_PARENT: D042\nCANONICAL_SPLIT_REQUEST_JSON_BEGIN\n"
+            "{\"depth\":0,\"generation\":3,\"parent_id\":\"D042\"}\n"
+            "CANONICAL_SPLIT_REQUEST_JSON_END"
+        ),
+        "description": "Split D042", "agent": "task-splitter", "command": "stage-a-controller",
     }:
         raise ControllerError(f"task-splitter payload mismatch actual={split_payload!r}")
     if canonical_execution_action(split_action).get("generation") != 3:

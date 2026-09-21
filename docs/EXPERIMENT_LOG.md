@@ -237,3 +237,27 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - D003 is now finite `split-validation-failed` at claim/failure count 5 and
   worker attempt count 3. The runtime was stopped. No further splitter claim is
   authorized; D002 and D004 were not modified.
+
+## Disposable direct-context splitter proof — 2026-09-21
+
+- `3770308` fixed strict containment for a canonical owned directory root
+  (`fixtures/vectors/moons/`) when an operation target omits only its trailing
+  slash. It did not expand ownership.
+- The splitter request is now supplied as initial canonical context and the
+  splitter has no read permission. This removes the duplicate-read/tool-step
+  loop without salvaging non-bare final output. Controller, plugin, and
+  supervisor all accept the same multiline `SPLIT_PARENT` form.
+- Evidence-complete disposable project:
+  `/tmp/a2-splitter-directory-canary-20260921-v6/project`. Its request included
+  a supervisor-generated exact failed Verify record (exit 1, exact command,
+  stderr, attempt 2, session `synthetic-worker-2`) plus the genuine-failure
+  threshold and canonical ownership inventory.
+- Full preflight passed with zero worker launches. Root
+  `ses_f3a72d505ffeWU3iyp1DKPmyL2` launched child
+  `ses_f3a7200ddffejayuckvdQo3tUZ` on
+  `syv/qwen38-task-splitter-nothink`. The child made zero tool calls, emitted
+  bare JSON, and deterministically committed D001-A/D001-B. D001-B owns exact
+  `fixtures/vectors/moons/` and creates the bounded required record within it.
+- The nonthinking profile is intentional (`8ea4431`): same underlying Qwen,
+  context/output/v2 caps as the former planner profile, differing only by
+  disabled thinking. Retained D002/D003/D004 were not accessed or changed.

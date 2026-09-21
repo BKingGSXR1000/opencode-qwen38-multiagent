@@ -602,6 +602,31 @@ class SplitStateMachineTests(unittest.TestCase):
         self.assertEqual(contract["verify_deps"],["D010"])
         self.assertEqual(contract["done_when"],"both files are valid")
 
+    def test_split_request_carries_authoritative_failed_verify_evidence(self):
+        checked=type("Checked",(),{"returncode":1,"stdout":"","stderr":"missing b.txt\n"})()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","s2",self.parent["verify_command"],checked,"verify-failed-1"
+        )
+        supervisor.record_leaf_failure("D001","second","genuine")
+        req=json.loads((self.work/"D001.split-request.json").read_text())
+        evidence=req["supervisor_verify_evidence"][-1]
+        self.assertEqual(evidence["command"],self.parent["verify_command"])
+        self.assertEqual(evidence["exit_code"],1)
+        self.assertEqual(evidence["result"],"verify-failed-1")
+        self.assertEqual(evidence["stderr"],"missing b.txt\n")
+
+    def test_parent_contract_invalid_reason_remains_bounded_and_strict(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        payload={
+            "protocol":supervisor.SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "field":"verify_command","reason":"x"*1201,
+        }
+        with self.assertRaisesRegex(ValueError,"reason must be 20..1200"):
+            supervisor.request_parent_contract_repair(
+                "D001",payload,json.loads((self.work/"D001.split-request.json").read_text())
+            )
+
     def test_read_only_parent_reaches_finite_terminal_state(self):
         manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
         leaf=manifest["leaves"]["D001"]

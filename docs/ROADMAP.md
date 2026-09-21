@@ -66,9 +66,9 @@ Only after D passes:
   - [x] one explicitly authorized D003 four-step execution-contract claim
     produced JSON but failed exact child-ownership validation. It is preserved
     as `split-validation-failed` at claim/failure 5; no worker attempt changed.
-  - [ ] decide whether a distinct deterministic split-contract repair is
-    architecturally warranted; do not reset attempts, replay D002, or grant
-    another D003 splitter claim without new authorization.
+  - [x] prove direct-context/no-tool splitter execution and exact directory
+    ownership containment in an evidence-complete disposable canary. Do not
+    reset attempts, replay D002, or grant D003 claim 6 without authorization.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 

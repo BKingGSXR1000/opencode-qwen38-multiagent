@@ -178,7 +178,7 @@ function enableNativeImplementationBackground(args, agent, did) {
 
 function splitParent(args) {
   const prompt = typeof args?.prompt === "string" ? args.prompt : "";
-  return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$/)?.[1] || "";
+  return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?\n|\s*$)/)?.[1] || "";
 }
 
 function supervisor(directory, args, extraEnv = {}) {
