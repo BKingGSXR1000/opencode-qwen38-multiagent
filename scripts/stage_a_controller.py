@@ -22,6 +22,28 @@ POLL_DEFAULT = 0.5
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
 EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
+PLANNER_PROMPTS = {
+    "repair": """Repair structured implementation planning for this project.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md, then .opencode-v2/ACCEPTANCE.md,
+.opencode-v2/CONTROL_CONTRACT.md, .opencode-v2/IMPLEMENTATION_PLAN.structured.json,
+and .opencode-v2/IMPLEMENTATION_PLAN.repair.json.
+
+Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Repair the durable
+plan without weakening acceptance requirements or fabricating missing data.
+The current repair packet is authoritative about the defect. Preserve valid
+durable work and make prerequisite producers and dependencies explicit before
+any consumer that requires their artifacts. Never edit generated
+IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
+    "continue": """Continue structured implementation planning for this project.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md, then .opencode-v2/ACCEPTANCE.md,
+.opencode-v2/CONTROL_CONTRACT.md, and .opencode-v2/IMPLEMENTATION_PLAN.structured.json.
+
+Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Continue from
+durable state without weakening acceptance requirements or editing generated
+IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
+}
 
 
 class ControllerError(RuntimeError):
@@ -115,9 +137,19 @@ def save_execution_ledger(project: Path, data: dict) -> None:
 def canonical_execution_action(action: dict) -> dict:
     if not isinstance(action, dict):
         raise ControllerError("execution action is not an object")
+    agent = str(action.get("agent") or "")
+    if agent == "implementation-planner":
+        normalized = {
+            "kind": str(action.get("kind") or ""),
+            "agent": agent,
+            "mode": str(action.get("mode") or ""),
+        }
+        if normalized["kind"] != "launch" or normalized["mode"] not in PLANNER_PROMPTS:
+            raise ControllerError(f"invalid implementation-planner action: {action!r}")
+        return normalized
     normalized = {
         "kind": str(action.get("kind") or ""),
-        "agent": str(action.get("agent") or ""),
+        "agent": agent,
         "deliverable": str(action.get("deliverable") or ""),
     }
     if normalized["kind"] != "launch" or not normalized["agent"] or not normalized["deliverable"]:
@@ -438,6 +470,146 @@ def build_task_splitter_subtask(action: dict) -> dict:
     }
 
 
+def build_planner_subtask(action: dict) -> dict:
+    canonical = canonical_execution_action(action)
+    if canonical.get("agent") != "implementation-planner":
+        raise ControllerError("planner action must use implementation-planner")
+    mode = canonical["mode"]
+    return {
+        "type": "subtask",
+        "prompt": PLANNER_PROMPTS[mode],
+        "description": f"{mode.title()} implementation plan",
+        "agent": "implementation-planner",
+        "command": "stage-a-controller",
+    }
+
+
+def planner_reconcile_evidence(intent: dict, children: list[dict]) -> dict | None:
+    baseline = set(intent.get("baseline_child_ids") or [])
+    root = str(intent.get("root_session") or "")
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        sid = str(child.get("id") or "")
+        if (
+            sid and sid not in baseline
+            and str(child.get("parentID") or "") == root
+            and str(child.get("agent") or "") == "implementation-planner"
+        ):
+            return {"kind": "native-planner-child", "sessions": [sid]}
+    return None
+
+
+def execute_first_planner(
+    project: Path,
+    base_url: str,
+    result: dict,
+    explicit_root: str = "",
+) -> dict:
+    actions = result["actions"]
+    planner_actions = [
+        action for action in actions
+        if isinstance(action, dict)
+        and action.get("kind") == "launch"
+        and action.get("agent") == "implementation-planner"
+    ]
+    if len(planner_actions) != 1:
+        raise ControllerError(
+            "planner executor requires exactly one deterministic planner launch: "
+            + json.dumps(planner_actions, sort_keys=True)
+        )
+    launch = planner_actions[0]
+    canonical_action = canonical_execution_action(launch)
+    unsupported = [
+        action for action in actions
+        if not (
+            action == launch
+            or (isinstance(action, dict) and action.get("kind") in {"wait", "rescan"})
+        )
+    ]
+    if unsupported:
+        raise ControllerError(
+            "mixed/unsupported deterministic actions in planner-only slice: "
+            + json.dumps(unsupported, sort_keys=True)
+        )
+    part = build_planner_subtask(canonical_action)
+    root = resolve_root_session(project, base_url, explicit_root)
+    execution_id = execution_action_id(result["state_version"], root, canonical_action)
+
+    with execution_lock(project):
+        current = evaluate(project)
+        if current["state_version"] != result["state_version"]:
+            raise ControllerError(
+                f"state changed before dispatch: selected={result['state_version']} "
+                f"current={current['state_version']}"
+            )
+        if current["actions"] != result["actions"]:
+            raise ControllerError("deterministic actions changed before dispatch")
+        ledger = load_execution_ledger(project)
+        executions = ledger["executions"]
+        existing = executions.get(execution_id)
+        if existing is not None:
+            if not isinstance(existing, dict) or existing.get("action") != canonical_action:
+                raise ControllerError(f"execution ledger action mismatch: {execution_id}")
+            evidence = planner_reconcile_evidence(
+                existing, child_snapshot(project, base_url, root)
+            )
+            if evidence:
+                return replay_receipt(existing, evidence)
+            raise ControllerError(
+                "AMBIGUOUS_EXECUTION planner launch has no child evidence; "
+                f"execution_id={execution_id} replay remains forbidden"
+            )
+
+        ensure_root_idle(project, base_url, root)
+        baseline_children = child_snapshot(project, base_url, root)
+        intent = {
+            "execution_id": execution_id,
+            "state_version": result["state_version"],
+            "root_session": root,
+            "action": canonical_action,
+            "transport": "prompt_async+SubtaskPart",
+            "transport_may_have_been_attempted": True,
+            "created_at_ms": int(time.time() * 1000),
+            "baseline_child_ids": sorted(
+                str(item.get("id")) for item in baseline_children
+                if isinstance(item, dict) and item.get("id")
+            ),
+        }
+        executions[execution_id] = intent
+        save_execution_ledger(project, ledger)
+        url = workspace_url(
+            base_url, f"/session/{urllib.parse.quote(root)}/prompt_async", project
+        )
+        try:
+            status, body = http_json("POST", url, {
+                "agent": "transport-root",
+                "model": {"providerID": "v2noop", "modelID": "root-noop"},
+                "parts": [part],
+            }, timeout=10.0)
+        except ControllerError as exc:
+            raise ControllerError(
+                f"{exc}; execution_id={execution_id}; transport outcome is ambiguous; "
+                "blind replay is forbidden; use --reconcile-execution with this execution_id"
+            ) from exc
+        if status != 204:
+            raise ControllerError(
+                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+                f"execution_id={execution_id} remains ambiguous and cannot be replayed blindly"
+            )
+        return {
+            "protocol": EXECUTION_RECEIPT_PROTOCOL,
+            "state_version": result["state_version"],
+            "root_session": root,
+            "action": canonical_action,
+            "execution_id": execution_id,
+            "http_status": status,
+            "transport": "prompt_async+SubtaskPart",
+            "idempotency_intent_persisted": True,
+            "replay_suppressed": False,
+        }
+
+
 def unsupported_task_splitter_actions(actions: list, selected: dict) -> list:
     """Return actions outside the intentionally narrow splitter executor slice."""
     unsupported = []
@@ -734,7 +906,20 @@ def reconcile_execution(project: Path, base_url: str, execution_id: str) -> dict
         action = intent.get("action") or {}
         did = str(action.get("deliverable") or "")
         root = str(intent.get("root_session") or "")
-        if not did or not root:
+        agent = str(action.get("agent") or "")
+        if not root:
+            raise ControllerError(f"execution intent incomplete: {execution_id}")
+        if agent == "implementation-planner":
+            evidence = planner_reconcile_evidence(
+                intent, child_snapshot(project, base_url, root)
+            )
+            if not evidence:
+                raise ControllerError(
+                    "AMBIGUOUS_EXECUTION no planner child evidence observed; "
+                    f"execution_id={execution_id} replay remains forbidden"
+                )
+            return replay_receipt(intent, evidence)
+        if not did:
             raise ControllerError(f"execution intent incomplete: {execution_id}")
         attempts = attempt_snapshot(project, did)
         children = child_snapshot(project, base_url, root)
@@ -830,6 +1015,16 @@ def selftest() -> None:
         raise ControllerError(f"task-splitter payload mismatch actual={split_payload!r}")
     if canonical_execution_action(split_action).get("generation") != 3:
         raise ControllerError("task-splitter execution action did not bind generation")
+    planner_action = {
+        "kind": "launch", "agent": "implementation-planner", "mode": "repair",
+    }
+    if canonical_execution_action(planner_action) != planner_action:
+        raise ControllerError("planner execution action did not retain repair mode")
+    planner_payload = build_planner_subtask(planner_action)
+    if planner_payload["agent"] != "implementation-planner" or not planner_payload[
+        "prompt"
+    ].startswith("Repair structured implementation planning for this project."):
+        raise ControllerError("planner subtask payload mismatch")
     if unsupported_task_splitter_actions(
         [
             split_action,
@@ -933,6 +1128,7 @@ def main() -> int:
     ap.add_argument("--require-supervisor-shadow", action="store_true")
     ap.add_argument("--execute-first-implementation", action="store_true")
     ap.add_argument("--execute-first-task-splitter", action="store_true")
+    ap.add_argument("--execute-first-planner", action="store_true")
     ap.add_argument("--reconcile-execution", default="")
     ap.add_argument("--base-url", default=os.environ.get("V2_OPENCODE_BASE_URL", ""))
     ap.add_argument("--root-session", default="")
@@ -951,7 +1147,7 @@ def main() -> int:
         raise ControllerError(f"project does not exist: {project}")
 
     if ns.reconcile_execution:
-        if ns.once or ns.watch or ns.execute_first_implementation:
+        if ns.once or ns.watch or ns.execute_first_implementation or ns.execute_first_planner:
             ap.error("--reconcile-execution is a standalone read-only operation")
         if not ns.base_url:
             ap.error("--reconcile-execution requires --base-url")
@@ -959,7 +1155,12 @@ def main() -> int:
         print(json.dumps(receipt, sort_keys=True, indent=2))
         return 0
 
-    if ns.execute_first_implementation and ns.execute_first_task_splitter:
+    selected_executors=sum(bool(value) for value in (
+        ns.execute_first_implementation,
+        ns.execute_first_task_splitter,
+        ns.execute_first_planner,
+    ))
+    if selected_executors > 1:
         ap.error("choose at most one explicit executor")
 
     if ns.execute_first_implementation:
@@ -994,6 +1195,25 @@ def main() -> int:
             ap.error("--execute-first-task-splitter requires --base-url")
         result = one_pass(project, True)
         receipt = execute_first_task_splitter(
+            project,
+            ns.base_url,
+            result,
+            explicit_root=ns.root_session,
+        )
+        print(json.dumps(receipt, sort_keys=True, indent=2))
+        return 0
+
+    if ns.execute_first_planner:
+        if not ns.once or ns.watch:
+            ap.error("--execute-first-planner requires --once and forbids --watch")
+        if not ns.require_supervisor_shadow:
+            ap.error(
+                "--execute-first-planner currently requires --require-supervisor-shadow"
+            )
+        if not ns.base_url:
+            ap.error("--execute-first-planner requires --base-url")
+        result = one_pass(project, True)
+        receipt = execute_first_planner(
             project,
             ns.base_url,
             result,
