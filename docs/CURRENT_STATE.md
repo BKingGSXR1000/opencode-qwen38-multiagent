@@ -185,6 +185,38 @@ launched no semantic child and its runtime was stopped. Rebuild the canary
 from a current guard-valid fixture rather than treating that stale fixture as
 model evidence.
 
+### Fresh current-state D003-equivalent splitter proof — 2026-09-21
+
+`6ae5a80` adds `create-d003-splitter-canary.py`, which builds a fresh fixture
+through current bootstrap, structured-plan compilation, finalized acceptance/
+plan guards, query materialization, and supervisor-generated failed-Verify
+threshold state. It does not copy ready markers, manifests, leases, queries,
+or runtime metadata. The live fixture was
+`/tmp/a2-d003-current-state-canary-20260921/project`.
+
+Both consolidated preflights passed with zero preflight POSTs/workers. The
+first splitter child `ses_f3a498003ffe01CO4v7Ct1aP91` (root
+`ses_f3a4a1136ffeWhc7t9SXHKFTcN`) made zero tool calls and emitted bare JSON,
+but again claimed a valid Verify was invalid. Deterministic validation rejected
+it as `parent-contract-invalid verify_command lacks a deterministic contract
+defect`; no repair packet or child contract was created, and the parent moved
+normally to `split-retryable`.
+
+After a fresh second preflight, child `ses_f3a47bdb4ffe4AS8FZ03UpHKKu` (root
+`ses_f3a48c8d0ffe1s45Djs7dY2Jbo`) also used zero tools and emitted bare normal
+proposal JSON. Strict validation accepted D003-A as a progress-only
+`probe-builder` and D003-B as an `implementer` owning exactly
+`.opencode-v2/probes/ephemeris_moons.json` and `fixtures/vectors/moons/`.
+Its operation target `fixtures/vectors/moons/` passed exact directory-root
+containment without broadened access. The parent reached split state `accepted`
+at claim count 2 / proposal failure count 1. The disposable runtime was
+stopped without launching implementation children.
+
+Retained D002/D003/D004 were not accessed for mutation. A final read-only
+check confirms retained D003 worker count remains 3; its claim-6 archive
+preserves claim count 6. The next retained action would be claim 7 and needs
+explicit authorization.
+
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 

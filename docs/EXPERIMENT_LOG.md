@@ -289,3 +289,32 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   guard-manifest compatibility check, so no semantic child was launched and
   its runtime was stopped. It is not evidence about the splitter model or the
   new guard; rebuild the fixture from current guard-valid inputs.
+
+## Fresh current-state D003-equivalent splitter proof — 2026-09-21
+
+- `6ae5a80` introduced a reusable fixture builder that starts from current
+  bootstrap/control-state machinery, current structured-plan compilation, and
+  current finalized guards. It seeds only canonical predecessor readiness and
+  supervisor-recorded D003 failed-Verify evidence; no legacy runtime metadata
+  is copied.
+- Disposable project: `/tmp/a2-d003-current-state-canary-20260921/project`.
+  Its initial D003 state was split-required, generation 1, two genuine failed
+  exact Verify records, and canonical ownership
+  `.opencode-v2/probes/ephemeris_moons.json` plus
+  `fixtures/vectors/moons/`.
+- Both fresh-root consolidated preflights passed with zero semantic
+  POSTs/workers. First child `ses_f3a498003ffe01CO4v7Ct1aP91` made zero tool
+  calls and emitted bare parent-contract-invalid JSON. The new deterministic
+  validator rejected the false `verify_command` assertion; no repair packet,
+  reclassification, or split child was created, and the finite state became
+  split-retryable.
+- Second child `ses_f3a47bdb4ffe4AS8FZ03UpHKKu`, on the same intentional
+  nonthinking splitter profile, also made zero tool calls and emitted bare
+  normal proposal JSON. Strict validation committed D003-A (progress-only
+  probe) and D003-B (writer owning exactly the probe JSON and
+  `fixtures/vectors/moons/`). Exact directory-root containment passed and the
+  parent reached `accepted` at splitter claim count 2 / failure count 1.
+- No disposable implementation child was launched; the proof is intentionally
+  limited to the splitter proposal/contract transaction. The runtime stopped.
+  Retained D002/D003/D004 were not mutated. Read-only retained evidence still
+  reports D003 worker count 3 and archived claim-6 count 6.

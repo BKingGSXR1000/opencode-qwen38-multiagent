@@ -71,8 +71,12 @@ Only after D passes:
     reset attempts, replay D002, or grant D003 claim 6 without authorization.
   - [~] D003 claim 6 proved the direct-context transport, but the model emitted
     an unproven parent-contract-invalid result. `3dbf4f0` makes parent-plan
-    repair deterministically verify-command-only; prove this in a fresh
-    disposable live canary before considering another retained claim.
+    repair deterministically verify-command-only.
+  - [x] fresh current-state D003-equivalent disposable canary: bootstrap/
+    guard/query formats current; first false parent-contract-invalid is
+    rejected without repair; bounded retry emits accepted direct-context,
+    zero-tool normal proposal; D003-A/D003-B contracts materialize with exact
+    moons directory ownership. A retained claim 7 requires explicit approval.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 
