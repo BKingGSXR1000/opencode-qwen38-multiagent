@@ -738,6 +738,36 @@ class SplitStateMachineTests(unittest.TestCase):
             ok,detail=supervisor.recover_splitter_execution_contract("D001",2)
         self.assertFalse(ok); self.assertEqual(detail,"prior-step-contract-not-adjacent")
 
+    def test_direct_context_recovery_is_exact_once_and_preserves_counts(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        supervisor.save_split_status(
+            "D001","split-validation-failed",claim_count=5,proposal_failures=5,
+            recovery_claim_budget=3,
+            reason="creates_or_updates path is outside child ownership: fixtures/vectors/moons",
+            lease_until_epoch=0,
+        )
+        with mock.patch.object(
+            supervisor,"task_splitter_direct_context_fingerprint",return_value="direct-context-fingerprint"
+        ):
+            ok,detail=supervisor.recover_splitter_direct_context_contract("D001")
+        self.assertTrue(ok); self.assertEqual(detail,"recovered")
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"split-retryable")
+        self.assertEqual(status["claim_count"],5)
+        self.assertEqual(status["proposal_failures"],5)
+        self.assertEqual(status["recovery_claim_budget"],4)
+        self.assertEqual(status["direct_context_recovery_fingerprints"],["direct-context-fingerprint"])
+        self.assertEqual(status["recovery_history"][-1]["reason"],"task-splitter-direct-context-contract-recovery")
+        supervisor.save_split_status(
+            "D001","split-validation-failed",
+            reason="creates_or_updates path is outside child ownership: fixtures/vectors/moons",
+        )
+        with mock.patch.object(
+            supervisor,"task_splitter_direct_context_fingerprint",return_value="direct-context-fingerprint"
+        ):
+            ok,detail=supervisor.recover_splitter_direct_context_contract("D001")
+        self.assertFalse(ok); self.assertEqual(detail,"direct-context-recovery-already-used")
+
     def test_progress_handoff_writer_accepts_canonical_directory_root_target(self):
         manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
         leaf=manifest["leaves"]["D001"]

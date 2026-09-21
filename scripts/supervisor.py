@@ -872,7 +872,8 @@ def save_split_status(did, state, **detail):
         "claim_count","proposal_failures","parent_finalize_failures",
         "children","generation","transaction_id","recovery_claim_budget",
         "recovery_history","profile_recovery_fingerprints",
-        "execution_contract_recovery_fingerprints"
+        "execution_contract_recovery_fingerprints",
+        "direct_context_recovery_fingerprints"
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -1264,6 +1265,64 @@ def task_splitter_execution_contract_fingerprint(steps=None):
         sort_keys=True,separators=(",",":"),ensure_ascii=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def task_splitter_direct_context_fingerprint():
+    """Fingerprint the complete no-tool/direct-context splitter transport contract."""
+    paths=(
+        ROOT/"scripts"/"stage_a_controller.py",
+        ROOT/"scripts"/"supervisor.py",
+        ROOT/"xdg"/"config"/"opencode"/"plugins"/"v2-bounded-subagent.js",
+    )
+    payload={
+        "protocol":"v1-task-splitter-direct-context-contract",
+        "execution_contract":task_splitter_execution_contract_fingerprint(),
+        "sources":{
+            str(path.relative_to(ROOT)):hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in paths
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
+    ).hexdigest()
+
+
+def recover_splitter_direct_context_contract(parent):
+    """Record one approved recovery after the exact direct-context/containment repair."""
+    if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
+        return False,"split-request-missing"
+    try:
+        fingerprint=task_splitter_direct_context_fingerprint()
+    except (OSError,RuntimeError) as exc:
+        return False,str(exc)
+    expected_reason="creates_or_updates path is outside child ownership: fixtures/vectors/moons"
+    with splitter_state_lock(parent):
+        status=load_split_status(parent)
+        if status.get("state") != "split-validation-failed":
+            return False,"state-not-split-validation-failed"
+        if status.get("reason") != expected_reason:
+            return False,"failure-not-exact-directory-containment"
+        if leaf_children(parent) or split_proposal_path(parent).exists():
+            return False,"split-already-materialized"
+        previous=list(status.get("direct_context_recovery_fingerprints") or [])
+        if fingerprint in previous:
+            return False,"direct-context-recovery-already-used"
+        history=list(status.get("recovery_history") or [])
+        history.append({
+            "prior_claim_count":int(status.get("claim_count") or 0),
+            "prior_proposal_failures":int(status.get("proposal_failures") or 0),
+            "reason":"task-splitter-direct-context-contract-recovery",
+            "direct_context_contract_fingerprint":fingerprint,
+        })
+        save_split_status(
+            parent,"split-retryable",
+            recovery_claim_budget=int(status.get("recovery_claim_budget") or 0)+1,
+            recovery_history=history,
+            direct_context_recovery_fingerprints=previous+[fingerprint],
+            reason="operator-authorized-task-splitter-direct-context-contract-recovery",
+            lease_until_epoch=0,
+        )
+    return True,"recovered"
 
 
 def recover_splitter_execution_contract(parent, prior_steps):
@@ -7679,7 +7738,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -7866,6 +7925,17 @@ def main():
         ok,detail=claim_splitter(parent,args.claim_splitter)
         if not ok: raise SystemExit(f"SPLIT_DENY parent={parent} reason={detail}")
         print(f"SPLIT_ALLOW parent={parent} generation=1")
+        return
+    if args.recover_splitter_direct_context_contract:
+        if unknown or not args.project:
+            raise SystemExit("splitter direct-context recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_splitter_direct_context_contract(
+            args.recover_splitter_direct_context_contract
+        )
+        if not ok:
+            raise SystemExit(f"SPLIT_DIRECT_CONTEXT_RECOVERY_DENY parent={args.recover_splitter_direct_context_contract} reason={detail}")
+        print(f"SPLIT_DIRECT_CONTEXT_RECOVERY_ALLOW parent={args.recover_splitter_direct_context_contract} reason={detail}")
         return
     if args.recover_splitter_output_limit:
         if unknown or not args.project:
