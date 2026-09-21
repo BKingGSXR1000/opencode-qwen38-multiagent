@@ -144,3 +144,21 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - D003's attempt ledger stayed at count 3 with the same three sessions and two
   genuine failures; the native semantic-child count stayed at 7. No model,
   server, or semantic dispatch was started by the one-shot recovery.
+
+## D003 bounded splitter retry — 2026-09-21
+Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
+
+- Fresh technical root `ses_f3b8c01e7ffeT2Fqjj4eIDCnNX` passed the full
+  consolidated preflight. The sole dry action was D003 generation-1
+  `task-splitter`; preflight made zero semantic POSTs and created zero workers.
+- Execution `5b21d79ba1fdb79e865065937de406db186516a68061d2474e8bff129751f49c`
+  created child `ses_f3b8ac091ffe41tKijchkfRPmv`. As with the first splitter
+  child, it read `D003.split-request.json` and ended `finish=length` at exactly
+  1,536 output tokens without a proposal.
+- Controller reconciliation initially exposed an implementation-only native
+  binding call for task splitters. The scoped fix recognizes the durable native
+  splitter child as replay evidence directly; it does not create an attempt or
+  issue another POST.
+- One-shot recovery then set D003 `splitter-failed`: claim count 2, proposal
+  failures 2, reason `splitter-completed-without-json-proposal`. D003 remains
+  at three worker dispatches and the retained child count remained 8.

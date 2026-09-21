@@ -91,6 +91,30 @@ class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
                 "probe-builder",{"count":1,"sessions":["dispatch:token"]},children,
             )
 
+    def test_splitter_reconcile_uses_native_child_without_attempt_binding(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            action={"kind":"launch","agent":"task-splitter","deliverable":"D001","generation":1}
+            eid="splitter-execution"
+            stage_a_controller.save_execution_ledger(project,{
+                "owner":"stage-a-controller",
+                "protocol":stage_a_controller.EXECUTION_LEDGER_PROTOCOL,
+                "executions":{eid:{
+                    "execution_id":eid,"state_version":"state","root_session":"root",
+                    "action":action,"baseline_attempt":{"count":0,"sessions":[]},
+                    "baseline_child_ids":[],
+                }},
+            })
+            child=[{"id":"split-child","parentID":"root","agent":"task-splitter"}]
+            with mock.patch.object(stage_a_controller,"child_snapshot",return_value=child), \
+                 mock.patch.object(stage_a_controller,"materialize_native_child") as materialize:
+                receipt=stage_a_controller.reconcile_execution(project,"http://127.0.0.1:1",eid)
+            self.assertTrue(receipt["replay_suppressed"])
+            self.assertEqual(receipt["reconciliation"],{
+                "kind":"native-child","sessions":["split-child"]
+            })
+            materialize.assert_not_called()
+
     def test_restart_orphan_is_infrastructure_not_genuine(self):
         sid="orphan"; did="D001"
         old_project=supervisor.PROJECT

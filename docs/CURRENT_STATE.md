@@ -88,17 +88,20 @@ The native child completed, wrote its owned probe artifact, and failed the
 exact current Verify because required vector artifacts remain absent. This is
 the second genuine D003 failure; `split_required generation=1` is durable.
 Attempt 3 is a supervisor plan-contract replacement, not an operator retry.
-The first D003 generation-1 task-splitter child
-`ses_f3ba64c5cffeClIm3nbduaJJH3` completed after reading the split request,
-but reached OpenCode `finish=length` before emitting the required bare JSON
-proposal. It consumed no D003 attempt and created no split children. The
-durable one-shot reconciliation recorded exactly one splitter proposal failure
-and moved D003 to `split-retryable` (claim 1 of the bounded splitter budget).
-The current deterministic action remains `task-splitter` for D003 generation 1.
+Both bounded D003 generation-1 task-splitter children
+`ses_f3ba64c5cffeClIm3nbduaJJH3` and
+`ses_f3b8ac091ffe41tKijchkfRPmv` read the same split request and reached
+OpenCode `finish=length` before emitting the required bare JSON proposal. They
+consumed no D003 worker attempt and created no split children. One-shot durable
+reconciliation recorded two splitter proposal failures and reached the finite
+state `splitter-failed` (claim 2 of the normal splitter budget). The second
+execution was reconciled to its native child without replay after correcting a
+controller bug that incorrectly sent task splitters to implementation binding.
 
 ### Next action
-Run a fresh consolidated preflight before the single bounded D003 task-splitter
-retry. Preserve D002 and every valid historical attempt/split record.
+Diagnose and repair the deterministic task-splitter output protocol before any
+audited replacement claim; do not repeat the same bounded task-splitter call.
+Also preserve D002 and every valid historical attempt/split record.
 
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`

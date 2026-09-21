@@ -1281,9 +1281,9 @@ def execute_first_task_splitter(
                 raise ControllerError(f"execution ledger action mismatch: {execution_id}")
             attempts = attempt_snapshot(project, did)
             children = child_snapshot(project, base_url, root)
-            attempts = bind_unbound_native_child(
-                project, base_url, existing, did, agent, attempts, children
-            )
+            # Splitters own a durable lease/proposal lifecycle, not a worker
+            # attempt reservation. A native splitter child is therefore replay
+            # evidence by itself and must never enter implementation binding.
             evidence = reconcile_execution_evidence(existing, attempts, children)
             if evidence:
                 return replay_receipt(existing, evidence)
@@ -1387,6 +1387,18 @@ def reconcile_execution(project: Path, base_url: str, execution_id: str) -> dict
             if not evidence:
                 raise ControllerError(
                     "AMBIGUOUS_EXECUTION no semantic child evidence observed; "
+                    f"execution_id={execution_id} replay remains forbidden"
+                )
+            return replay_receipt(intent, evidence)
+        if agent == "task-splitter":
+            if not did:
+                raise ControllerError(f"execution intent incomplete: {execution_id}")
+            evidence = reconcile_execution_evidence(
+                intent, attempt_snapshot(project, did), child_snapshot(project, base_url, root)
+            )
+            if not evidence:
+                raise ControllerError(
+                    "AMBIGUOUS_EXECUTION no splitter child evidence observed; "
                     f"execution_id={execution_id} replay remains forbidden"
                 )
             return replay_receipt(intent, evidence)
