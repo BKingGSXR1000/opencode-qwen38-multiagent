@@ -34,15 +34,11 @@ Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Preserve every
 existing leaf key and list order: deliverable IDs and historical attempt
 accounting must remain stable. Do not add, remove, or reorder leaves.
 
-When the repair packet reports missing prerequisite artifacts for
-fixture_manifest, repair the two existing producer leaves instead: make
-fixture_probe own and verify the real frozen main-body vector directory, and
-make fixture_probe_moons own and verify the real frozen Galilean-moon vector
-directory. Keep their existing probe evidence artifacts as their other owned
-paths. Their verification must reject query-only/404 data. Keep
-fixture_manifest dependent on both producers and make its verification check
-the actual sizes and existence of the referenced fixture files, rather than
-the character length of their path strings. Do not fabricate fixture data.
+Treat the repair packet's affected_keys and error evidence as authoritative.
+Repair only those leaves and the dependency references they name. Where a
+consumer lacks prerequisites, assign ownership and fail-closed verification to
+its existing direct producers; retain each leaf key and all unrelated plan
+contracts. Do not fabricate data merely to satisfy a check.
 
 Preserve acceptance requirements and all unrelated valid durable work. Never
 edit generated IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
