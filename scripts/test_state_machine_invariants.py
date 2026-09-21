@@ -494,15 +494,26 @@ class SplitStateMachineTests(unittest.TestCase):
             "acceptance_ids":["A001","A002"],"parallel":"none","split_children":[],
         }
         (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9",
+            "project":str(self.project),
             "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
             "leaves":{"D001":self.parent},
         }))
-        (self.ctrl/"ACCEPTANCE.ready").write_text(
-            "status=complete\nartifact=ACCEPTANCE.md\nmarker=ACCEPTANCE_COMPLETE\nvalidated=deterministic-test\n"
-        )
-        (self.ctrl/"IMPLEMENTATION_PLAN.ready").write_text(
-            "status=complete\nartifact=IMPLEMENTATION_PLAN.md\nmarker=IMPLEMENTATION_PLAN_COMPLETE\nvalidated=deterministic-test\n"
-        )
+        for artifact,marker in (
+            ("ACCEPTANCE.md","ACCEPTANCE_COMPLETE"),
+            ("IMPLEMENTATION_PLAN.md","IMPLEMENTATION_PLAN_COMPLETE"),
+        ):
+            path=self.ctrl/artifact
+            path.write_text(f"test {artifact}\n")
+            digest=hashlib.sha256(path.read_bytes()).hexdigest()
+            ready_name=artifact.removesuffix(".md")+".ready"
+            (self.ctrl/ready_name).write_text(
+                "status=complete\n"
+                f"protocol={control_state.PHASE_READY_PROTOCOL}\n"
+                f"artifact={artifact}\nmarker={marker}\n"
+                f"validated={control_state.PHASE_READY_VALIDATOR}\n"
+                f"artifact_sha256={digest}\n"
+            )
         (self.work/"attempts.json").write_text(json.dumps({
             "owner":"supervisor",
             "deliverables":{
@@ -523,20 +534,24 @@ class SplitStateMachineTests(unittest.TestCase):
     def proposals(self):
         return [
             {
-                "scope":"write both files",
-                "owned_artifacts":"`a.txt`, `b.txt`",
+                "scope":"write a",
+                "owned_artifacts":"`a.txt`",
                 "verify_command":"test -f a.txt -a -f b.txt",
                 "role":"implementer",
                 "depends_on_sibling":"",
-                "done_when":"both files exist",
+                "done_when":"a exists",
+                "reads_existing":[],
+                "creates_or_updates":["a.txt"],
             },
             {
-                "scope":"independently verify",
-                "owned_artifacts":"none",
+                "scope":"write b",
+                "owned_artifacts":"`b.txt`",
                 "verify_command":"test -f a.txt -a -f b.txt",
-                "role":"tester",
-                "depends_on_sibling":"first",
-                "done_when":"both files verify",
+                "role":"implementer",
+                "depends_on_sibling":"",
+                "done_when":"b exists",
+                "reads_existing":[],
+                "creates_or_updates":["b.txt"],
             },
         ]
 
@@ -610,6 +625,25 @@ class SplitStateMachineTests(unittest.TestCase):
         (self.work/"D001.split-proposal.json").write_text("{broken again")
         ok,detail=supervisor.process_split_proposal("D001",session="s2",require_proposal=True)
         self.assertFalse(ok); self.assertEqual(detail,"split-validation-failed")
+
+    def test_expired_pending_splitter_completion_recovers_without_dispatch(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        supervisor.save_split_status(
+            "D001","splitter-active",claim_count=1,dispatch_token="split-1",
+            lease_until_epoch=0,completion_pending_session="no-json-session",
+            completion_pending_token="split-1",completion_pending_deadline_epoch=0,
+        )
+        before=json.loads((self.work/"attempts.json").read_text())
+        result=supervisor.reconcile_splits_once()
+        after=json.loads((self.work/"attempts.json").read_text())
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"split-retryable")
+        self.assertEqual(status["reason"],"splitter-completed-without-json-proposal")
+        self.assertEqual(status["claim_count"],1)
+        self.assertEqual(status["proposal_failures"],1)
+        self.assertFalse((self.work/"D001.split-proposal.json").exists())
+        self.assertEqual(before,after)
+        self.assertEqual(result["splits"]["D001"]["state"],"split-retryable")
 
     def test_split_transaction_is_idempotent_and_history_not_duplicated(self):
         supervisor.record_leaf_failure("D001","second","genuine")

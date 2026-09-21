@@ -125,3 +125,22 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   this produced durable `split_required generation=1`.
 - Current dry routing selects only `task-splitter` for D003 generation 1.
   D002 and D004 were neither reset nor replayed.
+
+## D003 splitter terminal recovery — 2026-09-21
+Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
+
+- The generation-1 splitter execution
+  `f232cc0957b4428cd8eec9659ebe7d15c9b00789c641dba2882d930d8d0c9dd6`
+  created child `ses_f3ba64c5cffeClIm3nbduaJJH3` under technical root
+  `ses_f3ba6f5b0ffe6Z50bCKlc1dKoU`.
+- The child used `task-splitter` with
+  `syv/qwen38-implementation-planner-48k`, read `D003.split-request.json`,
+  and reached OpenCode `finish=length` before returning the required bare JSON
+  proposal. No proposal or split children were persisted.
+- The background reconciliation loop was not running after that terminal
+  event. The new `--reconcile-splits-once` recovery entrypoint transitioned
+  only D003 from `splitter-active` to `split-retryable`, recording
+  `splitter-completed-without-json-proposal`.
+- D003's attempt ledger stayed at count 3 with the same three sessions and two
+  genuine failures; the native semantic-child count stayed at 7. No model,
+  server, or semantic dispatch was started by the one-shot recovery.

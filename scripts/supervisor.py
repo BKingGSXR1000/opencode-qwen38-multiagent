@@ -2306,6 +2306,35 @@ def reconcile_split_proposals():
                 process_split_proposal(did)
 
 
+def reconcile_splits_once():
+    """Run only durable split/rejoin recovery; never select or dispatch work.
+
+    This is the restart-safe counterpart to the daemon's reconciliation loop.
+    It is intentionally separate from controller execution: callers must run a
+    fresh consolidated preflight before acting on any newly unblocked route.
+    """
+    if not PROJECT:
+        raise RuntimeError("split reconciliation requires a project")
+    reconcile_split_proposals()
+    reconcile_split_parent_completions()
+    sync_control_status_snapshot()
+    work=Path(PROJECT)/".opencode-v2"/"work"
+    splits={}
+    for request in sorted(work.glob("D*.split-request.json")):
+        did=request.name.removesuffix(".split-request.json")
+        status=load_split_status(did)
+        splits[did]={
+            key:status[key] for key in (
+                "state","generation","claim_count","proposal_failures","reason"
+            ) if key in status
+        }
+    return {
+        "protocol":"v2-split-reconcile-once-v1",
+        "project":str(Path(PROJECT).resolve()),
+        "splits":splits,
+    }
+
+
 
 def record_leaf_failure(did, reason, classification="genuine"):
     """Record a terminal worker outcome; the split-required edge is durable in the ledger."""
@@ -7486,6 +7515,7 @@ def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit")
+    ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
     ap.add_argument("--root-read-check")
@@ -7511,6 +7541,15 @@ def main():
             materialize_dispatch_child(args.materialize_dispatch_child,args.agent)
         except (ValueError,StateCorruptionError) as exc:
             raise SystemExit(f"DISPATCH_MATERIALIZE_DENY {exc}") from exc
+        return
+    if args.reconcile_splits_once:
+        if unknown or not args.project:
+            raise SystemExit("split reconciliation requires --project --reconcile-splits-once")
+        project_path=Path(args.project).resolve()
+        if not project_path.is_dir():
+            raise SystemExit(f"split reconciliation project does not exist: {project_path}")
+        PROJECT=str(project_path)
+        print(json.dumps(reconcile_splits_once(),sort_keys=True))
         return
     if args.root_read_check:
         if unknown or not args.project:

@@ -59,7 +59,9 @@ Only after D passes:
 - [x] fix generic controller behavior: runtime repair credits, no-op repair rejection, and exact Verify-bound readiness
 - [~] progress remaining deliverables using normal Stage-A scheduling
   - D003 current-contract recovery reached its deterministic generation-1
-    splitter action; do not replay its historical worker attempt.
+    splitter action. Its first splitter child exhausted output before producing
+    a proposal; durable recovery made one bounded splitter retry available.
+    Do not replay its historical worker attempt.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 
