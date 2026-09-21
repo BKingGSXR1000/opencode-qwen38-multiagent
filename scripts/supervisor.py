@@ -1005,7 +1005,15 @@ def _canonical_split_path_list(raw, field):
 
 
 def _path_inside_any(path, roots):
-    return any(path==root or path.startswith(root.rstrip("/")+"/") for root in roots)
+    # Canonical ownership preserves a trailing slash for a directory root, while
+    # the JSON path-list parser normalizes an operation on that root without it.
+    # They denote the same exact project-relative directory; preserve containment
+    # semantics without granting a sibling or parent path.
+    path=str(path).rstrip("/")
+    return any(
+        path==str(root).rstrip("/") or path.startswith(str(root).rstrip("/")+"/")
+        for root in roots
+    )
 
 def split_request(did):
     """Materialize a durable split request from an already-durable ledger marker."""

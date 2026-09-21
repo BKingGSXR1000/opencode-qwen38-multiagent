@@ -713,6 +713,42 @@ class SplitStateMachineTests(unittest.TestCase):
             ok,detail=supervisor.recover_splitter_execution_contract("D001",2)
         self.assertFalse(ok); self.assertEqual(detail,"prior-step-contract-not-adjacent")
 
+    def test_progress_handoff_writer_accepts_canonical_directory_root_target(self):
+        manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        leaf=manifest["leaves"]["D001"]
+        leaf["owned_artifacts"]="`.opencode-v2/probes/moons.json`, `fixtures/vectors/moons/`"
+        leaf["owned_artifact_paths"]=[".opencode-v2/probes/moons.json","fixtures/vectors/moons/"]
+        leaf["verify_command"]="test -s .opencode-v2/probes/moons.json -a -d fixtures/vectors/moons"
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(manifest))
+        (self.ctrl/"probes").mkdir()
+        (self.ctrl/"probes"/"moons.json").write_text("{}")
+        (self.project/"fixtures/vectors/moons").mkdir(parents=True)
+        supervisor.record_leaf_failure("D001","second","genuine")
+        proposals=[
+            {
+                "scope":"diagnose the existing moon fixture inputs",
+                "owned_artifacts":"none",
+                "verify_command":"SUPERVISOR_HANDOFF_PROGRESS",
+                "role":"probe-builder","depends_on_sibling":"",
+                "done_when":"HANDOFF_READY: true records the missing fixture facts",
+                "reads_existing":[".opencode-v2/probes/moons.json","fixtures/vectors/moons/"],
+                "creates_or_updates":[],
+            },
+            {
+                "scope":"write the validated moon fixture outputs",
+                "owned_artifacts":"`.opencode-v2/probes/moons.json`, `fixtures/vectors/moons/`",
+                "verify_command":"test -d fixtures/vectors/moons",
+                "role":"implementer","depends_on_sibling":"first",
+                "done_when":"the fixture directory contains the required records",
+                "reads_existing":[".opencode-v2/probes/moons.json","fixtures/vectors/moons/"],
+                "creates_or_updates":[".opencode-v2/probes/moons.json","fixtures/vectors/moons/"],
+            },
+        ]
+        expected,children=supervisor.validate_split_proposal("D001",proposals)
+        self.assertEqual(expected,["D001-A","D001-B"])
+        self.assertEqual(children[1]["owned_artifact_paths"],[".opencode-v2/probes/moons.json","fixtures/vectors/moons/"])
+        self.assertEqual(children[1]["split_creates_or_updates"],[".opencode-v2/probes/moons.json","fixtures/vectors/moons"])
+
     def test_malformed_proposal_gets_one_bounded_fresh_retry(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         ok,_=supervisor.claim_splitter("D001","claim1")
