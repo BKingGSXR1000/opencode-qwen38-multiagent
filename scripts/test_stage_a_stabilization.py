@@ -174,6 +174,7 @@ class TaskSplitterOutputCapTests(unittest.TestCase):
 
     def test_role_ends_with_a_no_analysis_json_only_output_rule(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/task-splitter.md").read_text()
+        self.assertIn("steps: 4",role)
         self.assertIn("## Output-cap execution rule — highest priority",role)
         self.assertIn("Do not narrate analysis",role)
         self.assertIn("must begin with `{`",role)

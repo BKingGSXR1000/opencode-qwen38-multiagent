@@ -2,7 +2,7 @@
 description: Bounded two-way splitter for a failed implementation leaf
 mode: subagent
 model: syv/qwen38-task-splitter-nothink
-steps: 3
+steps: 4
 permission:
   read: allow
   edit: deny
