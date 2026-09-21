@@ -51,6 +51,32 @@ Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Continue from
 durable state without weakening acceptance requirements or editing generated
 IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
 }
+SEMANTIC_PROMPTS = {
+    ("acceptance-planner", "fresh"): """Create the acceptance contract for this project.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md. Edit only .opencode-v2/ACCEPTANCE.md.
+Follow the acceptance-planner protocol, preserve the original user goal, and do
+not create supervisor-owned readiness state. Stop after the durable contract edit.""",
+    ("acceptance-planner", "repair"): """Repair the acceptance contract for this project.
+
+FIRST read .opencode-v2/ORIGINAL_TASK.md, .opencode-v2/ACCEPTANCE.md, and any
+guard-error artifact. Edit only .opencode-v2/ACCEPTANCE.md. Follow the
+acceptance-planner protocol and do not create supervisor-owned readiness state.""",
+    ("reference-researcher", "foundation"): """REFERENCE_MODE: FOUNDATION
+Build or resume only the compact external-reference foundation. Read
+.opencode-v2/acceptance/reference-work.json if present and follow the
+reference-researcher protocol. Do not expand scope beyond durable requirements.""",
+    ("reference-researcher", "validation"): """REFERENCE_MODE: VALIDATION
+Resolve exactly one durable validation item. Resume
+.opencode-v2/acceptance/reference-work.json if an item is in progress;
+otherwise resolve only the first missing external-reference item. Follow the
+reference-researcher protocol and persist its required durable evidence.""",
+    ("acceptance-validator", "final"): """Run final acceptance validation for this project.
+
+Read the durable acceptance, test, and reference evidence. Follow the
+acceptance-validator protocol exactly; do not treat model prose as final
+success and do not modify implementation artifacts.""",
+}
 
 
 class ControllerError(RuntimeError):
@@ -153,6 +179,15 @@ def canonical_execution_action(action: dict) -> dict:
         }
         if normalized["kind"] != "launch" or normalized["mode"] not in PLANNER_PROMPTS:
             raise ControllerError(f"invalid implementation-planner action: {action!r}")
+        return normalized
+    if (agent, str(action.get("mode") or "")) in SEMANTIC_PROMPTS:
+        normalized = {
+            "kind": str(action.get("kind") or ""),
+            "agent": agent,
+            "mode": str(action.get("mode") or ""),
+        }
+        if normalized["kind"] != "launch":
+            raise ControllerError(f"invalid semantic action: {action!r}")
         return normalized
     normalized = {
         "kind": str(action.get("kind") or ""),
@@ -546,6 +581,21 @@ def build_planner_subtask(action: dict) -> dict:
     }
 
 
+def build_semantic_subtask(action: dict) -> dict:
+    canonical = canonical_execution_action(action)
+    key = (canonical.get("agent"), canonical.get("mode"))
+    prompt = SEMANTIC_PROMPTS.get(key)
+    if not prompt:
+        raise ControllerError(f"unsupported semantic action: {canonical!r}")
+    return {
+        "type": "subtask",
+        "prompt": prompt,
+        "description": f"{canonical['agent']} {canonical['mode']}",
+        "agent": canonical["agent"],
+        "command": "stage-a-controller",
+    }
+
+
 def planner_reconcile_evidence(intent: dict, children: list[dict]) -> dict | None:
     baseline = set(intent.get("baseline_child_ids") or [])
     root = str(intent.get("root_session") or "")
@@ -559,6 +609,12 @@ def planner_reconcile_evidence(intent: dict, children: list[dict]) -> dict | Non
             and str(child.get("agent") or "") == "implementation-planner"
         ):
             return {"kind": "native-planner-child", "sessions": [sid]}
+    return None
+
+
+def semantic_reconcile_evidence(intent: dict, children: list[dict]) -> dict | None:
+    for sid in native_child_ids(intent, children):
+        return {"kind": "native-semantic-child", "sessions": [sid]}
     return None
 
 
@@ -620,6 +676,117 @@ def execute_first_planner(
                 return replay_receipt(existing, evidence)
             raise ControllerError(
                 "AMBIGUOUS_EXECUTION planner launch has no child evidence; "
+                f"execution_id={execution_id} replay remains forbidden"
+            )
+
+        ensure_root_idle(project, base_url, root)
+        baseline_children = child_snapshot(project, base_url, root)
+        intent = {
+            "execution_id": execution_id,
+            "state_version": result["state_version"],
+            "root_session": root,
+            "action": canonical_action,
+            "transport": "prompt_async+SubtaskPart",
+            "transport_may_have_been_attempted": True,
+            "created_at_ms": int(time.time() * 1000),
+            "baseline_child_ids": sorted(
+                str(item.get("id")) for item in baseline_children
+                if isinstance(item, dict) and item.get("id")
+            ),
+        }
+        executions[execution_id] = intent
+        save_execution_ledger(project, ledger)
+        url = workspace_url(
+            base_url, f"/session/{urllib.parse.quote(root)}/prompt_async", project
+        )
+        try:
+            status, body = http_json("POST", url, {
+                "agent": "transport-root",
+                "model": {"providerID": "v2noop", "modelID": "root-noop"},
+                "parts": [part],
+            }, timeout=10.0)
+        except ControllerError as exc:
+            raise ControllerError(
+                f"{exc}; execution_id={execution_id}; transport outcome is ambiguous; "
+                "blind replay is forbidden; use --reconcile-execution with this execution_id"
+            ) from exc
+        if status != 204:
+            raise ControllerError(
+                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+                f"execution_id={execution_id} remains ambiguous and cannot be replayed blindly"
+            )
+        return {
+            "protocol": EXECUTION_RECEIPT_PROTOCOL,
+            "state_version": result["state_version"],
+            "root_session": root,
+            "action": canonical_action,
+            "execution_id": execution_id,
+            "http_status": status,
+            "transport": "prompt_async+SubtaskPart",
+            "idempotency_intent_persisted": True,
+            "replay_suppressed": False,
+        }
+
+
+def execute_first_semantic(
+    project: Path,
+    base_url: str,
+    result: dict,
+    explicit_root: str = "",
+) -> dict:
+    """Dispatch exactly one non-worker semantic phase through the technical root."""
+    actions = result["actions"]
+    selected = [
+        action for action in actions
+        if isinstance(action, dict)
+        and (str(action.get("agent") or ""), str(action.get("mode") or ""))
+        in SEMANTIC_PROMPTS
+    ]
+    if len(selected) != 1:
+        raise ControllerError(
+            "semantic executor requires exactly one deterministic semantic launch: "
+            + json.dumps(selected, sort_keys=True)
+        )
+    launch = selected[0]
+    canonical_action = canonical_execution_action(launch)
+    unsupported = [
+        action for action in actions
+        if not (
+            action == launch
+            or (isinstance(action, dict) and action.get("kind") in {"wait", "rescan"})
+        )
+    ]
+    if unsupported:
+        raise ControllerError(
+            "mixed/unsupported deterministic actions in semantic-only slice: "
+            + json.dumps(unsupported, sort_keys=True)
+        )
+    part = build_semantic_subtask(canonical_action)
+    root = resolve_root_session(project, base_url, explicit_root)
+    execution_id = execution_action_id(result["state_version"], root, canonical_action)
+
+    with execution_lock(project):
+        current = evaluate(project)
+        if current["state_version"] != result["state_version"]:
+            raise ControllerError(
+                f"state changed before dispatch: selected={result['state_version']} "
+                f"current={current['state_version']}"
+            )
+        if current["actions"] != result["actions"]:
+            raise ControllerError("deterministic actions changed before dispatch")
+        ledger = load_execution_ledger(project)
+        executions = ledger["executions"]
+        existing = executions.get(execution_id)
+        if existing is not None:
+            if not isinstance(existing, dict) or existing.get("action") != canonical_action:
+                raise ControllerError(f"execution ledger action mismatch: {execution_id}")
+            evidence = semantic_reconcile_evidence(
+                existing, child_snapshot(project, base_url, root)
+            )
+            if evidence:
+                return replay_receipt(existing, evidence)
+            raise ControllerError(
+                "AMBIGUOUS_EXECUTION semantic launch has no child evidence; "
                 f"execution_id={execution_id} replay remains forbidden"
             )
 
@@ -981,6 +1148,16 @@ def reconcile_execution(project: Path, base_url: str, execution_id: str) -> dict
                     f"execution_id={execution_id} replay remains forbidden"
                 )
             return replay_receipt(intent, evidence)
+        if (agent, str(action.get("mode") or "")) in SEMANTIC_PROMPTS:
+            evidence = semantic_reconcile_evidence(
+                intent, child_snapshot(project, base_url, root)
+            )
+            if not evidence:
+                raise ControllerError(
+                    "AMBIGUOUS_EXECUTION no semantic child evidence observed; "
+                    f"execution_id={execution_id} replay remains forbidden"
+                )
+            return replay_receipt(intent, evidence)
         if not did:
             raise ControllerError(f"execution intent incomplete: {execution_id}")
         attempts = attempt_snapshot(project, did)
@@ -1111,6 +1288,27 @@ def selftest() -> None:
         "prompt"
     ].startswith("Repair structured implementation planning for this project."):
         raise ControllerError("planner subtask payload mismatch")
+    semantic_action = {
+        "kind": "launch", "agent": "acceptance-planner", "mode": "fresh",
+    }
+    if canonical_execution_action(semantic_action) != semantic_action:
+        raise ControllerError("semantic execution action did not retain fresh mode")
+    semantic_payload = build_semantic_subtask(semantic_action)
+    if semantic_payload["agent"] != "acceptance-planner" or semantic_payload[
+        "command"
+    ] != "stage-a-controller":
+        raise ControllerError("semantic subtask payload mismatch")
+    for action in (
+        {"kind": "launch", "agent": "reference-researcher", "mode": "foundation"},
+        {"kind": "launch", "agent": "reference-researcher", "mode": "validation"},
+        {"kind": "launch", "agent": "acceptance-validator", "mode": "final"},
+    ):
+        canonical = canonical_execution_action(action)
+        if canonical != action or build_semantic_subtask(canonical)["agent"] != action["agent"]:
+            raise ControllerError(f"semantic action is not executable: {action!r}")
+    repair_prompt = PLANNER_PROMPTS["repair"].lower()
+    if any(word in repair_prompt for word in ("jupiter", "fixture_probe", "horizons")):
+        raise ControllerError("repair prompt is not project-generic")
     if unsupported_task_splitter_actions(
         [
             split_action,
@@ -1215,6 +1413,7 @@ def main() -> int:
     ap.add_argument("--execute-first-implementation", action="store_true")
     ap.add_argument("--execute-first-task-splitter", action="store_true")
     ap.add_argument("--execute-first-planner", action="store_true")
+    ap.add_argument("--execute-first-semantic", action="store_true")
     ap.add_argument("--reconcile-execution", default="")
     ap.add_argument("--base-url", default=os.environ.get("V2_OPENCODE_BASE_URL", ""))
     ap.add_argument("--root-session", default="")
@@ -1233,7 +1432,9 @@ def main() -> int:
         raise ControllerError(f"project does not exist: {project}")
 
     if ns.reconcile_execution:
-        if ns.once or ns.watch or ns.execute_first_implementation or ns.execute_first_planner:
+        if (ns.once or ns.watch or ns.execute_first_implementation
+                or ns.execute_first_task_splitter or ns.execute_first_planner
+                or ns.execute_first_semantic):
             ap.error("--reconcile-execution is a standalone read-only operation")
         if not ns.base_url:
             ap.error("--reconcile-execution requires --base-url")
@@ -1245,6 +1446,7 @@ def main() -> int:
         ns.execute_first_implementation,
         ns.execute_first_task_splitter,
         ns.execute_first_planner,
+        ns.execute_first_semantic,
     ))
     if selected_executors > 1:
         ap.error("choose at most one explicit executor")
@@ -1300,6 +1502,25 @@ def main() -> int:
             ap.error("--execute-first-planner requires --base-url")
         result = one_pass(project, True)
         receipt = execute_first_planner(
+            project,
+            ns.base_url,
+            result,
+            explicit_root=ns.root_session,
+        )
+        print(json.dumps(receipt, sort_keys=True, indent=2))
+        return 0
+
+    if ns.execute_first_semantic:
+        if not ns.once or ns.watch:
+            ap.error("--execute-first-semantic requires --once and forbids --watch")
+        if not ns.require_supervisor_shadow:
+            ap.error(
+                "--execute-first-semantic currently requires --require-supervisor-shadow"
+            )
+        if not ns.base_url:
+            ap.error("--execute-first-semantic requires --base-url")
+        result = one_pass(project, True)
+        receipt = execute_first_semantic(
             project,
             ns.base_url,
             result,
