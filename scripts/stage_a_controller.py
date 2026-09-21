@@ -25,16 +25,27 @@ EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
 PLANNER_PROMPTS = {
     "repair": """Repair structured implementation planning for this project.
 
-FIRST read .opencode-v2/ORIGINAL_TASK.md, then .opencode-v2/ACCEPTANCE.md,
-.opencode-v2/CONTROL_CONTRACT.md, .opencode-v2/IMPLEMENTATION_PLAN.structured.json,
-and .opencode-v2/IMPLEMENTATION_PLAN.repair.json.
+This is a bounded repair, not a request to rewrite the plan. FIRST read
+.opencode-v2/IMPLEMENTATION_PLAN.repair.json and
+.opencode-v2/IMPLEMENTATION_PLAN.structured.json. Read the acceptance contract
+only if an exact acceptance constraint is unclear.
 
-Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Repair the durable
-plan without weakening acceptance requirements or fabricating missing data.
-The current repair packet is authoritative about the defect. Preserve valid
-durable work and make prerequisite producers and dependencies explicit before
-any consumer that requires their artifacts. Never edit generated
-IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
+Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Preserve every
+existing leaf key and list order: deliverable IDs and historical attempt
+accounting must remain stable. Do not add, remove, or reorder leaves.
+
+When the repair packet reports missing prerequisite artifacts for
+fixture_manifest, repair the two existing producer leaves instead: make
+fixture_probe own and verify the real frozen main-body vector directory, and
+make fixture_probe_moons own and verify the real frozen Galilean-moon vector
+directory. Keep their existing probe evidence artifacts as their other owned
+paths. Their verification must reject query-only/404 data. Keep
+fixture_manifest dependent on both producers and make its verification check
+the actual sizes and existence of the referenced fixture files, rather than
+the character length of their path strings. Do not fabricate fixture data.
+
+Preserve acceptance requirements and all unrelated valid durable work. Never
+edit generated IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
     "continue": """Continue structured implementation planning for this project.
 
 FIRST read .opencode-v2/ORIGINAL_TASK.md, then .opencode-v2/ACCEPTANCE.md,

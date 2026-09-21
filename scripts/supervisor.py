@@ -1805,6 +1805,49 @@ def request_parent_contract_repair(did, payload, request):
     key=_structured_plan_symbolic_key(did)
     repair_path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.repair.json"
     prerequisite_gap=field=="prerequisite_artifacts"
+    # A missing prerequisite is a bounded repair when the affected parent and
+    # its declared producers are known.  Marking this as a whole-plan repair
+    # forces the planner's protocol to rewrite every leaf, which needlessly
+    # risks deliverable-ID drift and can exhaust its context before any edit.
+    # Preserve the source-list order so a targeted planner may edit only these
+    # contracts while retaining the stable Dxxx mapping.
+    repair_keys=[key]
+    if prerequisite_gap:
+        try:
+            structured=load_json_object(
+                structured_plan_path(),label="structured plan",
+            )
+            raw_leaves=structured.get("leaves")
+            target=next(
+                (
+                    item for item in raw_leaves
+                    if isinstance(item,dict) and item.get("key")==key
+                ),
+                None,
+            ) if isinstance(raw_leaves,list) else None
+            if not isinstance(target,dict):
+                raise StateCorruptionError(
+                    f"parent-contract repair key is missing from structured plan: {key}"
+                )
+            direct_deps=[]
+            for dep_field in ("launch_deps","contract_deps","verify_deps"):
+                for dep in target.get(dep_field,[]) or []:
+                    if isinstance(dep,str) and dep and dep not in direct_deps:
+                        direct_deps.append(dep)
+            source_order=[
+                item.get("key") for item in raw_leaves
+                if isinstance(item,dict) and isinstance(item.get("key"),str)
+            ]
+            repair_keys=[
+                candidate for candidate in source_order
+                if candidate==key or candidate in direct_deps
+            ]
+            if key not in repair_keys:
+                repair_keys.append(key)
+        except (OSError,ValueError,TypeError,StopIteration) as exc:
+            raise StateCorruptionError(
+                f"cannot derive bounded prerequisite repair keys for {key}"
+            ) from exc
     repair_message=(
         f"{key}: runtime split recovery found the parent verify_command "
         f"internally inconsistent or non-verifying. Repair only this leaf's "
@@ -1821,8 +1864,8 @@ def request_parent_contract_repair(did, payload, request):
     atomic_write_json(repair_path,{
         "protocol":"v2-structured-plan-repair-v1",
         "source":"runtime-split-parent-contract",
-        "whole_plan":prerequisite_gap,
-        "affected_keys":[] if prerequisite_gap else [key],
+        "whole_plan":False,
+        "affected_keys":repair_keys,
         "errors":[{
             "key":key,
             "code":(
