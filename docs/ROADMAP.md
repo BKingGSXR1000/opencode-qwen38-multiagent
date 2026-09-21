@@ -60,8 +60,10 @@ Only after D passes:
 - [~] progress remaining deliverables using normal Stage-A scheduling
   - D003 current-contract recovery reached its deterministic generation-1
     splitter action. Both normal splitter claims exhausted output before
-    producing a proposal; D003 is now `splitter-failed`. Diagnose and repair
-    that causal output-protocol defect before any audited replacement claim.
+    producing a proposal; its single output-limit replacement also exhausted
+    without a proposal. D003 is `splitter-failed`. The active restored planner
+    profile enables thinking under a 1,536-token output cap; obtain an explicit
+    model/reasoning-policy decision before any new recovery mechanism.
     Do not replay its historical worker attempt.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target

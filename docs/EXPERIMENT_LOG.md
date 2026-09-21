@@ -162,3 +162,20 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - One-shot recovery then set D003 `splitter-failed`: claim count 2, proposal
   failures 2, reason `splitter-completed-without-json-proposal`. D003 remains
   at three worker dispatches and the retained child count remained 8.
+
+## D003 audited output-limit replacement — 2026-09-21
+
+- The output-cap role instruction was loaded by a fresh server/config overlay.
+  A new full consolidated preflight passed with zero semantic POSTs and zero
+  workers, then authorized the single output-limit replacement claim.
+- Execution `3bebb84cebb4d642cbc90e7f5969e1859908ae021ac1e622171124d6abd369dc`
+  created `ses_f3b7ca8abffeKAabDkiXerJ4Xp`. It again read only the split request
+  and reached `finish=length` at 1,536 output tokens with no final text or
+  proposal. The prompt repair was therefore not causal relief.
+- The active restored `qwen38-implementation-planner-48k` configuration has
+  output limit 1,536 and `chat_template_kwargs.enable_thinking=true`. The
+  persisted child parts are reasoning-only despite the role's JSON-only rule.
+- Final one-shot reconciliation set D003 `splitter-failed` at claim count 3
+  and proposal failure count 3. D003's worker attempt ledger stayed at count 3
+  and its retained semantic-child count stayed at 9. No further replacement
+  claim was made.

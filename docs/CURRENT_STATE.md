@@ -88,19 +88,26 @@ The native child completed, wrote its owned probe artifact, and failed the
 exact current Verify because required vector artifacts remain absent. This is
 the second genuine D003 failure; `split_required generation=1` is durable.
 Attempt 3 is a supervisor plan-contract replacement, not an operator retry.
-Both bounded D003 generation-1 task-splitter children
+All three audited D003 generation-1 task-splitter children
 `ses_f3ba64c5cffeClIm3nbduaJJH3` and
-`ses_f3b8ac091ffe41tKijchkfRPmv` read the same split request and reached
+`ses_f3b8ac091ffe41tKijchkfRPmv`, followed by the single audited replacement
+`ses_f3b7ca8abffeKAabDkiXerJ4Xp`, read the same split request and reached
 OpenCode `finish=length` before emitting the required bare JSON proposal. They
 consumed no D003 worker attempt and created no split children. One-shot durable
-reconciliation recorded two splitter proposal failures and reached the finite
-state `splitter-failed` (claim 2 of the normal splitter budget). The second
-execution was reconciled to its native child without replay after correcting a
-controller bug that incorrectly sent task splitters to implementation binding.
+reconciliation recorded three splitter proposal failures and reached the finite
+state `splitter-failed` (claim 3, including the single replacement budget). The
+second execution was reconciled to its native child without replay after
+correcting a controller bug that incorrectly sent task splitters to
+implementation binding.
+
+The output-cap prompt repair did not change this behavior. The active restored
+`qwen38-implementation-planner-48k` profile has `limit.output=1536` and
+`enable_thinking=true`; OpenCode persisted only reasoning parts until that cap.
+Changing that model/reasoning configuration is outside the current freeze.
 
 ### Next action
-Diagnose and repair the deterministic task-splitter output protocol before any
-audited replacement claim; do not repeat the same bounded task-splitter call.
+Obtain an explicit model/reasoning-policy decision for task-splitter before any
+new split recovery mechanism; do not repeat the same bounded task-splitter call.
 Also preserve D002 and every valid historical attempt/split record.
 
 ## Retained-state protection
