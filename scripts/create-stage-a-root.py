@@ -26,7 +26,7 @@ def create_root(project: Path, base_url: str, request=http_json) -> dict:
     payload = {
         "title": ROOT_TITLE,
         "agent": "transport-root",
-        "model": {"providerID": "v2noop", "id": "root-noop"},
+        "model": {"providerID": "v2noop", "modelID": "root-noop"},
     }
     try:
         status, body = request("POST", workspace_url(base_url, "/session", project), payload)
@@ -66,7 +66,7 @@ def selftest() -> None:
         if receipt["root_session"] != "ses-technical-root":
             raise RootCreateError(f"root receipt mismatch: {receipt!r}")
         if seen.get("method") != "POST" or seen.get("payload", {}).get("model") != {
-            "providerID": "v2noop", "id": "root-noop"
+            "providerID": "v2noop", "modelID": "root-noop"
         }:
             raise RootCreateError(f"root request was not explicitly pinned: {seen!r}")
     print("stage-a root create selftest: OK")
