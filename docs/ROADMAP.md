@@ -63,8 +63,12 @@ Only after D passes:
     then returned D003 to finite `splitter-failed` without changing its worker
     attempts. A full-preflight synthetic canary proves the repaired four-step
     generic splitter path creates and reconciles owned child contracts.
-  - [ ] determine the architecture-safe retained D003/D004 recovery transition;
-    do not reset attempts, replay D002, or grant another D003 splitter claim.
+  - [x] one explicitly authorized D003 four-step execution-contract claim
+    produced JSON but failed exact child-ownership validation. It is preserved
+    as `split-validation-failed` at claim/failure 5; no worker attempt changed.
+  - [ ] decide whether a distinct deterministic split-contract repair is
+    architecturally warranted; do not reset attempts, replay D002, or grant
+    another D003 splitter claim without new authorization.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 

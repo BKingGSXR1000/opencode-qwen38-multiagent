@@ -210,3 +210,30 @@ Disposable project: `/tmp/a2-splitter-step-canary-20260921/project`
   non-overlapping ownership (`a.txt` / `b.txt`). Its canary runtime was stopped.
 - This validates the generic splitter lifecycle and does not reset, replay, or
   reopen D002, D003, D004, or any retained attempt ledger.
+
+## D003 authorized four-step execution-contract claim — 2026-09-21
+
+Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
+
+- `7e149b6` added a separately bounded recovery that accepts only the exact
+  adjacent 3→4 task-splitter execution-contract transition. Before dispatch it
+  preserved D003 at worker attempt count 3 and splitter claim/failure count 4,
+  recorded prior/current execution-contract fingerprints, and raised only the
+  finite splitter recovery budget for claim 5.
+- Full consolidated preflight passed on technical root
+  `ses_f3b19ff60ffe8A8m8LJ8q8VfKW` at state version
+  `6ddcd8654de875b8`, selecting only D003 generation-1 task-splitter with zero
+  preflight POSTs/workers. Execution
+  `2b8b48455102ac29c1cd5bea7aa1541844a8808017809df20551ad35b965dd57`
+  created `ses_f3b19851cffelLxQ3TbYDBdlqQ`.
+- The child used `syv/qwen38-task-splitter-nothink`, read only the canonical
+  split request, had zero reasoning tokens, and emitted bare proposal JSON.
+  It also made one denied duplicate request-read; the four-step contract still
+  reserved enough room for the final JSON response.
+- Deterministic validation rejected the proposal exactly because its second
+  child declared `fixtures/vectors/moons/` in `creates_or_updates` while that
+  path was outside the generated child ownership set. The proposal is preserved
+  as `D003.split-proposal.failed-5.json`; no child contract was committed.
+- D003 is now finite `split-validation-failed` at claim/failure count 5 and
+  worker attempt count 3. The runtime was stopped. No further splitter claim is
+  authorized; D002 and D004 were not modified.

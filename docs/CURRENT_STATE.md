@@ -115,11 +115,19 @@ bare `v2-task-split-proposal-v2` JSON with zero reasoning tokens, and was
 deterministically committed as D001-A/D001-B. This proves the repaired generic
 splitter path but does not alter or reopen retained D003.
 
+The separately authorized retained fifth claim then used that exact four-step
+contract. Its child `ses_f3b19851cffelLxQ3TbYDBdlqQ` returned bare JSON with
+zero reasoning tokens, but deterministic proposal validation rejected the
+second child because `fixtures/vectors/moons/` was outside the generated child
+ownership set. D003 is terminal at splitter claim/failure count 5 with
+`split-validation-failed`; its worker attempt count remains 3. No further
+splitter claim is authorized.
+
 ### Next action
 Preserve D002 and every valid historical attempt/split record. D003 has no
-remaining authorized splitter claim; continue with read-only provenance and
-deterministic recovery analysis of the retained D004/D003 downstream blocker
-before proposing any further retained-state transition.
+remaining authorized splitter claim. A future change to its split contract or
+ownership decomposition requires a new architectural decision; D004 remains
+blocked through ordinary dependency resolution.
 
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
