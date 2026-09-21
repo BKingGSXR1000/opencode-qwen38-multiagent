@@ -69,6 +69,10 @@ Only after D passes:
   - [x] prove direct-context/no-tool splitter execution and exact directory
     ownership containment in an evidence-complete disposable canary. Do not
     reset attempts, replay D002, or grant D003 claim 6 without authorization.
+  - [~] D003 claim 6 proved the direct-context transport, but the model emitted
+    an unproven parent-contract-invalid result. `3dbf4f0` makes parent-plan
+    repair deterministically verify-command-only; prove this in a fresh
+    disposable live canary before considering another retained claim.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 

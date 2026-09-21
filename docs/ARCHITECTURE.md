@@ -63,6 +63,11 @@ Attempt accounting is durable evidence. Do not reset/manufacture attempts. Keep 
 
 D002 is the canonical proven real example; preserve it.
 
+Model output alone never authorizes a parent-contract repair. A task splitter
+may request that route only for a `verify_command` independently rejected by
+the deterministic contract validator. Missing artifacts within the parent's
+canonical ownership remain normal split-recovery work.
+
 ## 8. Verify and final tests
 
 Canonical Verify is contractual. Execute exact repository-owned verification; never weaken Verify to make a worker pass. Known fixture defects may be corrected only when independently established and only in the intended fixture. Final tests use trusted repository-owned `run-checks.py` plus durable evidence.

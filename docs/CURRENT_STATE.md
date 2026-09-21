@@ -152,6 +152,34 @@ and session), preventing false parent-contract-invalid routing.
 Retained D002, D003, and D004 were untouched. D003 remains at splitter
 claim/failure 5 and worker attempt count 3. Claim 6 requires explicit approval.
 
+### Retained D003 claim 6 — terminal safety finding (2026-09-21)
+
+The explicitly authorized claim 6 ran only after a full consolidated preflight
+on fresh technical root `ses_f3a5d877cffeRqd3Gmyc1977VG` (state version
+`6ddcd8654de875b8`, zero preflight POSTs/workers). Execution
+`1f8b3e915299e41946768097999f2873930162f1dfa2fa844e2daa45d559dada`
+created native child `ses_f3a5c978dffe7XyaNxT4jBs8fB` using the intentional
+`syv/qwen38-task-splitter-nothink` profile. The child made zero tool calls and
+emitted bare JSON, but incorrectly classified the valid failed parent as
+`v2-split-parent-contract-invalid-v1` / `prerequisite_artifacts`.
+
+The old deterministic handler accepted that unproven model assertion,
+archived the active split request/status into
+`contract-repair-history/D003.1790022221982441752.json`, and rearmed D003 as a
+runtime parent-contract repair even though the structured D003 contract did
+not materially change. The archived record preserves the full claim-6 status
+(`claim_count=6`, `proposal_failures=5`), prompt/request, and final JSON; D003
+worker attempt count remains 3 and D002/D004 were not touched. No claim 7 was
+issued and the runtime was stopped.
+
+`3dbf4f0` closes that trust boundary: only a `verify_command` independently
+rejected by the deterministic contract validator may request a parent-plan
+repair. Missing parent-owned artifacts are split-recoverable work, not a
+model-authorized repair path. Two focused regressions plus the 24-test
+splitter/component suite and all static launcher selftests pass. A fresh
+disposable live proof is still required before any future retained D003 claim
+can be considered.
+
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 
@@ -159,7 +187,9 @@ D002 is complete historical evidence; do not reset/replay it.
 
 Current downstream blocker: D004 awaits valid current-contract completion of
 D002 and D003. Its three historical dispatches remain intact; stale readiness
-does not authorize a retry by itself.
+does not authorize a retry by itself. D003 requires a fresh disposable proof
+of the new parent-contract-invalid guard and explicit authorization before any
+future retained splitter claim.
 
 ## Configuration freeze
 Until explicitly requested, keep worker/planner models (except restoring documented values), context sizes, concurrency, MTP, reasoning settings, and production vLLM tuning unchanged.

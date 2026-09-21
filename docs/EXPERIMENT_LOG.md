@@ -261,3 +261,26 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - The nonthinking profile is intentional (`8ea4431`): same underlying Qwen,
   context/output/v2 caps as the former planner profile, differing only by
   disabled thinking. Retained D002/D003/D004 were not accessed or changed.
+
+## Retained D003 claim 6 — parent-contract-invalid safety finding — 2026-09-21
+
+- The authorized claim used fresh root `ses_f3a5d877cffeRqd3Gmyc1977VG` after
+  full preflight PASS (state `6ddcd8654de875b8`, zero preflight POSTs/workers).
+  Execution `1f8b3e915299e41946768097999f2873930162f1dfa2fa844e2daa45d559dada`
+  created child `ses_f3a5c978dffe7XyaNxT4jBs8fB` on the intentional
+  `syv/qwen38-task-splitter-nothink` profile.
+- The child made zero tool calls, completed with `finish=stop`, and emitted a
+  bare `v2-split-parent-contract-invalid-v1` object. Its claim that missing
+  JSON files inside parent-owned `fixtures/vectors/moons/` implied no legal
+  child owner was false: that directory is explicit D003 ownership and a
+  valid split target under `3770308`.
+- The previous handler trusted that assertion and archived the active status,
+  request, and final payload under
+  `contract-repair-history/D003.1790022221982441752.json`; the archive records
+  claim 6 exactly. No child contracts were created, no claim 7 was issued, and
+  D003 worker attempts stayed at 3. D002 and D004 were untouched.
+- `3dbf4f0` rejects model-authored prerequisite-artifact repair requests and
+  accepts a parent-plan repair only when deterministic validation finds an
+  invalid `verify_command`. The focused regression suite (24 tests) and the
+  preflight/controller/tick static selftests passed. The runtime was stopped;
+  a disposable live proof remains pending before any retained follow-up.
