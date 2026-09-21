@@ -446,9 +446,8 @@ def compile_plan(project: Path):
         "id_to_key":id_to_key,
         "waves":{str(n):[key_to_id[k] for k in waves[n]] for n in sorted(waves)},
     })
-    # Structured compilation succeeded. The control guard owns final semantic
-    # validation and may replace this with a guard-derived repair packet.
-    repair.unlink(missing_ok=True)
+    # A runtime repair packet is evidence, not a syntax error. Keep it until
+    # the control guard proves an affected structured leaf actually changed.
     guard_err.unlink(missing_ok=True)
     return True,[]
 

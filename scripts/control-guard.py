@@ -659,6 +659,37 @@ def write_plan_repair_packet(ctrl: Path, errors, source="control-guard"):
         )+"\n",
     )
 
+def runtime_repair_change_errors(ctrl: Path):
+    """Reject a syntactically valid no-op after a runtime contract repair."""
+    repair_path=ctrl/"IMPLEMENTATION_PLAN.repair.json"
+    try:
+        repair=json.loads(repair_path.read_text())
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return ["runtime repair packet is not valid JSON"]
+    if not isinstance(repair,dict) or repair.get("source")!="runtime-split-parent-contract":
+        return []
+    baseline=repair.get("baseline")
+    expected=baseline.get("affected_leaf_sha256") if isinstance(baseline,dict) else None
+    if not isinstance(expected,dict) or not expected:
+        return ["runtime repair packet lacks affected leaf baselines"]
+    try:
+        raw=json.loads((ctrl/"IMPLEMENTATION_PLAN.structured.json").read_text())
+    except Exception:
+        return ["runtime repair structured source is unavailable"]
+    leaves=raw.get("leaves") if isinstance(raw,dict) else None
+    actual={
+        str(item.get("key")):hashlib.sha256(
+            json.dumps(item,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
+        ).hexdigest()
+        for item in leaves if isinstance(leaves,list) and isinstance(item,dict)
+        and isinstance(item.get("key"),str)
+    }
+    if not any(actual.get(key)!=digest for key,digest in expected.items()):
+        return ["runtime repair packet unresolved: no affected structured leaf changed"]
+    return []
+
 def validate_plan(project: Path, finalize=False):
     ctrl = project / ".opencode-v2"
     path = ctrl / "IMPLEMENTATION_PLAN.md"
@@ -707,11 +738,14 @@ def validate_plan(project: Path, finalize=False):
                         f"{did}: internal Reference policy forbids an externally authoritative/reference probe"
                     )
 
+    runtime_repair_errors=runtime_repair_change_errors(ctrl)
+    errors.extend(runtime_repair_errors)
     if errors:
         ready.unlink(missing_ok=True)
         manifest_path.unlink(missing_ok=True)
         atomic_write(err, "\n".join(errors) + "\n")
-        write_plan_repair_packet(ctrl, errors, source="control-guard")
+        if not runtime_repair_errors:
+            write_plan_repair_packet(ctrl, errors, source="control-guard")
         return False, errors
 
     if err.exists():

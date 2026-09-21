@@ -1874,6 +1874,7 @@ def request_parent_contract_repair(did, payload, request):
             ),
             "message":repair_message,
         }],
+        "baseline":_repair_baseline(repair_keys),
     })
     (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").unlink(missing_ok=True)
 
@@ -1913,6 +1914,7 @@ def request_parent_contract_repair(did, payload, request):
                 "structured_key":key,
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
             }
+            entry.pop("parent_contract_repair_resolution",None)
             changed=True
             if "split_required" in entry:
                 entry.pop("split_required",None)
@@ -1976,6 +1978,20 @@ def rearm_splits_after_parent_contract_repair():
                     continue
 
                 history=entry.get("failure_history",[])
+                reclassified_attempts=[]
+                if isinstance(history,list):
+                    for item in history:
+                        if not isinstance(item,dict) or not (
+                            item.get("classification")=="bad-plan"
+                            and item.get("reclassified_by")=="runtime-parent-contract-repair"
+                        ):
+                            continue
+                        try:
+                            attempt=int(item.get("attempt") or 0)
+                        except (TypeError,ValueError):
+                            continue
+                        if attempt>0 and attempt not in reclassified_attempts:
+                            reclassified_attempts.append(attempt)
                 genuine=sum(
                     1 for item in history
                     if isinstance(item,dict)
@@ -2002,6 +2018,13 @@ def rearm_splits_after_parent_contract_repair():
                         "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                     }
                     rearmed.append(did)
+
+                if reclassified_attempts:
+                    entry["parent_contract_repair_resolution"]={
+                        "structured_key":expected_key,
+                        "reclassified_attempts":reclassified_attempts,
+                        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                    }
 
                 entry.pop("split_rearm_after_contract_repair",None)
                 changed=True
@@ -2604,6 +2627,31 @@ STRUCTURED_PLAN_REPAIR_FILENAME="IMPLEMENTATION_PLAN.repair.json"
 def structured_plan_path():
     return Path(PROJECT)/".opencode-v2"/STRUCTURED_PLAN_FILENAME
 
+def _repair_baseline(keys):
+    """Fingerprint only affected structured leaves for a bounded repair."""
+    try:
+        raw=load_json_object(structured_plan_path(),label="structured plan")
+    except StateCorruptionError:
+        return {"source_sha256":"","affected_leaf_sha256":{}}
+    leaves=raw.get("leaves") if isinstance(raw,dict) else None
+    by_key={
+        str(item.get("key")):item
+        for item in leaves if isinstance(leaves,list) and isinstance(item,dict)
+        and isinstance(item.get("key"),str)
+    }
+    hashes={}
+    for key in keys:
+        item=by_key.get(key)
+        if item is not None:
+            hashes[key]=hashlib.sha256(
+                json.dumps(item,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
+            ).hexdigest()
+    try:
+        source=hashlib.sha256(structured_plan_path().read_bytes()).hexdigest()
+    except OSError:
+        source=""
+    return {"source_sha256":source,"affected_leaf_sha256":hashes}
+
 def planner_plan_state(plan_path):
     """Classify durable structured-plan progress without Markdown bookkeeping."""
     path=Path(plan_path)
@@ -2946,6 +2994,58 @@ def load_supervisor_verify_evidence(did):
     ):
         raise StateCorruptionError(f"verify evidence {did} is invalid")
     return data
+
+
+def reconcile_plan_contract_revisions():
+    """Expire legacy completion when a new plan changes its exact Verify."""
+    if not PROJECT:
+        return []
+    leaves=(load_manifest().get("leaves") or {})
+    changed=[]
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts(); entries=data.get("deliverables") or {}
+            for did,leaf in leaves.items():
+                if not isinstance(leaf,dict):
+                    continue
+                ready=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready"
+                if not ready.exists():
+                    continue
+                entry=entries.get(did)
+                if not isinstance(entry,dict):
+                    continue
+                try:
+                    attempt=int(entry.get("count") or 0)
+                except (TypeError,ValueError):
+                    continue
+                command=str(leaf.get("verify_command") or "")
+                latest=load_supervisor_verify_evidence(did).get("latest") or {}
+                old_command=str(latest.get("command") or "") if isinstance(latest,dict) else ""
+                if not command or latest.get("result")!="verified" or old_command==command:
+                    continue
+                digest=hashlib.sha256(command.encode()).hexdigest()
+                rows=entry.setdefault("plan_contract_revisions",[])
+                already=any(
+                    isinstance(row,dict) and int(row.get("attempt") or 0)==attempt
+                    and row.get("current_verify_sha256")==digest
+                    for row in rows
+                )
+                if not already:
+                    rows.append({
+                        "attempt":attempt,
+                        "source":"supervisor-plan-contract-revision",
+                        "previous_verify_sha256":hashlib.sha256(old_command.encode()).hexdigest(),
+                        "current_verify_sha256":digest,
+                        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                    })
+                ready.unlink(missing_ok=True)
+                changed.append(did)
+            if changed:
+                save_attempts(data)
+    for did in changed:
+        log(f"PLAN_CONTRACT_READY_REVOKED deliverable={did}")
+        csv("PLAN_CONTRACT_READY_REVOKED","","supervisor",did)
+    return changed
 
 
 def persist_supervisor_verify_evidence(did,sid,command,checked,detail,error=""):
@@ -3916,7 +4016,7 @@ def probe_loop_reason(sid,agent,did,tool_id,now=None):
                 f"tool_turns={state['turns']} limit={limit}")
     return ""
 
-def supervisor_finalize_ready(did):
+def supervisor_finalize_ready(did, verified_command=""):
     """Atomically mint the standard Dxxx.ready after supervisor-side checks."""
     if ready_info(did):
         return True,"already-complete"
@@ -3940,6 +4040,7 @@ def supervisor_finalize_ready(did):
             f"attempt={count}\n"
             "verified=true\n"
             "owner=supervisor\n"
+            f"verify_sha256={hashlib.sha256((verified_command or str((load_manifest().get('leaves') or {}).get(did,{}).get('verify_command') or '')).encode()).hexdigest()}\n"
             f"protocol={LEAF_READY_PROTOCOL}\n"
         )
         tmp=path.with_suffix(".tmp")
@@ -4072,7 +4173,7 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
             clear_verify_wait(did)
             return False,"verify-report-commit-failed:"+str(exc)
 
-    ok,detail=supervisor_finalize_ready(did)
+    ok,detail=supervisor_finalize_ready(did,command)
     if ok:
         clear_verify_wait(did)
     return ok,detail
@@ -4754,7 +4855,11 @@ def claim_attempt(sid,did):
                 if count>=state["allowed_attempts"]:
                     return "limit",count
                 count+=1; ent["count"]=count; sessions.append(sid)
-                uses_operator=(count > state["automatic_limit"] + state["infrastructure_retry_grants"])
+                uses_operator=(
+                    count > state["automatic_limit"]
+                    + state["infrastructure_retry_grants"]
+                    + int(state.get("bad_plan_retry_grants") or 0)
+                )
                 if uses_operator:
                     # This is a reservation, not consumption.  Only the
                     # supervisor can later mark it consumed after durable work.
@@ -6460,6 +6565,7 @@ def control_guard(kind):
             log(f"CONTROL_GUARD_INVALID kind={kind} detail={detail[:1600]}")
             return False
         if kind=="plan":
+            reconcile_plan_contract_revisions()
             rearm_splits_after_parent_contract_repair()
         return True
     except Exception as e:

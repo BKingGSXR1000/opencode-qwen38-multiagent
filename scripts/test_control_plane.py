@@ -216,6 +216,111 @@ class AttemptLedgerTests(unittest.TestCase):
         }))
         self.assertEqual(supervisor.claim_attempt("old", "D004"), ("invalid", 4))
 
+    def test_runtime_contract_repair_releases_only_reclassified_attempts(self):
+        root, _ = self._manifest()
+        (root / "work").mkdir(exist_ok=True)
+        entry={
+            "count":3,
+            "sessions":["infra","bad-plan-1","bad-plan-2"],
+            "automatic_limit":2,
+            "infrastructure_retry_grants":1,
+            "infrastructure_failures":[{
+                "source":"supervisor","kind":"runtime-cancel","grant":1,
+                "timestamp":"2026-09-21T00:00:00Z","session":"infra",
+                "evidence":"no-owned-artifact-or-progress",
+            }],
+            "failure_history":[
+                {"attempt":1,"classification":"infrastructure"},
+                {"attempt":2,"classification":"bad-plan",
+                 "reclassified_by":"runtime-parent-contract-repair"},
+                {"attempt":3,"classification":"bad-plan",
+                 "reclassified_by":"runtime-parent-contract-repair"},
+            ],
+            "parent_contract_repair_resolution":{
+                "structured_key":"fixture_manifest",
+                "reclassified_attempts":[2,3],
+            },
+        }
+        (root / "work/attempts.json").write_text(json.dumps({
+            "owner":"supervisor","deliverables":{"D004":entry},
+        }))
+        projected=control_state.attempt_state(entry)
+        self.assertTrue(projected["valid"])
+        self.assertEqual(projected["bad_plan_retry_grants"],2)
+        self.assertEqual(projected["automatic_attempts_consumed"],0)
+        self.assertEqual(projected["allowed_attempts"],5)
+        self.assertEqual(supervisor.claim_attempt("repaired-one","D004"),("claimed",4))
+        saved=json.loads((root / "work/attempts.json").read_text())["deliverables"]["D004"]
+        self.assertFalse(saved.get("operator_retry_attempts"))
+
+    def test_plain_bad_plan_does_not_create_a_contract_repair_credit(self):
+        entry={
+            "count":3,"sessions":["one","two","three"],"automatic_limit":3,
+            "failure_history":[{"attempt":3,"classification":"bad-plan"}],
+        }
+        projected=control_state.attempt_state(entry)
+        self.assertTrue(projected["valid"])
+        self.assertEqual(projected["bad_plan_retry_grants"],0)
+        self.assertEqual(projected["allowed_attempts"],3)
+
+    def test_unresolved_reclassification_does_not_reopen_execution(self):
+        entry={
+            "count":3,"sessions":["one","two","three"],"automatic_limit":3,
+            "failure_history":[{
+                "attempt":3,"classification":"bad-plan",
+                "reclassified_by":"runtime-parent-contract-repair",
+            }],
+        }
+        projected=control_state.attempt_state(entry)
+        self.assertEqual(projected["bad_plan_retry_grants"],0)
+        self.assertEqual(projected["allowed_attempts"],3)
+
+    def test_plan_contract_revision_releases_one_replacement_slot(self):
+        entry={
+            "count":2,"sessions":["one","two"],"automatic_limit":2,
+            "plan_contract_revisions":[{
+                "attempt":2,"source":"supervisor-plan-contract-revision",
+                "current_verify_sha256":"abc",
+            }],
+        }
+        projected=control_state.attempt_state(entry)
+        self.assertEqual(projected["plan_contract_retry_grants"],1)
+        self.assertEqual(projected["automatic_attempts_consumed"],1)
+        self.assertEqual(projected["allowed_attempts"],3)
+
+    def test_reconcile_plan_revision_revokes_only_stale_ready(self):
+        old_root,old_log,old_csv=supervisor.ROOT,supervisor.LOG,supervisor.CSV
+        try:
+            supervisor.ROOT=Path(self.tmp.name)
+            supervisor.LOG=Path(self.tmp.name)/"supervisor-events.log"
+            supervisor.CSV=Path(self.tmp.name)/"supervisor-events.csv"
+            root=Path(self.tmp.name)/".opencode-v2"; work=root/"work"
+            work.mkdir(parents=True)
+            current="test -s revised.txt"; old="test -s old.txt"
+            (root/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "leaves":{"D004":{"verify_command":current}},
+            }))
+            (work/"D004.ready").write_text(
+                "status=complete\ndeliverable=D004\nattempt=2\nverified=true\n"
+                "owner=supervisor\nprotocol=v2-leaf-ready-v1\n"
+            )
+            (work/"D004.verify-evidence.json").write_text(json.dumps({
+                "owner":"supervisor","protocol":"v2-supervisor-verify-evidence-v1",
+                "deliverable":"D004","entries":[],
+                "latest":{"command":old,"result":"verified"},
+            }))
+            (work/"attempts.json").write_text(json.dumps({
+                "owner":"supervisor","deliverables":{"D004":{
+                    "count":2,"sessions":["one","two"],"automatic_limit":2,
+                }},
+            }))
+            self.assertEqual(supervisor.reconcile_plan_contract_revisions(),["D004"])
+            self.assertFalse((work/"D004.ready").exists())
+            entry=json.loads((work/"attempts.json").read_text())["deliverables"]["D004"]
+            self.assertEqual(control_state.attempt_state(entry)["allowed_attempts"],3)
+        finally:
+            supervisor.ROOT,supervisor.LOG,supervisor.CSV=old_root,old_log,old_csv
+
     def test_retry_failed_and_selected_retry_preserve_plan_and_scope(self):
         root, leaves = self._manifest()
         (root / "work").mkdir(exist_ok=True)

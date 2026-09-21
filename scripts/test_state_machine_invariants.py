@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import json,multiprocessing,subprocess,sys,tempfile,unittest
+import hashlib,json,multiprocessing,runpy,subprocess,sys,tempfile,unittest
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
 import control_state,leaf_contract,supervisor,state_io,worker_sandbox,watchdog_telemetry
@@ -24,6 +24,24 @@ class SharedLeafContractTests(unittest.TestCase):
         bad=dict(good); bad["D001-B"]={"parent":"D001","owned_artifact_paths":["public/a.js"]}
         self.assertTrue(leaf_contract.ownership_overlap_errors(bad))
         self.assertTrue(leaf_contract.ownership_overlap_errors({"D001":{"owned_artifact_paths":["src/"]},"D002":{"owned_artifact_paths":["src/app.js"]}}))
+
+class RuntimePlanRepairTests(unittest.TestCase):
+    def test_runtime_repair_requires_a_changed_affected_leaf(self):
+        guard=runpy.run_path(str(HERE/"control-guard.py"))
+        with tempfile.TemporaryDirectory() as td:
+            ctrl=Path(td)/".opencode-v2"; ctrl.mkdir()
+            leaf={"key":"producer","name":"before"}
+            source={"protocol":"v2-structured-plan-v1","leaves":[leaf]}
+            (ctrl/"IMPLEMENTATION_PLAN.structured.json").write_text(json.dumps(source))
+            digest=hashlib.sha256(json.dumps(leaf,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+            (ctrl/"IMPLEMENTATION_PLAN.repair.json").write_text(json.dumps({
+                "source":"runtime-split-parent-contract",
+                "baseline":{"affected_leaf_sha256":{"producer":digest}},
+            }))
+            self.assertIn("no affected structured leaf changed",guard["runtime_repair_change_errors"](ctrl)[0])
+            source["leaves"][0]["name"]="after"
+            (ctrl/"IMPLEMENTATION_PLAN.structured.json").write_text(json.dumps(source))
+            self.assertEqual(guard["runtime_repair_change_errors"](ctrl),[])
 
 class ReadyTrustBoundaryTests(unittest.TestCase):
     def setUp(self):

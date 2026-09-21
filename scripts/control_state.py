@@ -106,18 +106,38 @@ def valid_deliverable_id(did):
 
 def ready_info(project, did, _seen=None):
     """A split parent is ready only after its children and original check pass."""
-    if not _base_ready(project, did):
+    base=_base_ready(project, did)
+    if not base:
         return {}
     manifest = load_manifest(project)
     leaf = (manifest.get("leaves") or {}).get(did, {})
+    command=str(leaf.get("verify_command") or "") if isinstance(leaf,dict) else ""
+    if not command:
+        return {}
+    expected=str(base.get("verify_sha256") or "")
+    if expected:
+        if hashlib.sha256(command.encode()).hexdigest()!=expected:
+            return {}
+    else:
+        evidence=load_json_object(
+            Path(project)/".opencode-v2"/"work"/f"{did}.verify-evidence.json",
+            default_missing={},label=f"verify evidence {did}",
+        )
+        latest=evidence.get("latest") if isinstance(evidence,dict) else {}
+        if not (
+            isinstance(latest,dict)
+            and latest.get("result")=="verified"
+            and latest.get("command")==command
+        ):
+            return {}
     children = leaf.get("split_children", []) if isinstance(leaf, dict) else []
     if not children:
-        return _base_ready(project, did)
+        return base
     seen = set() if _seen is None else set(_seen)
     if did in seen or not isinstance(children, list) or len(children) != 2:
         return {}
     seen.add(did)
-    return _base_ready(project, did) if all(ready_info(project, child, seen) for child in children) else {}
+    return base if all(ready_info(project, child, seen) for child in children) else {}
 
 
 def phase_ready(project, name, artifact, marker):
@@ -513,9 +533,97 @@ def _decorate_unmaterialized_dispatch(entry, state):
     return state
 
 
+def _apply_parent_contract_repair_credits(entry, state):
+    """Release only the retry slots explicitly invalidated by plan repair."""
+    state=dict(state) if isinstance(state,dict) else {}
+    state["bad_plan_retry_grants"]=0
+    if not state.get("valid") or not isinstance(entry,dict):
+        return state
+    history=entry.get("failure_history") or []
+    if not isinstance(history,list):
+        return state
+    try:
+        count=int(state.get("count") or 0)
+        automatic_limit=int(state.get("automatic_limit") or AUTOMATIC_ATTEMPT_LIMIT)
+        infrastructure=int(state.get("infrastructure_retry_grants") or 0)
+        allowed=int(state.get("allowed_attempts") or 0)
+    except (TypeError,ValueError):
+        return state
+    resolution=entry.get("parent_contract_repair_resolution")
+    approved=(
+        resolution.get("reclassified_attempts")
+        if isinstance(resolution,dict) else None
+    )
+    if not isinstance(approved,list):
+        return state
+    approved={item for item in approved if isinstance(item,int) and item>0}
+    if not approved:
+        return state
+    seen=set(); credits=0
+    for item in history:
+        if not isinstance(item,dict) or not (
+            item.get("classification")=="bad-plan"
+            and item.get("reclassified_by")=="runtime-parent-contract-repair"
+        ):
+            continue
+        try:
+            attempt=int(item.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        if 1 <= attempt <= count and attempt in approved and attempt not in seen:
+            seen.add(attempt); credits+=1
+    if credits:
+        state.update({
+            "bad_plan_retry_grants":credits,
+            "allowed_attempts":allowed+credits,
+            "automatic_attempts_consumed":max(
+                0,min(count-infrastructure-credits,automatic_limit)
+            ),
+        })
+    return state
+
+
+def _apply_plan_contract_revision_credits(entry, state):
+    """Project one replacement slot for each supervisor-recorded plan revision."""
+    state=dict(state) if isinstance(state,dict) else {}
+    state["plan_contract_retry_grants"]=0
+    if not state.get("valid") or not isinstance(entry,dict):
+        return state
+    rows=entry.get("plan_contract_revisions") or []
+    if not isinstance(rows,list):
+        return state
+    try:
+        count=int(state.get("count") or 0)
+        allowed=int(state.get("allowed_attempts") or 0)
+    except (TypeError,ValueError):
+        return state
+    seen=set()
+    for row in rows:
+        if not isinstance(row,dict) or row.get("source")!="supervisor-plan-contract-revision":
+            continue
+        try:
+            attempt=int(row.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        if 1 <= attempt <= count:
+            seen.add((attempt,str(row.get("current_verify_sha256") or "")))
+    credits=len(seen)
+    if credits:
+        state.update({
+            "plan_contract_retry_grants":credits,
+            "allowed_attempts":allowed+credits,
+            "automatic_attempts_consumed":max(
+                0,int(state.get("automatic_attempts_consumed") or 0)-credits
+            ),
+        })
+    return state
+
+
 def attempt_state(entry):
     state = _attempt_state_v2612_original(entry)
     state = _v2612_repair_infrastructure_attempt_state(entry, state)
+    state = _apply_parent_contract_repair_credits(entry, state)
+    state = _apply_plan_contract_revision_credits(entry, state)
     return _decorate_unmaterialized_dispatch(entry, state)
 # V2.6.12 INFRASTRUCTURE LEDGER REPAIR END
 
