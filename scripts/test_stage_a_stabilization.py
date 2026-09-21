@@ -154,6 +154,15 @@ class TerminalSemanticChildTests(unittest.TestCase):
         self.assertTrue(receipt["replay_suppressed"])
 
 
+class TaskSplitterOutputCapTests(unittest.TestCase):
+    def test_role_ends_with_a_no_analysis_json_only_output_rule(self):
+        role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/task-splitter.md").read_text()
+        self.assertIn("## Output-cap execution rule — highest priority",role)
+        self.assertIn("Do not narrate analysis",role)
+        self.assertIn("must begin with `{`",role)
+        self.assertLess(len(role), 15_000)
+
+
 class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
     """Filesystem-only threshold-to-rejoin integration; never creates an LLM child."""
     def setUp(self):

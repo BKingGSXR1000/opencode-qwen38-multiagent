@@ -299,3 +299,12 @@ Your reasoning budget is a hard ceiling, not a target.
   use very little reasoning.
 - Never deliberately try to consume the whole LOW/MEDIUM reasoning allowance.
 <!-- V2.6.9 REASONING BUDGET DISCIPLINE END -->
+
+## Output-cap execution rule — highest priority
+
+After the one permitted read, decide silently and emit the JSON immediately.
+Do not narrate analysis, restate the request, explain the split, or use Markdown.
+Your next assistant text after the read must begin with `{` and be the complete
+bare JSON object. Keep `scope`, `done_when`, and `reason` concise while retaining
+the required concrete facts. This rule exists because the fixed response limit
+must be reserved for the supervisor-validated JSON, not deliberation.
