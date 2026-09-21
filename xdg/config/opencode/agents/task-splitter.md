@@ -68,8 +68,11 @@ If the parent contract itself is invalid, do NOT hide the defect inside child
 proposals. Return this alternate exact bare JSON object instead. Use
 `verify_command` only when the command is internally contradictory,
 non-verifying, or impossible for the stated parent contract. Use
-`prerequisite_artifacts` when supervisor evidence proves required input/output
-artifacts are absent and no parent child has ownership to produce them:
+`verify_command` only when the deterministic contract checker can establish
+that command is invalid. Missing artifacts inside the parent-owned set are
+ordinary split work: derive legal child ownership and emit a normal proposal.
+Do not return `prerequisite_artifacts`; the splitter has no authoritative,
+deterministic basis to request a plan repair for it:
 
 {
   "protocol": "v2-split-parent-contract-invalid-v1",
@@ -118,13 +121,13 @@ Use this exact decision order:
    intrinsically wrong module/path invocation, or a range that contradicts the
    parent contract), return ONLY `v2-split-parent-contract-invalid-v1`.
    Emit NO child proposals.
-2. If authoritative artifact inventory or a completed progress handoff proves
-   that the parent requires missing artifacts and neither the parent nor any
-   legal child owns their creation, return the same protocol with
-   `field: "prerequisite_artifacts"`. Emit NO child proposals.
-3. This parent-contract-invalid rule has absolute precedence even when
+2. A missing artifact that lies inside the parent-owned set is a valid failed
+   parent, not a contract defect. Partition or hand off the parent ownership
+   and emit normal proposals.
+3. This parent-contract-invalid rule has absolute precedence only when the
+   deterministic parent Verify itself is invalid, even when
    `decomposition_policy.verification_recovery_allowed` is true.
-4. Only when the canonical parent Verify itself is valid and the supervisor
+4. When the canonical parent Verify itself is valid and the supervisor
    evidence instead shows that the implementation failed a valid check may
    verification recovery use writer -> tester, subject to the normal shape
    rules below.

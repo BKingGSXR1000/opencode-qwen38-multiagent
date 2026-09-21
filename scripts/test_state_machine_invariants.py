@@ -627,6 +627,37 @@ class SplitStateMachineTests(unittest.TestCase):
                 "D001",payload,json.loads((self.work/"D001.split-request.json").read_text())
             )
 
+    def test_valid_failed_parent_rejects_model_prerequisite_repair(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        payload={
+            "protocol":supervisor.SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "field":"prerequisite_artifacts",
+            "reason":"a parent-owned output is missing after exact Verify failed",
+        }
+        (self.work/"D001.split-proposal.json").write_text(json.dumps(payload))
+        ok,detail=supervisor.process_split_proposal("D001",session="splitter")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"split-retryable")
+        self.assertFalse((self.ctrl/"IMPLEMENTATION_PLAN.repair.json").exists())
+        self.assertIn(
+            "prerequisite artifacts are split-recoverable",
+            supervisor.load_split_status("D001")["reason"],
+        )
+
+    def test_valid_verify_command_rejects_model_contract_repair(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        payload={
+            "protocol":supervisor.SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "field":"verify_command",
+            "reason":"the model claims the valid parent command is contradictory",
+        }
+        with self.assertRaisesRegex(ValueError,"lacks a deterministic contract defect"):
+            supervisor.request_parent_contract_repair(
+                "D001",payload,json.loads((self.work/"D001.split-request.json").read_text())
+            )
+
     def test_read_only_parent_reaches_finite_terminal_state(self):
         manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
         leaf=manifest["leaves"]["D001"]

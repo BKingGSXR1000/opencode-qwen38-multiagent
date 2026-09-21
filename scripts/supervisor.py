@@ -2023,17 +2023,28 @@ def request_parent_contract_repair(did, payload, request):
     if payload.get("generation")!=request.get("generation",1):
         raise ValueError("parent-contract-invalid generation mismatch")
     field=payload.get("field")
-    if field not in {"verify_command","prerequisite_artifacts"}:
+    if field != "verify_command":
         raise ValueError(
-            "parent-contract repair field must be verify_command or prerequisite_artifacts"
+            "parent-contract-invalid prerequisite artifacts are split-recoverable; "
+            "only a deterministically invalid verify_command may request plan repair"
         )
     reason=str(payload.get("reason") or "").strip()
     if len(reason)<20 or len(reason)>1200:
         raise ValueError("parent-contract-invalid reason must be 20..1200 chars")
 
+    parent_contract=request.get("parent_contract")
+    verify_command=(
+        parent_contract.get("verify_command") if isinstance(parent_contract,dict) else ""
+    )
+    verify_errors=validate_verify_command(verify_command)
+    if not verify_errors:
+        raise ValueError(
+            "parent-contract-invalid verify_command lacks a deterministic contract defect"
+        )
+
     key=_structured_plan_symbolic_key(did)
     repair_path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.repair.json"
-    prerequisite_gap=field=="prerequisite_artifacts"
+    prerequisite_gap=False
     # A missing prerequisite is a bounded repair when the affected parent and
     # its declared producers are known.  Marking this as a whole-plan repair
     # forces the planner's protocol to rewrite every leaf, which needlessly
