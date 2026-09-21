@@ -331,7 +331,7 @@ function proposalFromOutput(output, parent, directory) {
     if (proposal?.parent_id !== parent || proposal?.depth !== request?.depth ||
         proposal?.generation !== request?.generation) return null;
     if (proposal?.protocol === "v2-split-parent-contract-invalid-v1") {
-      return proposal?.field === "verify_command" && typeof proposal?.reason === "string"
+      return ["verify_command", "prerequisite_artifacts"].includes(proposal?.field) && typeof proposal?.reason === "string"
         ? proposal : null;
     }
     if (proposal?.protocol !== "v2-task-split-proposal-v2" ||

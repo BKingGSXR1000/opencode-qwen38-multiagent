@@ -1730,6 +1730,24 @@ def _clear_split_request_state_for_contract_repair(did):
         path.unlink(missing_ok=True)
 
 
+def _detach_split_overlay_for_contract_repair(did):
+    """Remove a stale executable split while retaining its immutable history.
+
+    A plan repair replaces the parent contract.  Its old child definitions must
+    not continue to shadow the repaired parent in the generated manifest, but
+    the transaction, child progress, ready files, and ledger remain durable
+    audit evidence.
+    """
+    overlay=load_split_leaf_overlay()
+    parents=overlay.get("parents") if isinstance(overlay.get("parents"),dict) else {}
+    if did not in parents:
+        return False
+    parents.pop(did,None)
+    overlay["parents"]=parents
+    save_split_leaf_overlay(overlay)
+    return True
+
+
 def request_parent_contract_repair(did, payload, request):
     allowed={"protocol","parent_id","depth","generation","field","reason"}
     if set(payload) != allowed:
@@ -1742,28 +1760,43 @@ def request_parent_contract_repair(did, payload, request):
         raise ValueError("parent-contract-invalid depth mismatch")
     if payload.get("generation")!=request.get("generation",1):
         raise ValueError("parent-contract-invalid generation mismatch")
-    if payload.get("field")!="verify_command":
-        raise ValueError("only verify_command parent-contract repair is supported")
+    field=payload.get("field")
+    if field not in {"verify_command","prerequisite_artifacts"}:
+        raise ValueError(
+            "parent-contract repair field must be verify_command or prerequisite_artifacts"
+        )
     reason=str(payload.get("reason") or "").strip()
     if len(reason)<20 or len(reason)>1200:
         raise ValueError("parent-contract-invalid reason must be 20..1200 chars")
 
     key=_structured_plan_symbolic_key(did)
     repair_path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.repair.json"
+    prerequisite_gap=field=="prerequisite_artifacts"
+    repair_message=(
+        f"{key}: runtime split recovery found the parent verify_command "
+        f"internally inconsistent or non-verifying. Repair only this leaf's "
+        f"verify_command without weakening Outcome/Done when/Acceptance. "
+        f"Evidence: {reason}"
+        if not prerequisite_gap else
+        f"{key}: runtime split handoff proved that required prerequisite artifacts "
+        f"are absent and no executable parent child owns permission to create them. "
+        f"Repair the structured plan so bounded producer leaves own and verify the "
+        f"missing artifacts before this consumer runs. Preserve all acceptance "
+        f"requirements; do not fabricate fixture data merely to satisfy a check. "
+        f"Evidence: {reason}"
+    )
     atomic_write_json(repair_path,{
         "protocol":"v2-structured-plan-repair-v1",
         "source":"runtime-split-parent-contract",
-        "whole_plan":False,
-        "affected_keys":[key],
+        "whole_plan":prerequisite_gap,
+        "affected_keys":[] if prerequisite_gap else [key],
         "errors":[{
             "key":key,
-            "code":"runtime-parent-verify-invalid",
-            "message":(
-                f"{key}: runtime split recovery found the parent verify_command "
-                f"internally inconsistent or non-verifying. Repair only this leaf's "
-                f"verify_command without weakening Outcome/Done when/Acceptance. "
-                f"Evidence: {reason}"
+            "code":(
+                "runtime-parent-prerequisite-artifacts-missing"
+                if prerequisite_gap else "runtime-parent-verify-invalid"
             ),
+            "message":repair_message,
         }],
     })
     (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").unlink(missing_ok=True)
@@ -1790,14 +1823,17 @@ def request_parent_contract_repair(did, payload, request):
                 if (
                     isinstance(item,dict)
                     and item.get("classification")=="genuine"
-                    and _split_failure_is_verification_related(item.get("reason"))
+                    and (
+                        prerequisite_gap
+                        or _split_failure_is_verification_related(item.get("reason"))
+                    )
                 ):
                     item["classification"]="bad-plan"
                     item["reclassified_by"]="runtime-parent-contract-repair"
                     changed=True
             entry["split_rearm_after_contract_repair"]={
                 "generation":max(1,prior_generation),
-                "field":"verify_command",
+                "field":field,
                 "structured_key":key,
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
             }
@@ -1808,13 +1844,14 @@ def request_parent_contract_repair(did, payload, request):
                 save_attempts(data)
 
     _clear_split_request_state_for_contract_repair(did)
+    _detach_split_overlay_for_contract_repair(did)
     log(
         f"PARENT_CONTRACT_REPAIR_REQUESTED deliverable={did} key={key} "
-        f"field=verify_command reason={reason}"
+        f"field={field} reason={reason}"
     )
     csv(
         "PARENT_CONTRACT_REPAIR_REQUESTED","", "task-splitter",
-        f"{did} key={key} field=verify_command"
+        f"{did} key={key} field={field}"
     )
     return True,"parent-contract-repair"
 

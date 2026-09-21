@@ -64,9 +64,12 @@ Normal split form:
   ]
 }
 
-If and ONLY if the parent `verify_command` itself is internally contradictory,
-non-verifying, or impossible for the stated parent contract, do NOT rewrite it
-inside child proposals. Return this alternate exact bare JSON object instead:
+If the parent contract itself is invalid, do NOT hide the defect inside child
+proposals. Return this alternate exact bare JSON object instead. Use
+`verify_command` only when the command is internally contradictory,
+non-verifying, or impossible for the stated parent contract. Use
+`prerequisite_artifacts` when supervisor evidence proves required input/output
+artifacts are absent and no parent child has ownership to produce them:
 
 {
   "protocol": "v2-split-parent-contract-invalid-v1",
@@ -74,11 +77,13 @@ inside child proposals. Return this alternate exact bare JSON object instead:
   "depth": 0,
   "generation": 1,
   "field": "verify_command",
-  "reason": "20-1200 chars of concrete evidence showing why the parent Verify itself is invalid"
+  "reason": "20-1200 chars of concrete evidence showing why the parent contract is invalid"
 }
 
-This escalates to targeted implementation-planner repair. It is NOT permission
-to weaken Outcome, Done when, Acceptance, or implementation requirements.
+This escalates to implementation-planner repair. A prerequisite-artifacts
+repair may require a whole-plan producer/dependency correction. It is NOT
+permission to weaken Outcome, Done when, Acceptance, or implementation
+requirements, or to fabricate missing data.
 
 Use the request's exact parent_id, depth, and generation. Do not invent child
 IDs; the supervisor derives them. The request also contains `parent_contract`
@@ -113,13 +118,17 @@ Use this exact decision order:
    intrinsically wrong module/path invocation, or a range that contradicts the
    parent contract), return ONLY `v2-split-parent-contract-invalid-v1`.
    Emit NO child proposals.
-2. This parent-contract-invalid rule has absolute precedence even when
+2. If authoritative artifact inventory or a completed progress handoff proves
+   that the parent requires missing artifacts and neither the parent nor any
+   legal child owns their creation, return the same protocol with
+   `field: "prerequisite_artifacts"`. Emit NO child proposals.
+3. This parent-contract-invalid rule has absolute precedence even when
    `decomposition_policy.verification_recovery_allowed` is true.
-3. Only when the canonical parent Verify itself is valid and the supervisor
+4. Only when the canonical parent Verify itself is valid and the supervisor
    evidence instead shows that the implementation failed a valid check may
    verification recovery use writer -> tester, subject to the normal shape
    rules below.
-4. Never "repair" a bad parent Verify by silently substituting corrected child
+5. Never "repair" a bad parent Verify by silently substituting corrected child
    Verify commands. Parent-contract repair belongs to the implementation
    planner.
 
