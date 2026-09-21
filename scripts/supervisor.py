@@ -1730,6 +1730,39 @@ def _clear_split_request_state_for_contract_repair(did):
         path.unlink(missing_ok=True)
 
 
+def _archive_split_state_for_contract_repair(did):
+    """Snapshot mutable split control records before a plan repair retires them."""
+    paths=(
+        split_request_path(did),
+        split_proposal_path(did),
+        split_status_path(did),
+        split_transaction_path(did),
+    )
+    records={}
+    for path in paths:
+        try:
+            records[path.name]=path.read_text(errors="replace")
+        except OSError:
+            continue
+    overlay=load_split_leaf_overlay()
+    parents=overlay.get("parents") if isinstance(overlay.get("parents"),dict) else {}
+    if did in parents:
+        records["split-leaf-overlay-entry.json"]=parents[did]
+    if not records:
+        return None
+    archive=Path(PROJECT)/".opencode-v2"/"work"/"contract-repair-history"
+    archive.mkdir(parents=True,exist_ok=True)
+    path=archive/f"{did}.{time.time_ns()}.json"
+    atomic_write_json(path,{
+        "owner":"supervisor",
+        "protocol":"v2-contract-repair-history-v1",
+        "parent_id":did,
+        "archived_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        "records":records,
+    })
+    return path
+
+
 def _detach_split_overlay_for_contract_repair(did):
     """Remove a stale executable split while retaining its immutable history.
 
@@ -1843,6 +1876,7 @@ def request_parent_contract_repair(did, payload, request):
             if changed:
                 save_attempts(data)
 
+    _archive_split_state_for_contract_repair(did)
     _clear_split_request_state_for_contract_repair(did)
     _detach_split_overlay_for_contract_repair(did)
     log(
