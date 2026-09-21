@@ -301,6 +301,30 @@
             "reasoning_effort": "low",
             "reasoningEffort": "low"
           }
+        },
+        "qwen38-task-splitter-nothink": {
+          "id": "qwen3.8-27b",
+          "name": "Qwen3.8 task splitter NONTHINK bounded",
+          "tool_call": true,
+          "modalities": {
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "limit": {
+            "context": 49152,
+            "output": 1536
+          },
+          "options": {
+            "v2_max_tokens": 7168,
+            "chat_template_kwargs": {
+              "enable_thinking": false,
+              "preserve_thinking": false
+            }
+          }
         }
       }
     },

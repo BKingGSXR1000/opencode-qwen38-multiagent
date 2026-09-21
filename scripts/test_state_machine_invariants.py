@@ -636,6 +636,46 @@ class SplitStateMachineTests(unittest.TestCase):
         ok,detail=supervisor.claim_splitter("D001","third")
         self.assertFalse(ok); self.assertEqual(detail,"splitter-failed")
 
+    def test_profile_recovery_requires_a_changed_profile_and_is_bounded(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        supervisor.save_split_status(
+            "D001","splitter-failed",claim_count=3,proposal_failures=3,
+            reason="splitter-completed-without-json-proposal",lease_until_epoch=0,
+        )
+        with mock.patch.object(supervisor,"task_splitter_model_ref",return_value="syv/new"), \
+             mock.patch.object(
+                 supervisor,"task_splitter_profile_fingerprint",
+                 side_effect=lambda model: {"syv/new":"new-fingerprint","syv/old":"old-fingerprint"}[model],
+             ):
+            ok,detail=supervisor.recover_splitter_profile_change("D001","syv/old")
+        self.assertTrue(ok); self.assertEqual(detail,"recovered")
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"split-retryable")
+        self.assertEqual(status["recovery_claim_budget"],1)
+        self.assertEqual(status["profile_recovery_fingerprints"],["new-fingerprint"])
+        self.assertEqual(status["recovery_history"][-1]["prior_model"],"syv/old")
+        supervisor.save_split_status(
+            "D001","splitter-failed",reason="splitter-completed-without-json-proposal"
+        )
+        with mock.patch.object(supervisor,"task_splitter_model_ref",return_value="syv/new"), \
+             mock.patch.object(
+                 supervisor,"task_splitter_profile_fingerprint",
+                 side_effect=lambda model: {"syv/new":"new-fingerprint","syv/old":"old-fingerprint"}[model],
+             ):
+            ok,detail=supervisor.recover_splitter_profile_change("D001","syv/old")
+        self.assertFalse(ok); self.assertEqual(detail,"profile-recovery-already-used")
+
+    def test_profile_recovery_denies_an_unchanged_profile(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        supervisor.save_split_status(
+            "D001","splitter-failed",claim_count=3,proposal_failures=3,
+            reason="splitter-completed-without-json-proposal",lease_until_epoch=0,
+        )
+        with mock.patch.object(supervisor,"task_splitter_model_ref",return_value="syv/same"), \
+             mock.patch.object(supervisor,"task_splitter_profile_fingerprint",return_value="same-fingerprint"):
+            ok,detail=supervisor.recover_splitter_profile_change("D001","syv/same")
+        self.assertFalse(ok); self.assertEqual(detail,"profile-unchanged")
+
     def test_malformed_proposal_gets_one_bounded_fresh_retry(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         ok,_=supervisor.claim_splitter("D001","claim1")

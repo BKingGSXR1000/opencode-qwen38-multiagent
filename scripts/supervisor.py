@@ -37,7 +37,7 @@ from watchdog_telemetry import (
     visible_progress_marker,
 )
 
-ROOT=Path(os.environ.get("V2_ROOT", str(Path.home()/"AI"/"opencode-qwen38-multiagent-v2")))
+ROOT=Path(os.environ.get("V2_ROOT", str(Path(__file__).resolve().parents[1])))
 DB=Path(os.environ.get("V2_OPENCODE_DB", str(ROOT/"xdg"/"data"/"opencode"/"opencode.db")))
 LOG=ROOT/"logs"/"supervisor-events.log"; CSV=ROOT/"logs"/"supervisor-events.csv"; LIVE_STATUS=ROOT/"logs"/"supervisor-live.json"
 WATCHDOG_TELEMETRY=ROOT/"logs"/"watchdog-telemetry.jsonl"
@@ -77,6 +77,7 @@ READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
 MAX_CONCURRENT_IMPLEMENTATION_WORKERS=5
 MAX_SPLITTER_ATTEMPTS=2
 MAX_SPLITTER_OUTPUT_LIMIT_RECOVERIES=1
+MAX_SPLITTER_PROFILE_RECOVERIES=1
 SPLITTER_LEASE_SECONDS=600
 # execute.after can run before the child final text is durable in the session DB.
 # Give the persisted reconcile loop a short bounded window after the hook returns.
@@ -869,7 +870,7 @@ def save_split_status(did, state, **detail):
     for key in (
         "claim_count","proposal_failures","parent_finalize_failures",
         "children","generation","transaction_id","recovery_claim_budget",
-        "recovery_history"
+        "recovery_history","profile_recovery_fingerprints"
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -1192,6 +1193,76 @@ def record_splitter_failure(did, reason, session="", validation=False):
 
 def splitter_claim_limit(status):
     return MAX_SPLITTER_ATTEMPTS + int(status.get("recovery_claim_budget") or 0)
+
+
+def task_splitter_model_ref():
+    """Return the configured task-splitter model without changing role ownership."""
+    role=ROOT/"xdg"/"config"/"opencode"/"agents"/"task-splitter.md"
+    match=re.search(r"^model:\s*([^\s#]+)\s*$",role.read_text(),re.MULTILINE)
+    if not match:
+        raise RuntimeError("task-splitter model is missing")
+    return match.group(1)
+
+
+def task_splitter_profile_fingerprint(model_ref=None):
+    """Fingerprint the exact configured model profile used by the task splitter."""
+    model_ref=model_ref or task_splitter_model_ref()
+    try:
+        provider,model=model_ref.split("/",1)
+        config=json.loads((ROOT/"xdg"/"config"/"opencode"/"opencode.jsonc").read_text())
+        profile=config["provider"][provider]["models"][model]
+    except (ValueError,KeyError,FileNotFoundError,json.JSONDecodeError) as exc:
+        raise RuntimeError(f"unresolvable task-splitter model profile {model_ref!r}") from exc
+    payload=json.dumps(
+        {"agent":"task-splitter","model":model_ref,"profile":profile},
+        sort_keys=True,separators=(",",":"),ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def recover_splitter_profile_change(parent, prior_model):
+    """Authorize one audited replacement claim only for a changed splitter profile."""
+    if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
+        return False,"split-request-missing"
+    try:
+        current_model=task_splitter_model_ref()
+        current_fingerprint=task_splitter_profile_fingerprint(current_model)
+        prior_fingerprint=task_splitter_profile_fingerprint(prior_model)
+    except RuntimeError as exc:
+        return False,str(exc)
+    if current_fingerprint == prior_fingerprint:
+        return False,"profile-unchanged"
+    with splitter_state_lock(parent):
+        status=load_split_status(parent)
+        if status.get("state") != "splitter-failed": return False,"state-not-splitter-failed"
+        if status.get("reason") != "splitter-completed-without-json-proposal":
+            return False,"failure-not-output-missing"
+        if leaf_children(parent) or split_proposal_path(parent).exists():
+            return False,"split-already-materialized"
+        previous=list(status.get("profile_recovery_fingerprints") or [])
+        if current_fingerprint in previous:
+            return False,"profile-recovery-already-used"
+        if len(previous) >= MAX_SPLITTER_PROFILE_RECOVERIES:
+            return False,"profile-recovery-exhausted"
+        history=list(status.get("recovery_history") or [])
+        history.append({
+            "prior_claim_count":int(status.get("claim_count") or 0),
+            "prior_proposal_failures":int(status.get("proposal_failures") or 0),
+            "reason":"task-splitter-profile-fingerprint-recovery",
+            "prior_model":prior_model,
+            "prior_profile_fingerprint":prior_fingerprint,
+            "current_model":current_model,
+            "current_profile_fingerprint":current_fingerprint,
+        })
+        save_split_status(
+            parent,"split-retryable",
+            recovery_claim_budget=int(status.get("recovery_claim_budget") or 0)+1,
+            recovery_history=history,
+            profile_recovery_fingerprints=previous+[current_fingerprint],
+            reason="operator-authorized-task-splitter-profile-recovery",
+            lease_until_epoch=0,
+        )
+    return True,"recovered"
 
 
 def recover_splitter_output_limit(parent):
@@ -7514,7 +7585,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -7710,6 +7781,17 @@ def main():
         if not ok:
             raise SystemExit(f"SPLIT_RECOVERY_DENY parent={args.recover_splitter_output_limit} reason={detail}")
         print(f"SPLIT_RECOVERY_ALLOW parent={args.recover_splitter_output_limit} reason={detail}")
+        return
+    if args.recover_splitter_profile_change:
+        if unknown or not args.project or not args.prior_splitter_model:
+            raise SystemExit("splitter profile recovery requires --project --prior-splitter-model")
+        PROJECT=args.project
+        ok,detail=recover_splitter_profile_change(
+            args.recover_splitter_profile_change,args.prior_splitter_model
+        )
+        if not ok:
+            raise SystemExit(f"SPLIT_PROFILE_RECOVERY_DENY parent={args.recover_splitter_profile_change} reason={detail}")
+        print(f"SPLIT_PROFILE_RECOVERY_ALLOW parent={args.recover_splitter_profile_change} reason={detail}")
         return
     if args.complete_splitter:
         if unknown or not args.project or not args.dispatch_token:

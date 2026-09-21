@@ -155,6 +155,23 @@ class TerminalSemanticChildTests(unittest.TestCase):
 
 
 class TaskSplitterOutputCapTests(unittest.TestCase):
+    def test_task_splitter_has_a_dedicated_nonthinking_profile_with_unchanged_caps(self):
+        config=json.loads((Path(__file__).parents[1] / "xdg/config/opencode/opencode.jsonc").read_text())
+        models=config["provider"]["syv"]["models"]
+        planner=models["qwen38-implementation-planner-48k"]
+        splitter=models["qwen38-task-splitter-nothink"]
+        self.assertEqual(splitter["id"],planner["id"])
+        self.assertEqual(splitter["limit"],planner["limit"])
+        self.assertEqual(splitter["options"]["v2_max_tokens"],planner["options"]["v2_max_tokens"])
+        self.assertEqual(
+            splitter["options"]["chat_template_kwargs"],
+            {"enable_thinking":False,"preserve_thinking":False},
+        )
+        self.assertNotIn("reasoning_effort",splitter["options"])
+        self.assertNotIn("reasoningEffort",splitter["options"])
+        role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/task-splitter.md").read_text()
+        self.assertIn("model: syv/qwen38-task-splitter-nothink",role)
+
     def test_role_ends_with_a_no_analysis_json_only_output_rule(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/task-splitter.md").read_text()
         self.assertIn("## Output-cap execution rule — highest priority",role)
