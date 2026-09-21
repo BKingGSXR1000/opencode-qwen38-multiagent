@@ -178,7 +178,12 @@ repair. Missing parent-owned artifacts are split-recoverable work, not a
 model-authorized repair path. Two focused regressions plus the 24-test
 splitter/component suite and all static launcher selftests pass. A fresh
 disposable live proof is still required before any future retained D003 claim
-can be considered.
+can be considered. The first post-fix copy-based disposable attempt was
+correctly blocked in GET-only preflight because its legacy fixture marked the
+plan ready while failing the current guard-manifest compatibility check; it
+launched no semantic child and its runtime was stopped. Rebuild the canary
+from a current guard-valid fixture rather than treating that stale fixture as
+model evidence.
 
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`

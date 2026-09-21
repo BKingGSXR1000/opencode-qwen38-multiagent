@@ -284,3 +284,8 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   invalid `verify_command`. The focused regression suite (24 tests) and the
   preflight/controller/tick static selftests passed. The runtime was stopped;
   a disposable live proof remains pending before any retained follow-up.
+- A copied older disposable fixture was then used only for GET-only preflight.
+  Its legacy `IMPLEMENTATION_PLAN.ready`/guard combination fails the current
+  guard-manifest compatibility check, so no semantic child was launched and
+  its runtime was stopped. It is not evidence about the splitter model or the
+  new guard; rebuild the fixture from current guard-valid inputs.
