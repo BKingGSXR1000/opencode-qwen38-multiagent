@@ -78,6 +78,7 @@ MAX_CONCURRENT_IMPLEMENTATION_WORKERS=5
 MAX_SPLITTER_ATTEMPTS=2
 MAX_SPLITTER_OUTPUT_LIMIT_RECOVERIES=1
 MAX_SPLITTER_PROFILE_RECOVERIES=1
+MAX_SPLITTER_EXECUTION_CONTRACT_RECOVERIES=1
 SPLITTER_LEASE_SECONDS=600
 # execute.after can run before the child final text is durable in the session DB.
 # Give the persisted reconcile loop a short bounded window after the hook returns.
@@ -870,7 +871,8 @@ def save_split_status(did, state, **detail):
     for key in (
         "claim_count","proposal_failures","parent_finalize_failures",
         "children","generation","transaction_id","recovery_claim_budget",
-        "recovery_history","profile_recovery_fingerprints"
+        "recovery_history","profile_recovery_fingerprints",
+        "execution_contract_recovery_fingerprints"
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -1204,6 +1206,15 @@ def task_splitter_model_ref():
     return match.group(1)
 
 
+def task_splitter_steps():
+    """Return the task-splitter's bounded native turn budget."""
+    role=ROOT/"xdg"/"config"/"opencode"/"agents"/"task-splitter.md"
+    match=re.search(r"^steps:\s*([1-9][0-9]*)\s*$",role.read_text(),re.MULTILINE)
+    if not match:
+        raise RuntimeError("task-splitter steps are missing")
+    return int(match.group(1))
+
+
 def task_splitter_profile_fingerprint(model_ref=None):
     """Fingerprint the exact configured model profile used by the task splitter."""
     model_ref=model_ref or task_splitter_model_ref()
@@ -1218,6 +1229,81 @@ def task_splitter_profile_fingerprint(model_ref=None):
         sort_keys=True,separators=(",",":"),ensure_ascii=True,
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def task_splitter_execution_contract_fingerprint(steps=None):
+    """Fingerprint the full splitter agent contract plus its pinned model profile."""
+    role=ROOT/"xdg"/"config"/"opencode"/"agents"/"task-splitter.md"
+    text=role.read_text()
+    active_steps=task_splitter_steps()
+    if steps is not None:
+        steps=int(steps)
+        if steps < 1:
+            raise RuntimeError("task-splitter prior steps are invalid")
+        text,count=re.subn(
+            r"^steps:\s*[1-9][0-9]*\s*$",f"steps: {steps}",text,
+            count=1,flags=re.MULTILINE,
+        )
+        if count != 1:
+            raise RuntimeError("task-splitter steps cannot be projected")
+    payload=json.dumps(
+        {
+            "protocol":"v1-task-splitter-execution-contract",
+            "agent_markdown":text,
+            "active_steps":active_steps if steps is None else steps,
+            "model_profile":task_splitter_profile_fingerprint(),
+        },
+        sort_keys=True,separators=(",",":"),ensure_ascii=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def recover_splitter_execution_contract(parent, prior_steps):
+    """Authorize one audited claim for the exact adjacent splitter-step repair."""
+    if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
+        return False,"split-request-missing"
+    try:
+        current_steps=task_splitter_steps()
+        prior_steps=int(prior_steps)
+        if prior_steps != current_steps-1:
+            return False,"prior-step-contract-not-adjacent"
+        current_fingerprint=task_splitter_execution_contract_fingerprint()
+        prior_fingerprint=task_splitter_execution_contract_fingerprint(prior_steps)
+    except (RuntimeError,ValueError) as exc:
+        return False,str(exc)
+    if current_fingerprint == prior_fingerprint:
+        return False,"execution-contract-unchanged"
+    with splitter_state_lock(parent):
+        status=load_split_status(parent)
+        if status.get("state") != "splitter-failed": return False,"state-not-splitter-failed"
+        if status.get("reason") != "splitter-completed-without-json-proposal":
+            return False,"failure-not-output-missing"
+        if leaf_children(parent) or split_proposal_path(parent).exists():
+            return False,"split-already-materialized"
+        previous=list(status.get("execution_contract_recovery_fingerprints") or [])
+        if current_fingerprint in previous:
+            return False,"execution-contract-recovery-already-used"
+        if len(previous) >= MAX_SPLITTER_EXECUTION_CONTRACT_RECOVERIES:
+            return False,"execution-contract-recovery-exhausted"
+        history=list(status.get("recovery_history") or [])
+        history.append({
+            "prior_claim_count":int(status.get("claim_count") or 0),
+            "prior_proposal_failures":int(status.get("proposal_failures") or 0),
+            "reason":"task-splitter-execution-contract-recovery",
+            "prior_steps":prior_steps,
+            "prior_execution_contract_fingerprint":prior_fingerprint,
+            "current_steps":current_steps,
+            "current_execution_contract_fingerprint":current_fingerprint,
+        })
+        save_split_status(
+            parent,"split-retryable",
+            recovery_claim_budget=int(status.get("recovery_claim_budget") or 0)+1,
+            recovery_history=history,
+            execution_contract_recovery_fingerprints=previous+[current_fingerprint],
+            reason="operator-authorized-task-splitter-execution-contract-recovery",
+            lease_until_epoch=0,
+        )
+    return True,"recovered"
 
 
 def recover_splitter_profile_change(parent, prior_model):
@@ -7585,7 +7671,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -7792,6 +7878,17 @@ def main():
         if not ok:
             raise SystemExit(f"SPLIT_PROFILE_RECOVERY_DENY parent={args.recover_splitter_profile_change} reason={detail}")
         print(f"SPLIT_PROFILE_RECOVERY_ALLOW parent={args.recover_splitter_profile_change} reason={detail}")
+        return
+    if args.recover_splitter_execution_contract:
+        if unknown or not args.project or args.prior_splitter_steps is None:
+            raise SystemExit("splitter execution-contract recovery requires --project --prior-splitter-steps")
+        PROJECT=args.project
+        ok,detail=recover_splitter_execution_contract(
+            args.recover_splitter_execution_contract,args.prior_splitter_steps
+        )
+        if not ok:
+            raise SystemExit(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_DENY parent={args.recover_splitter_execution_contract} reason={detail}")
+        print(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_ALLOW parent={args.recover_splitter_execution_contract} reason={detail}")
         return
     if args.complete_splitter:
         if unknown or not args.project or not args.dispatch_token:

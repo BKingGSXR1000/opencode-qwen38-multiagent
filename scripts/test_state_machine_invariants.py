@@ -676,6 +676,43 @@ class SplitStateMachineTests(unittest.TestCase):
             ok,detail=supervisor.recover_splitter_profile_change("D001","syv/same")
         self.assertFalse(ok); self.assertEqual(detail,"profile-unchanged")
 
+    def test_execution_contract_recovery_is_adjacent_once_and_preserves_counts(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        supervisor.save_split_status(
+            "D001","splitter-failed",claim_count=4,proposal_failures=4,
+            recovery_claim_budget=2,reason="splitter-completed-without-json-proposal",
+            lease_until_epoch=0,
+        )
+        with mock.patch.object(supervisor,"task_splitter_steps",return_value=4), \
+             mock.patch.object(
+                 supervisor,"task_splitter_execution_contract_fingerprint",
+                 side_effect=lambda steps=None: "step4-fingerprint" if steps is None else "step3-fingerprint",
+             ):
+            ok,detail=supervisor.recover_splitter_execution_contract("D001",3)
+        self.assertTrue(ok); self.assertEqual(detail,"recovered")
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["claim_count"],4)
+        self.assertEqual(status["proposal_failures"],4)
+        self.assertEqual(status["recovery_claim_budget"],3)
+        self.assertEqual(status["execution_contract_recovery_fingerprints"],["step4-fingerprint"])
+        self.assertEqual(status["recovery_history"][-1]["prior_steps"],3)
+        supervisor.save_split_status(
+            "D001","splitter-failed",reason="splitter-completed-without-json-proposal"
+        )
+        with mock.patch.object(supervisor,"task_splitter_steps",return_value=4), \
+             mock.patch.object(
+                 supervisor,"task_splitter_execution_contract_fingerprint",
+                 side_effect=lambda steps=None: "step4-fingerprint" if steps is None else "step3-fingerprint",
+             ):
+            ok,detail=supervisor.recover_splitter_execution_contract("D001",3)
+        self.assertFalse(ok); self.assertEqual(detail,"execution-contract-recovery-already-used")
+
+    def test_execution_contract_recovery_rejects_nonadjacent_step_claims(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        with mock.patch.object(supervisor,"task_splitter_steps",return_value=4):
+            ok,detail=supervisor.recover_splitter_execution_contract("D001",2)
+        self.assertFalse(ok); self.assertEqual(detail,"prior-step-contract-not-adjacent")
+
     def test_malformed_proposal_gets_one_bounded_fresh_retry(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         ok,_=supervisor.claim_splitter("D001","claim1")
