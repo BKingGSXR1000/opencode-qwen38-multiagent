@@ -179,3 +179,34 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   and proposal failure count 3. D003's worker attempt ledger stayed at count 3
   and its retained semantic-child count stayed at 9. No further replacement
   claim was made.
+
+## D003 profile recovery and synthetic splitter canary — 2026-09-21
+
+Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
+
+- `8ea4431` introduced a task-splitter-only non-thinking profile with the same
+  Qwen model ID, context/output limits, and v2 token cap as the failed planner
+  profile. Its one-time recovery is bound to durable prior/current profile
+  fingerprints; no generic retry was opened.
+- Full retained-project preflight passed on fresh technical root
+  `ses_f3b517761ffePA9Q71JpEyB0pH` with zero preflight POSTs/workers. The sole
+  resulting dispatch `2cf26fa53f303301a3bdc19ae90561c4709eb609dabd47040bcd5fc0f6baa95b`
+  created `ses_f3b4daf67ffeYS06u7O7cRWgF1`.
+- That child used `syv/qwen38-task-splitter-nothink`, had zero reasoning tokens,
+  and completed the one permitted request read. It then attempted an unsolicited
+  read of the ephemeral overlay `AGENTS.md`; the exact-one-tool guard denied it.
+  Its final output was OpenCode's maximum-step summary rather than proposal JSON.
+  D003 therefore reached the finite state `splitter-failed` at claim/failure 4;
+  its worker attempt ledger stayed at count 3 and no split child was created.
+
+Disposable project: `/tmp/a2-splitter-step-canary-20260921/project`
+
+- `debb584` reserves a fourth final-response step while retaining the exact
+  one-tool guard. Full preflight passed on technical root
+  `ses_f3b375c0bffeBIeKxxLy6e2enG` with zero preflight POSTs/workers.
+- The sole task-splitter child `ses_f3b366ff0ffeb2FoF8GJ1AKlmE` performed only
+  the canonical request read, emitted bare proposal JSON (`finish=stop`, zero
+  reasoning tokens), and deterministically committed D001-A/D001-B with exact
+  non-overlapping ownership (`a.txt` / `b.txt`). Its canary runtime was stopped.
+- This validates the generic splitter lifecycle and does not reset, replay, or
+  reopen D002, D003, D004, or any retained attempt ledger.

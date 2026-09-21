@@ -29,7 +29,7 @@ Continue autonomously through this roadmap. Fix/test as required; do not stop me
 - [x] preserve D002 as historical evidence; never reset/replay its attempts
 
 ## C. Stabilization
-- [x] restore task-splitter model to `syv/qwen38-implementation-planner-48k`
+- [x] task-splitter-only non-thinking profile with unchanged Qwen/context/output/v2 caps
 - [x] remove prompt-only relative-path workarounds
 - [x] add path containment/ownership helper
 - [x] hard consolidated-preflight gating
@@ -58,13 +58,13 @@ Only after D passes:
 - [x] determine correct existing deterministic next state: repair stale contracts and advance their producers before D004
 - [x] fix generic controller behavior: runtime repair credits, no-op repair rejection, and exact Verify-bound readiness
 - [~] progress remaining deliverables using normal Stage-A scheduling
-  - D003 current-contract recovery reached its deterministic generation-1
-    splitter action. Both normal splitter claims exhausted output before
-    producing a proposal; its single output-limit replacement also exhausted
-    without a proposal. D003 is `splitter-failed`. The active restored planner
-    profile enables thinking under a 1,536-token output cap; obtain an explicit
-    model/reasoning-policy decision before any new recovery mechanism.
-    Do not replay its historical worker attempt.
+  - [x] D003 splitter profile recovery is bounded, fingerprinted, and audited.
+    The retained fourth claim exposed a one-tool guard/three-step interaction,
+    then returned D003 to finite `splitter-failed` without changing its worker
+    attempts. A full-preflight synthetic canary proves the repaired four-step
+    generic splitter path creates and reconciles owned child contracts.
+  - [ ] determine the architecture-safe retained D003/D004 recovery transition;
+    do not reset attempts, replay D002, or grant another D003 splitter claim.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 

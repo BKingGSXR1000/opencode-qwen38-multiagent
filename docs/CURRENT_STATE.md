@@ -5,8 +5,7 @@ Generated/updated by `install-opencode-project-memory.py`.
 ## Repository
 - Repository: `/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831`
 - Branch at generation time: `a2-v11831-integration`
-- HEAD at generation time: `b22c0977ae68fa44b2ed307cb2873bbbfc29af53`
-- HEAD subject: `Fail closed on terminal semantic children`
+- Current integration HEAD: `debb584` (`Reserve splitter final response step`)
 
 Working tree at generation time:
 ```text
@@ -36,10 +35,6 @@ The following were intentionally uncommitted at the last known checkpoint; verif
 - `scripts/run-a2-v11831-server.sh`
 - `scripts/run-stage-a-tick.py`
 - `scripts/start-stage-a-run.sh`
-- `xdg/config/opencode/agents/task-splitter.md`
-- `scripts/stage_a_path_permissions.py`
-- `scripts/stage_a_preflight.py`
-- `scripts/test_stage_a_stabilization.py`
 
 ## Current resume point
 Worktree-relative permission projection is proven in the current uncommitted stabilization working set.
@@ -88,7 +83,7 @@ The native child completed, wrote its owned probe artifact, and failed the
 exact current Verify because required vector artifacts remain absent. This is
 the second genuine D003 failure; `split_required generation=1` is durable.
 Attempt 3 is a supervisor plan-contract replacement, not an operator retry.
-All three audited D003 generation-1 task-splitter children
+The three original audited D003 generation-1 task-splitter children
 `ses_f3ba64c5cffeClIm3nbduaJJH3` and
 `ses_f3b8ac091ffe41tKijchkfRPmv`, followed by the single audited replacement
 `ses_f3b7ca8abffeKAabDkiXerJ4Xp`, read the same split request and reached
@@ -100,15 +95,31 @@ second execution was reconciled to its native child without replay after
 correcting a controller bug that incorrectly sent task splitters to
 implementation binding.
 
-The output-cap prompt repair did not change this behavior. The active restored
-`qwen38-implementation-planner-48k` profile has `limit.output=1536` and
-`enable_thinking=true`; OpenCode persisted only reasoning parts until that cap.
-Changing that model/reasoning configuration is outside the current freeze.
+The output-cap prompt repair did not change this behavior. The authorized
+splitter-only replacement profile keeps the same Qwen ID, 49,152-token context,
+1,536-token output cap, and 7,168-token v2 cap, while disabling thinking.
+Its single audited retained D003 recovery child
+`ses_f3b4daf67ffeYS06u7O7cRWgF1` (execution
+`2cf26fa53f303301a3bdc19ae90561c4709eb609dabd47040bcd5fc0f6baa95b`)
+did not reach the output cap: it read the request, attempted an unsolicited
+second `AGENTS.md` read, and the exact-one-tool guard denied it. With the old
+three-step budget OpenCode then emitted a maximum-steps summary instead of JSON.
+This is durable evidence of a guard/step-budget interaction, not a backend or
+reasoning-cap failure. D003 is terminal again at splitter claim/failure count 4;
+its worker attempt ledger remains count 3.
+
+`debb584` reserves a fourth, final response turn while retaining exactly one
+allowed tool call. A full-preflight synthetic disposable canary proved it:
+`ses_f3b366ff0ffeb2FoF8GJ1AKlmE` read only its canonical split request, emitted
+bare `v2-task-split-proposal-v2` JSON with zero reasoning tokens, and was
+deterministically committed as D001-A/D001-B. This proves the repaired generic
+splitter path but does not alter or reopen retained D003.
 
 ### Next action
-Obtain an explicit model/reasoning-policy decision for task-splitter before any
-new split recovery mechanism; do not repeat the same bounded task-splitter call.
-Also preserve D002 and every valid historical attempt/split record.
+Preserve D002 and every valid historical attempt/split record. D003 has no
+remaining authorized splitter claim; continue with read-only provenance and
+deterministic recovery analysis of the retained D004/D003 downstream blocker
+before proposing any further retained-state transition.
 
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
@@ -122,7 +133,9 @@ does not authorize a retry by itself.
 ## Configuration freeze
 Until explicitly requested, keep worker/planner models (except restoring documented values), context sizes, concurrency, MTP, reasoning settings, and production vLLM tuning unchanged.
 
-Task-splitter remains `syv/qwen38-implementation-planner-48k`.
+Task-splitter alone uses `syv/qwen38-task-splitter-nothink`; its context,
+output, and v2 token caps match the prior splitter profile. All other model and
+runtime settings remain frozen.
 
 ## Working method
 Proceed autonomously through `ROADMAP.md`. Use local Qwen/OpenCode when it is the correct integration proof.
