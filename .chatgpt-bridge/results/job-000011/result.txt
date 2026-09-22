@@ -1,0 +1,362 @@
+======================================================================
+JOB: job-000011
+JOB_COMMIT: 3300df1927cbc930097eb38f03b57fdbe8b83ea7
+STARTED: 2026-09-22T19:13:32Z
+======================================================================
+
+=== REPO ===
+a2-v11831-integration
+23cce479d25f1a1b90dbf2a141b6525be78c5264
+ M scripts/drive-stage-a-run.py
+ M scripts/run-a2-v11831-server.sh
+ M scripts/run-stage-a-tick.py
+ M scripts/stage_a_controller.py
+ M scripts/start-stage-a-run.sh
+ M scripts/supervisor.py
+?? scripts/test_transport_root_no_continuation.py
+
+=== INTENDED LOCAL DIFF: stage_a_controller.py ===
+diff --git a/scripts/stage_a_controller.py b/scripts/stage_a_controller.py
+index 1bd2ead..97ef47e 100755
+--- a/scripts/stage_a_controller.py
++++ b/scripts/stage_a_controller.py
+@@ -586,6 +586,14 @@ def canonical_implementation_prompt(project: Path, agent: str, did: str) -> str:
+     return prompt
+ 
+ 
++# IMPORTANT: every Stage-A SubtaskPart injected into the technical root must
++# omit the optional `command` field.  In pinned OpenCode v1.18.31 a truthy
++# SubtaskPart.command causes handleSubtask() to append a synthetic parent
++# message ("Summarize the task tool output above and continue with your task.")
++# after the child completes.  The Stage-A root is transport-only
++# (v2noop/root-noop), so parent continuation is never part of the protocol.
++# Omitting command makes the native child completion terminal for that root
++# turn and keeps the root available for the next deterministic SubtaskPart.
+ def build_implementation_subtask(action: dict, prompt: str) -> dict:
+     agent = str(action.get("agent") or "")
+     did = str(action.get("deliverable") or "")
+@@ -598,7 +606,6 @@ def build_implementation_subtask(action: dict, prompt: str) -> dict:
+         "prompt": prompt,
+         "description": f"Execute {did}",
+         "agent": agent,
+-        "command": "stage-a-controller",
+     }
+ 
+ 
+@@ -636,7 +643,6 @@ def build_task_splitter_subtask(action: dict, split_request: dict) -> dict:
+         ),
+         "description": f"Split {did}",
+         "agent": "task-splitter",
+-        "command": "stage-a-controller",
+     }
+ 
+ 
+@@ -650,7 +656,6 @@ def build_planner_subtask(action: dict) -> dict:
+         "prompt": PLANNER_PROMPTS[mode],
+         "description": f"{mode.title()} implementation plan",
+         "agent": "implementation-planner",
+-        "command": "stage-a-controller",
+     }
+ 
+ 
+@@ -665,7 +670,6 @@ def build_semantic_subtask(action: dict) -> dict:
+         "prompt": prompt,
+         "description": f"{canonical['agent']} {canonical['mode']}",
+         "agent": canonical["agent"],
+-        "command": "stage-a-controller",
+     }
+ 
+ 
+@@ -1523,7 +1527,6 @@ def selftest() -> None:
+         "prompt": "DELIVERABLE: D042\ncanonical",
+         "description": "Execute D042",
+         "agent": "probe-builder",
+-        "command": "stage-a-controller",
+     }
+     if payload != expected_payload:
+         raise ControllerError(
+@@ -1542,7 +1545,7 @@ def selftest() -> None:
+             "{\"depth\":0,\"generation\":3,\"parent_id\":\"D042\"}\n"
+             "CANONICAL_SPLIT_REQUEST_JSON_END"
+         ),
+-        "description": "Split D042", "agent": "task-splitter", "command": "stage-a-controller",
++        "description": "Split D042", "agent": "task-splitter",
+     }:
+         raise ControllerError(f"task-splitter payload mismatch actual={split_payload!r}")
+     if canonical_execution_action(split_action).get("generation") != 3:
+@@ -1568,9 +1571,7 @@ def selftest() -> None:
+     if canonical_execution_action(semantic_action) != semantic_action:
+         raise ControllerError("semantic execution action did not retain fresh mode")
+     semantic_payload = build_semantic_subtask(semantic_action)
+-    if semantic_payload["agent"] != "acceptance-planner" or semantic_payload[
+-        "command"
+-    ] != "stage-a-controller":
++    if semantic_payload["agent"] != "acceptance-planner" or "command" in semantic_payload:
+         raise ControllerError("semantic subtask payload mismatch")
+     final_tests_action = {
+         "kind": "run_final_tests", "command": ".opencode-v2/bin/run-checks",
+
+=== INTENDED LOCAL DIFF: supervisor.py ===
+diff --git a/scripts/supervisor.py b/scripts/supervisor.py
+index 725e415..980b425 100644
+--- a/scripts/supervisor.py
++++ b/scripts/supervisor.py
+@@ -878,6 +878,8 @@ def save_split_status(did, state, **detail):
+         # A corrective turn is a bounded continuation of one already-claimed
+         # splitter session.  Keep its audit fields through every terminal
+         # transition; they are evidence, not a new recovery budget.
++        "completion_pending_session","completion_pending_token",
++        "completion_pending_deadline_epoch",
+         "corrective_turn_count","corrective_session","corrective_dispatch_token",
+         "corrective_first_output_sha256","corrective_archive",
+         "corrective_context_sha256","corrective_dispatch_state",
+@@ -2518,6 +2520,9 @@ def corrective_splitter_prompt(parent,request,primary_output,reason):
+     )
+ 
+ 
++# Keep the corrective launch a fresh native task-splitter child of the same
++# technical root, but deliberately omit SubtaskPart.command.  A truthy
++# command makes OpenCode resume the v2noop parent after task completion.
+ def dispatch_splitter_corrective_turn(root,prompt):
+     if not http.ensure(): return False,"http-not-connected"
+     if http.mode!="v1": return False,"splitter-corrective-requires-v1-runtime"
+@@ -2525,7 +2530,7 @@ def dispatch_splitter_corrective_turn(root,prompt):
+         query=urllib.parse.urlencode({"directory":PROJECT})
+         http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
+             payload={"agent":"transport-root","model":{"providerID":"v2noop","modelID":"root-noop"},
+-                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter","command":"stage-a-controller"}]},timeout=12)
++                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter"}]},timeout=12)
+         return True,"accepted"
+     except Exception as exc:
+         return False,repr(exc)
+@@ -2848,15 +2853,46 @@ def recover_pending_splitter_completion(parent,status,now=None):
+     if token and active_token and token!=active_token:
+         return False,"stale-pending-token"
+ 
+-    payload=parse_splitter_final_json(last_assistant_text_db(session))
++    text=last_assistant_text_db(session)
++    payload=parse_splitter_final_json(text)
+     if isinstance(payload,dict):
+         atomic_write_json(split_proposal_path(parent),payload)
++        save_split_status(
++            parent,"splitter-active",
++            claim_count=int(status.get("claim_count") or 0),
++            dispatch_token=active_token or token,
++            lease_until_epoch=status.get("lease_until_epoch",0),
++            completion_pending_session="",
++            completion_pending_token="",
++            completion_pending_deadline_epoch=0,
++        )
+         log(
+             f"SPLIT_PROPOSAL_RECOVERED_AFTER_HOOK parent={parent} "
+             f"session={session} token={token or active_token}"
+         )
+         return True,"proposal-recovered"
+ 
++    # The hook may expose a TaskTool wrapper before the child's actual final
++    # assistant text is durable.  Only classify the response once the durable
++    # child-session text exists.
++    if text.strip():
++        save_split_status(
++            parent,"splitter-active",
++            claim_count=int(status.get("claim_count") or 0),
++            dispatch_token=active_token or token,
++            lease_until_epoch=status.get("lease_until_epoch",0),
++            completion_pending_session="",
++            completion_pending_token="",
++            completion_pending_deadline_epoch=0,
++        )
++        return begin_splitter_corrective_turn(
++            parent,
++            session,
++            token or active_token,
++            "response did not contain the required bare JSON object",
++            text,
++        )
++
+     now=time.time() if now is None else float(now)
+     try:
+         deadline=float(status.get("completion_pending_deadline_epoch") or 0)
+@@ -2954,13 +2990,37 @@ def complete_splitter(parent, session="", dispatch_token="", output_text=""):
+                     session=session,validation=False,
+                 )
+                 return False,state
++
+             if corrective:
+-                _,state=record_splitter_failure(parent,"corrective splitter response did not contain required bare JSON",session=session,validation=True)
+-                return False,state
+-            return begin_splitter_corrective_turn(
+-                parent,session,dispatch_token,
+-                "response did not contain the required bare JSON object",output_text,
++                # OpenCode v1.18.31 may persist the child's final assistant
++                # text only AFTER execute.after returns.  The corrective
++                # session is already durably bound above, so leave the state
++                # pending and let recover_splitter_corrective_output() read
++                # the final session text on the normal reconciliation tick.
++                log(
++                    f"SPLITTER_CORRECTIVE_COMPLETION_PENDING parent={parent} "
++                    f"session={session} token={dispatch_token}"
++                )
++                return False,"corrective-output-pending"
++
++            # Same persistence race for the primary splitter.  Do not mistake
++            # the TaskTool wrapper from execute.after for the child's final
++            # model answer.  Give SQLite the established 15-second splitter
++            # persistence grace and classify the durable child text afterward.
++            save_split_status(
++                parent,"splitter-active",
++                claim_count=int(status.get("claim_count") or 0),
++                dispatch_token=dispatch_token,
++                lease_until_epoch=status.get("lease_until_epoch",0),
++                completion_pending_session=session,
++                completion_pending_token=dispatch_token,
++                completion_pending_deadline_epoch=time.time()+15,
++            )
++            log(
++                f"SPLITTER_COMPLETION_PENDING_AFTER_HOOK parent={parent} "
++                f"session={session} token={dispatch_token}"
+             )
++            return False,"completion-pending"
+ 
+         atomic_write_json(split_proposal_path(parent),payload)
+         log(
+
+=== LOCAL TEST: test_transport_root_no_continuation.py ===
+#!/usr/bin/env python3
+"""Regression tests for Stage-A's transport-only OpenCode root."""
+
+from pathlib import Path
+import sys
+import unittest
+from unittest import mock
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+
+import stage_a_controller as controller
+import supervisor
+
+
+class TransportRootNoContinuationTests(unittest.TestCase):
+    def assert_transport_subtask(self, part, expected_agent):
+        self.assertEqual(part["type"], "subtask")
+        self.assertEqual(part["agent"], expected_agent)
+        self.assertNotIn(
+            "command",
+            part,
+            "Stage-A transport-root SubtaskParts must omit command; "
+            "OpenCode v1.18.31 otherwise resumes the v2noop parent",
+        )
+
+    def test_all_controller_subtask_builders_omit_command(self):
+        implementation = controller.build_implementation_subtask(
+            {"kind": "launch", "agent": "probe-builder", "deliverable": "D001"},
+            "DELIVERABLE: D001\ncanonical",
+        )
+        self.assert_transport_subtask(implementation, "probe-builder")
+
+        splitter = controller.build_task_splitter_subtask(
+            {
+                "kind": "launch",
+                "agent": "task-splitter",
+                "deliverable": "D001",
+                "generation": 1,
+            },
+            {"parent_id": "D001", "generation": 1, "depth": 0},
+        )
+        self.assert_transport_subtask(splitter, "task-splitter")
+
+        planner = controller.build_planner_subtask(
+            {"kind": "launch", "agent": "implementation-planner", "mode": "fresh"}
+        )
+        self.assert_transport_subtask(planner, "implementation-planner")
+
+        (semantic_agent, semantic_mode) = next(iter(controller.SEMANTIC_PROMPTS))
+        semantic = controller.build_semantic_subtask(
+            {"kind": "launch", "agent": semantic_agent, "mode": semantic_mode}
+        )
+        self.assert_transport_subtask(semantic, semantic_agent)
+
+    def test_corrective_splitter_dispatch_omits_command(self):
+        calls = []
+
+        def fake_request(method, url, payload=None, timeout=None):
+            calls.append((method, url, payload, timeout))
+            return None
+
+        with (
+            mock.patch.object(supervisor, "PROJECT", "/tmp/stage-a-transport-root-test"),
+            mock.patch.object(supervisor.http, "ensure", return_value=True),
+            mock.patch.object(supervisor.http, "request", side_effect=fake_request),
+            mock.patch.object(supervisor.http, "mode", "v1"),
+        ):
+            ok, detail = supervisor.dispatch_splitter_corrective_turn(
+                "ses_root", "SPLIT_PARENT: D001\nSPLITTER_CORRECTIVE_ORDINAL: 1"
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "accepted")
+        self.assertEqual(len(calls), 1)
+        method, url, payload, timeout = calls[0]
+        self.assertEqual(method, "POST")
+        self.assertIn("/session/ses_root/prompt_async?", url)
+        self.assertEqual(timeout, 12)
+        self.assertEqual(payload["agent"], "transport-root")
+        self.assertEqual(
+            payload["model"], {"providerID": "v2noop", "modelID": "root-noop"}
+        )
+        self.assertEqual(len(payload["parts"]), 1)
+        self.assert_transport_subtask(payload["parts"][0], "task-splitter")
+        self.assertIn(
+            "SPLITTER_CORRECTIVE_ORDINAL: 1", payload["parts"][0]["prompt"]
+        )
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
+=== CANARY/RUN HELPERS ===
+a2-v11831-noop-provider.py
+bootstrap-stage-a-project.py
+create-d003-splitter-canary.py
+create-stage-a-root.py
+drive-stage-a-run.py
+run-a2-v11831-noop.sh
+run-a2-v11831-server.sh
+run-stage-a-tick.py
+start-a2-v11831-supervisor.sh
+start-stage-a-run.sh
+
+=== RELEVANT USER SERVICES ===
+chatgpt-job-ingress.service                                      loaded    active   running ChatGPT to AI-Beast local Git job ingress
+github-chatgpt-runner.service                                    loaded    active   running GitHub to AI-Beast to ChatGPT execution bridge
+
+=== RELEVANT PROCESSES ===
+  15486   48847 /home/bking/AI/qwen38-27b-rtx3090-syv/venv/bin/python3.12 /home/bking/AI/qwen38-27b-rtx3090-syv/venv/bin/vllm serve /home/bking/AI/qwen38-27b-rtx3090-syv/models/Qwen3.8-27B-W4A16-AutoRound-fast --served-model-name qwen3.8-27b --host 0.0.0.0 --port 18030 --gpu-memory-utilization 0.929 --max-model-len 65536 --max-num-seqs 3 --api-server-count 1 --language-model-only --attention-backend FLASH_ATTN --kv-cache-dtype bfloat16 --mamba-ssm-cache-dtype float16 --async-scheduling --max-num-batched-tokens 2048 --speculative-config {"method":"mtp","num_speculative_tokens":4,"draft_sample_method":"probabilistic"} --compilation-config {"max_cudagraph_capture_size":32,"custom_ops":["+rms_norm","+silu_and_mul"]} --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --enable-prefix-caching --mamba-cache-mode align
+  16460   48802 node /home/bking/AI/opencode-qwen38-multiagent-v2/scripts/v2-wire-proxy.mjs
+  17189   48739 bash /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh /home/bking/AI/a2-controller-live-20260920-161347 58441
+  17228   48738 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 58441
+  20095   48457 bash /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh /home/bking/AI/a2-controller-live-20260920-161347 58442
+  20149   48455 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 58442
+  34349   46863 bash /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh /tmp/a2-d003b-splitter-prompt-canary/project 58443
+  34371   46862 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 58443
+  50811   45212 python3 scripts/supervisor.py --project /tmp/a2-d003b-corrective-canary.oTDlKK/project
+ 106706    9442 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 49381
+ 116544    8022 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 34169
+ 118840    7628 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 58277
+ 122944    7100 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 45211
+ 124601    6841 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 35475
+ 126110    6664 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/runtime/opencode-v1.18.31/opencode serve --hostname 127.0.0.1 --port 34489
+
+=== RECENT D003/CANARY ARTIFACTS UNDER ~/AI ===
+2026-09-22 18:49:03.8169770610 /home/bking/AI/diagnose-a2-d003b-canary-v5.sh
+2026-09-22 14:05:51.3926208720 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/create-d003-splitter-canary.py
+2026-09-13 17:28:53.4223197480 /home/bking/AI/gametestNew22/tools/acquire-d003.mjs
+
+
+======================================================================
+FINISHED: 2026-09-22T19:13:32Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
