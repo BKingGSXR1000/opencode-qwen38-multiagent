@@ -76,7 +76,16 @@ Only after D passes:
     guard/query formats current; first false parent-contract-invalid is
     rejected without repair; bounded retry emits accepted direct-context,
     zero-tool normal proposal; D003-A/D003-B contracts materialize with exact
-    moons directory ownership. A retained claim 7 requires explicit approval.
+    moons directory ownership.
+  - [x] authorized retained D003 claim 7 accepted the same ownership-safe
+    split; D003-A completed canonically and D003-B ran through its normal
+    deterministic child-worker retry/split policy without a D003 claim 8.
+  - [~] D003-B child split exhausted its normal two splitter claims: a missing
+    JSON proposal followed by a false oversized parent-contract-invalid result.
+    The guard rejected both without repair or grandchildren. A fresh disposable
+    canary proves the current local splitter can repeat false invalid-contract
+    assertions despite prompt tightening. Choose a deterministic fallback or
+    revised bounded-claim policy before any further retained recovery.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 

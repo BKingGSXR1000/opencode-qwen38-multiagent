@@ -217,6 +217,35 @@ check confirms retained D003 worker count remains 3; its claim-6 archive
 preserves claim count 6. The next retained action would be claim 7 and needs
 explicit authorization.
 
+### Retained D003 claim 7 and child-split boundary — 2026-09-22
+
+`cf42c3f` recreated only the historical false-parent-repair split edge: it
+preserved D003 worker count 3, archived claims/failures 1-6, and exposed exactly
+claim 7. `7e07d1a` archived the disproven live repair packet and re-finalized
+the unchanged current plan without a planner/worker. Fresh preflight selected
+only D003 task-splitter (state `2587bd5b93943346`), then root
+`ses_f385d96d6ffer4kvY0zZ8oRWnW` launched splitter
+`ses_f3858a822ffeGy1JA5T7e6d0MS`. It used the intentional no-thinking profile,
+and strict validation accepted D003-A (progress handoff) and D003-B (writer
+owning exactly the probe JSON and `fixtures/vectors/moons/`). D003 reached
+`accepted` at claim 7/failure 5; no D003 claim 8 exists.
+
+D003-A completed canonically. D003-B made two normal writer attempts and both
+failed exact Verify; the second proved its probe file was not JSON. Its normal
+generation-1 child split then exhausted its two claims: first no bare proposal;
+second false `parent-contract-invalid` was rejected because the reason exceeded
+the bounded protocol length. No D003-B grandchildren, D003 rejoin, or D004
+eligibility change occurred. D002 is untouched; D004 remains dependency-blocked.
+
+`b288300` tightened the splitter role against inferring Verify defects from
+worker artifacts, formatting, parse errors, or hypothetical glob members, but
+a fresh disposable current-state canary still emitted false
+`parent-contract-invalid` on both permitted claims. The deterministic guard
+held; the prompt-only correction is insufficient. Retained runtime is stopped.
+The next remedy needs an explicit architectural decision on a deterministic
+fallback/claim policy for repeatedly false invalid-contract assertions; do not
+issue D003 claim 8 or another D003-B splitter claim.
+
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 

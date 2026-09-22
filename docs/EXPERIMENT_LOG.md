@@ -318,3 +318,29 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   limited to the splitter proposal/contract transaction. The runtime stopped.
   Retained D002/D003/D004 were not mutated. Read-only retained evidence still
   reports D003 worker count 3 and archived claim-6 count 6.
+
+## Retained D003 claim 7 and bounded child split — 2026-09-22
+
+- `cf42c3f` reconstructed only D003's archived false-parent-repair split edge,
+  preserving the historical worker ledger and claims 1-6 while allowing exactly
+  claim 7. `7e07d1a` preserved the false live repair packet in a resolution
+  archive and finalized the unchanged plan without launching a planner.
+- Full preflight passed with root `ses_f385d96d6ffer4kvY0zZ8oRWnW`, state
+  `2587bd5b93943346`, one D003 splitter action, and zero preflight workers.
+  Execution `685ccd22dc2b6381670237f9db39f6a53e7086503205675aef4ed33a1d4b0a58`
+  created `ses_f3858a822ffeGy1JA5T7e6d0MS` on the approved no-thinking profile.
+  Strict validation accepted D003-A and D003-B; D003 is `accepted` at claim 7 /
+  failure 5, with no claim 8.
+- D003-A finalized. D003-B attempts 1 and 2 both genuinely failed exact Verify;
+  attempt 2's supervisor stderr proves its probe was not JSON. Its generation-1
+  splitter then consumed its ordinary two claims: the first had no bare JSON;
+  the second (`ses_f3846296effeGhJtc3cXlN5aAx`) emitted a false invalid-contract
+  object with an overlong reason. Strict validation rejected it; no repair,
+  grandchildren, D003 completion, or D004 eligibility change occurred.
+- `b288300` added a precise role constraint against treating failed artifact
+  contents or formatting speculation as a parent Verify defect. Focused static
+  tests pass, but disposable project
+  `/tmp/a2-d003b-splitter-prompt-canary/project` still produced two false
+  invalid-contract assertions under the real local Qwen. The runtime was
+  stopped. This establishes a prompt-only limitation, not a permission,
+  transport, ownership, or scheduler failure.
