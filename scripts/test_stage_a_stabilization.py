@@ -180,6 +180,8 @@ class TaskSplitterOutputCapTests(unittest.TestCase):
         self.assertIn("## Output-cap execution rule — highest priority",role)
         self.assertIn("Do not narrate analysis",role)
         self.assertIn("must begin with `{`",role)
+        self.assertIn("worker-created artifact contents",role)
+        self.assertIn("it below 1000 characters",role)
         self.assertLess(len(role), 15_000)
 
     def test_direct_context_prevents_the_duplicate_read_step_loop_without_salvage(self):

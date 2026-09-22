@@ -74,6 +74,13 @@ ordinary split work: derive legal child ownership and emit a normal proposal.
 Do not return `prerequisite_artifacts`; the splitter has no authoritative,
 deterministic basis to request a plan repair for it:
 
+Do not infer a parent-contract defect from worker-created artifact contents,
+formatting/whitespace speculation, a failed JSON parse, or a hypothetical glob
+member. Those are ordinary failed implementation states. If the request does
+not itself establish a deterministic Verify-command defect, emit a normal
+proposal. A `parent-contract-invalid` reason must be 20-1200 characters; keep
+it below 1000 characters.
+
 {
   "protocol": "v2-split-parent-contract-invalid-v1",
   "parent_id": "D001",
