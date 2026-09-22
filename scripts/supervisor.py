@@ -1467,6 +1467,93 @@ def recover_false_parent_contract_repair(parent):
     return True,"recovered-one-claim"
 
 
+def _finalize_current_plan_without_rearm():
+    """Compile/guard current source without running supervisor repair side effects."""
+    if not compile_structured_plan():
+        return False
+    try:
+        result=subprocess.run(
+            [sys.executable,str(ROOT/"scripts"/"control-guard.py"),
+             "--project",PROJECT,"--finalize-plan"],
+            capture_output=True,text=True,timeout=8,
+        )
+    except (OSError,subprocess.SubprocessError):
+        return False
+    return result.returncode==0 and plan_ready()
+
+
+def resolve_false_parent_contract_repair(parent):
+    """Retire only the live repair packet created by the disproven assertion.
+
+    The packet is first preserved beside the original split archive.  Current
+    source is then recompiled/finalized directly, deliberately avoiding the
+    supervisor's generic contract-repair rearm logic because this repair was
+    never independently authorized by deterministic Verify validation.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+    status=load_split_status(parent)
+    attempts=load_attempts()
+    entry=(attempts.get("deliverables") or {}).get(parent)
+    recovery=entry.get("false_parent_contract_repair_recovery") if isinstance(entry,dict) else None
+    if not isinstance(recovery,dict) or recovery.get("resolution_archive"):
+        return False,"false-parent-repair-recovery-not-pending"
+    if (
+        status.get("state")!="split-retryable"
+        or status.get("reason")!="operator-authorized-false-parent-contract-repair-recovery"
+        or int(status.get("claim_count") or 0)!=int(recovery.get("prior_claim_count") or -1)
+        or int(status.get("proposal_failures") or 0)!=int(recovery.get("prior_proposal_failures") or -1)
+    ):
+        return False,"split-recovery-state-changed"
+    pending=entry.get("split_rearm_after_contract_repair")
+    if not isinstance(pending,dict) or pending.get("field")!="prerequisite_artifacts":
+        return False,"false-parent-repair-marker-changed"
+    repair_path=Path(PROJECT)/".opencode-v2"/STRUCTURED_PLAN_REPAIR_FILENAME
+    try:
+        repair=load_json_object(repair_path,label="false parent-contract repair packet")
+    except (OSError,StateCorruptionError):
+        return False,"false-parent-repair-packet-missing"
+    errors=repair.get("errors")
+    if (
+        repair.get("protocol")!="v2-structured-plan-repair-v1"
+        or repair.get("source")!="runtime-split-parent-contract"
+        or repair.get("whole_plan") is not False
+        or repair.get("affected_keys")!=[pending.get("structured_key")]
+        or not isinstance(errors,list) or len(errors)!=1
+        or errors[0].get("code")!="runtime-parent-prerequisite-artifacts-missing"
+    ):
+        return False,"false-parent-repair-packet-mismatch"
+
+    archive_dir=Path(PROJECT)/".opencode-v2"/"work"/"contract-repair-history"
+    archive_dir.mkdir(parents=True,exist_ok=True)
+    resolution=archive_dir/f"{parent}.false-parent-contract-repair-resolution.{time.time_ns()}.json"
+    atomic_write_json(resolution,{
+        "owner":"supervisor",
+        "protocol":"v1-false-parent-contract-repair-resolution-v1",
+        "parent_id":parent,
+        "resolved_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        "original_archive":recovery.get("archive"),
+        "rejected_repair_packet":repair,
+        "reason":"deterministically disproven prerequisite-artifacts parent repair",
+    })
+    repair_path.unlink()
+    if not _finalize_current_plan_without_rearm():
+        atomic_write_json(repair_path,repair)
+        return False,"current-plan-finalization-failed"
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            current=(data.get("deliverables") or {}).get(parent)
+            current_recovery=current.get("false_parent_contract_repair_recovery") if isinstance(current,dict) else None
+            if not isinstance(current_recovery,dict) or current_recovery.get("resolution_archive"):
+                return False,"false-parent-repair-recovery-changed"
+            current.pop("split_rearm_after_contract_repair",None)
+            current_recovery["resolution_archive"]=resolution.name
+            current_recovery["resolved_at"]=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+            save_attempts(data)
+    return True,"resolved-current-plan"
+
+
 def recover_splitter_execution_contract(parent, prior_steps):
     """Authorize one audited claim for the exact adjacent splitter-step repair."""
     if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
@@ -7891,7 +7978,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -8105,6 +8192,23 @@ def main():
         print(
             f"FALSE_PARENT_CONTRACT_REPAIR_ALLOW "
             f"parent={args.recover_false_parent_contract_repair} reason={detail}"
+        )
+        return
+    if args.resolve_false_parent_contract_repair:
+        if unknown or not args.project:
+            raise SystemExit("false parent-contract repair resolution requires --project")
+        PROJECT=args.project
+        ok,detail=resolve_false_parent_contract_repair(
+            args.resolve_false_parent_contract_repair
+        )
+        if not ok:
+            raise SystemExit(
+                f"FALSE_PARENT_CONTRACT_REPAIR_RESOLUTION_DENY "
+                f"parent={args.resolve_false_parent_contract_repair} reason={detail}"
+            )
+        print(
+            f"FALSE_PARENT_CONTRACT_REPAIR_RESOLUTION_ALLOW "
+            f"parent={args.resolve_false_parent_contract_repair} reason={detail}"
         )
         return
     if args.recover_splitter_output_limit:

@@ -319,6 +319,25 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         preserved=supervisor.load_attempts()["deliverables"]["D001"]
         self.assertTrue(all(row["classification"]=="bad-plan" for row in preserved["failure_history"]))
         self.assertTrue(supervisor.split_request_path("D001").is_file())
+        repair={
+            "protocol":"v2-structured-plan-repair-v1",
+            "source":"runtime-split-parent-contract","whole_plan":False,
+            "affected_keys":["parent"],
+            "errors":[{"code":"runtime-parent-prerequisite-artifacts-missing"}],
+        }
+        repair_path=self.control/"IMPLEMENTATION_PLAN.repair.json"
+        supervisor.atomic_write_json(repair_path,repair)
+        original_finalizer=supervisor._finalize_current_plan_without_rearm
+        supervisor._finalize_current_plan_without_rearm=lambda: True
+        try:
+            ok,detail=supervisor.resolve_false_parent_contract_repair("D001")
+        finally:
+            supervisor._finalize_current_plan_without_rearm=original_finalizer
+        self.assertEqual((ok,detail),(True,"resolved-current-plan"))
+        self.assertFalse(repair_path.exists())
+        preserved=supervisor.load_attempts()["deliverables"]["D001"]
+        self.assertNotIn("split_rearm_after_contract_repair",preserved)
+        self.assertTrue(preserved["false_parent_contract_repair_recovery"]["resolution_archive"])
         self.assertEqual(supervisor.claim_splitter("D001","claim-seven"),(True,"claimed"))
 
 
