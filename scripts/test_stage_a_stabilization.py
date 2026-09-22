@@ -277,6 +277,50 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         self.assertNotEqual(rejoined["resume_phase"], "recursive-split")
         self.assertNotIn(splitter, deterministic_dispatch.select_actions(rejoined))
 
+    def test_false_parent_contract_repair_recreates_exactly_one_claim_slot(self):
+        self.fail_twice()
+        status={
+            "owner":"supervisor","parent_id":"D001","state":"splitter-active",
+            "generation":1,"claim_count":6,"proposal_failures":5,
+            "recovery_claim_budget":4,"recovery_history":[],
+        }
+        proposal={
+            "protocol":supervisor.SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "field":"prerequisite_artifacts","reason":"missing owned output is not a contract defect",
+        }
+        supervisor.atomic_write_json(supervisor.split_status_path("D001"),status)
+        supervisor.atomic_write_json(supervisor.split_proposal_path("D001"),proposal)
+        archived=supervisor._archive_split_state_for_contract_repair("D001")
+        supervisor._clear_split_request_state_for_contract_repair("D001")
+        data=supervisor.load_attempts()
+        entry=data["deliverables"]["D001"]
+        entry.pop("split_required")
+        for row in entry["failure_history"]:
+            row["classification"]="bad-plan"
+            row["reclassified_by"]="runtime-parent-contract-repair"
+        entry["split_rearm_after_contract_repair"]={
+            "generation":1,"field":"prerequisite_artifacts","structured_key":"parent",
+        }
+        supervisor.save_attempts(data)
+        self.assertTrue(archived.is_file())
+        original_fingerprint=supervisor.task_splitter_direct_context_fingerprint
+        supervisor.task_splitter_direct_context_fingerprint=lambda: "current-direct-context"
+        try:
+            ok,detail=supervisor.recover_false_parent_contract_repair("D001")
+        finally:
+            supervisor.task_splitter_direct_context_fingerprint=original_fingerprint
+        self.assertEqual((ok,detail),(True,"recovered-one-claim"))
+        recovered=supervisor.load_split_status("D001")
+        self.assertEqual(recovered["state"],"split-retryable")
+        self.assertEqual((recovered["claim_count"],recovered["proposal_failures"]),(6,5))
+        self.assertEqual(recovered["recovery_claim_budget"],5)
+        self.assertEqual(supervisor.splitter_claim_limit(recovered),7)
+        preserved=supervisor.load_attempts()["deliverables"]["D001"]
+        self.assertTrue(all(row["classification"]=="bad-plan" for row in preserved["failure_history"]))
+        self.assertTrue(supervisor.split_request_path("D001").is_file())
+        self.assertEqual(supervisor.claim_splitter("D001","claim-seven"),(True,"claimed"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -873,7 +873,8 @@ def save_split_status(did, state, **detail):
         "children","generation","transaction_id","recovery_claim_budget",
         "recovery_history","profile_recovery_fingerprints",
         "execution_contract_recovery_fingerprints",
-        "direct_context_recovery_fingerprints"
+        "direct_context_recovery_fingerprints",
+        "false_parent_contract_repair_recovery_fingerprints",
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -1323,6 +1324,147 @@ def recover_splitter_direct_context_contract(parent):
             lease_until_epoch=0,
         )
     return True,"recovered"
+
+
+def _json_archive_record(value, label):
+    """Decode one historical control record without accepting arbitrary data."""
+    if not isinstance(value,str):
+        raise ValueError(f"{label} is not serialized JSON")
+    try:
+        decoded=json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{label} is invalid JSON") from exc
+    if not isinstance(decoded,dict):
+        raise ValueError(f"{label} is not an object")
+    return decoded
+
+
+def recover_false_parent_contract_repair(parent):
+    """Recreate exactly one lost split slot after a disproven model repair.
+
+    This is intentionally narrower than the ordinary contract-repair path. It
+    accepts only an archived false ``prerequisite_artifacts`` assertion for a
+    parent whose canonical Verify remains deterministically valid, preserves
+    the archived counters, and adds one (not an open-ended) claim slot.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+    if any(path.exists() for path in (
+        split_request_path(parent),split_status_path(parent),split_proposal_path(parent),
+        split_transaction_path(parent),
+    )):
+        return False,"split-state-already-present"
+    manifest=load_manifest()
+    leaf=(manifest.get("leaves") or {}).get(parent)
+    if not isinstance(leaf,dict) or leaf_children(parent):
+        return False,"parent-not-unsplit-leaf"
+    if validate_verify_command(leaf.get("verify_command","")):
+        return False,"parent-verify-command-invalid"
+
+    attempts=load_attempts()
+    entry=(attempts.get("deliverables") or {}).get(parent)
+    pending=entry.get("split_rearm_after_contract_repair") if isinstance(entry,dict) else None
+    if not isinstance(pending,dict) or pending.get("field")!="prerequisite_artifacts":
+        return False,"missing-false-parent-repair-marker"
+    try:
+        generation=int(pending.get("generation") or 0)
+    except (TypeError,ValueError):
+        return False,"invalid-repair-generation"
+    if generation < 1:
+        return False,"invalid-repair-generation"
+
+    archive_dir=Path(PROJECT)/".opencode-v2"/"work"/"contract-repair-history"
+    candidates=[]
+    for path in sorted(archive_dir.glob(f"{parent}.*.json")):
+        try:
+            archive=load_json_object(path,label=f"contract repair archive {path.name}")
+            records=archive.get("records")
+            if archive.get("protocol")!="v2-contract-repair-history-v1" or not isinstance(records,dict):
+                continue
+            status=_json_archive_record(records.get(f"{parent}.split-status.json"),"archived split status")
+            proposal=_json_archive_record(records.get(f"{parent}.split-proposal.json"),"archived split proposal")
+            request=_json_archive_record(records.get(f"{parent}.split-request.json"),"archived split request")
+            if (
+                status.get("state")!="splitter-active"
+                or proposal.get("protocol")!=SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL
+                or proposal.get("field")!="prerequisite_artifacts"
+                or proposal.get("parent_id")!=parent
+                or request.get("parent_id")!=parent
+                or int(status.get("generation") or 0)!=generation
+                or int(proposal.get("generation") or 0)!=generation
+                or int(request.get("generation") or 0)!=generation
+            ):
+                continue
+            candidates.append((path,status))
+        except (OSError,StateCorruptionError,ValueError,TypeError):
+            continue
+    if len(candidates)!=1:
+        return False,"false-parent-repair-archive-not-unique"
+    archive_path,archived_status=candidates[0]
+    claims=int(archived_status.get("claim_count") or 0)
+    failures=int(archived_status.get("proposal_failures") or 0)
+    budget=int(archived_status.get("recovery_claim_budget") or 0)
+    if (
+        claims < 1 or failures < 1 or failures > claims
+        or claims != splitter_claim_limit(archived_status)
+    ):
+        return False,"archived-split-counters-not-terminal"
+    try:
+        direct_context=task_splitter_direct_context_fingerprint()
+    except (OSError,RuntimeError) as exc:
+        return False,str(exc)
+    fingerprint=hashlib.sha256(json.dumps({
+        "protocol":"v1-false-parent-contract-repair-recovery",
+        "archive":archive_path.name,"generation":generation,
+        "claims":claims,"failures":failures,"direct_context_contract":direct_context,
+    },sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+
+    # Recreate a current canonical request from current manifest/evidence. Do
+    # not resurrect the archived model prompt, stale state version, or lease.
+    with splitter_state_lock(parent):
+        with dispatch_lock:
+            with attempt_lock():
+                data=load_attempts()
+                current=(data.get("deliverables") or {}).get(parent)
+                current_pending=current.get("split_rearm_after_contract_repair") if isinstance(current,dict) else None
+                if not isinstance(current_pending,dict) or current_pending.get("field")!="prerequisite_artifacts":
+                    return False,"false-parent-repair-marker-changed"
+                if current.get("split_required"):
+                    return False,"split-marker-already-present"
+                # Preserve historical reclassification exactly; this marker is
+                # a recovery edge, not evidence rewriting.
+                current["split_required"]={
+                    "generation":generation,
+                    "reason":"operator-authorized-false-parent-contract-repair-recovery",
+                    "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                }
+                current["false_parent_contract_repair_recovery"]={
+                    "archive":archive_path.name,"generation":generation,
+                    "prior_claim_count":claims,"prior_proposal_failures":failures,
+                    "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                }
+                save_attempts(data)
+            ok,detail=split_request(parent)
+            if not ok:
+                raise StateCorruptionError(f"{parent} recovery could not materialize split request: {detail}")
+            history=list(archived_status.get("recovery_history") or [])
+            history.append({
+                "prior_claim_count":claims,"prior_proposal_failures":failures,
+                "reason":"false-parent-contract-repair-recovery",
+                "archive":archive_path.name,
+                "direct_context_contract_fingerprint":direct_context,
+            })
+            save_split_status(
+                parent,"split-retryable",generation=generation,
+                claim_count=claims,proposal_failures=failures,
+                # Exactly one replacement slot: claim 7. A rejected claim 7
+                # reaches the finite limit and cannot silently become claim 8.
+                recovery_claim_budget=budget+1,recovery_history=history,
+                false_parent_contract_repair_recovery_fingerprints=[fingerprint],
+                reason="operator-authorized-false-parent-contract-repair-recovery",
+                lease_until_epoch=0,
+            )
+    return True,"recovered-one-claim"
 
 
 def recover_splitter_execution_contract(parent, prior_steps):
@@ -7749,7 +7891,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -7947,6 +8089,23 @@ def main():
         if not ok:
             raise SystemExit(f"SPLIT_DIRECT_CONTEXT_RECOVERY_DENY parent={args.recover_splitter_direct_context_contract} reason={detail}")
         print(f"SPLIT_DIRECT_CONTEXT_RECOVERY_ALLOW parent={args.recover_splitter_direct_context_contract} reason={detail}")
+        return
+    if args.recover_false_parent_contract_repair:
+        if unknown or not args.project:
+            raise SystemExit("false parent-contract repair recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_false_parent_contract_repair(
+            args.recover_false_parent_contract_repair
+        )
+        if not ok:
+            raise SystemExit(
+                f"FALSE_PARENT_CONTRACT_REPAIR_RECOVERY_DENY "
+                f"parent={args.recover_false_parent_contract_repair} reason={detail}"
+            )
+        print(
+            f"FALSE_PARENT_CONTRACT_REPAIR_ALLOW "
+            f"parent={args.recover_false_parent_contract_repair} reason={detail}"
+        )
         return
     if args.recover_splitter_output_limit:
         if unknown or not args.project:
