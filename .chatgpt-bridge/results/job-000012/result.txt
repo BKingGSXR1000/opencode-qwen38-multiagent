@@ -1,0 +1,682 @@
+======================================================================
+JOB: job-000012
+JOB_COMMIT: b973f097f5a5bd34bcc92570ea04d97de6d93ec1
+STARTED: 2026-09-22T19:17:09Z
+======================================================================
+
+=== TARGET ===
+repo=/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831
+project=/tmp/a2-d003b-corrective-canary.oTDlKK/project
+branch=a2-v11831-integration
+head=23cce479d25f1a1b90dbf2a141b6525be78c5264
+
+=== EXISTING CORRECTIVE CANARY PROCESS ===
+  50811   45429 python3 scripts/supervisor.py --project /tmp/a2-d003b-corrective-canary.oTDlKK/project
+
+=== EXISTING PROJECT TOP LEVEL ===
+2026-09-22 21:17:09.0766495880 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/decision.json
+2026-09-22 21:17:09.0698148890 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/split.json
+2026-09-22 21:17:09.0616916990 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/blockers.json
+2026-09-22 21:17:09.0525060880 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/eligible.json
+2026-09-22 20:45:39.0952471230 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/deterministic-shadow.json
+2026-09-22 20:45:38.9593364970 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/control-status.json
+2026-09-22 13:21:10.7727782900 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.split-transaction.json
+2026-09-22 13:21:10.7694160700 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.split-status.json
+2026-09-22 13:21:10.7652178250 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/splits.json
+2026-09-22 13:21:10.7613876360 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/split-leaves.json
+2026-09-22 13:21:10.7576905400 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.guard.json
+2026-09-22 13:21:10.7544902120 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B2.scope.md
+2026-09-22 13:21:10.7512719490 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B1.scope.md
+2026-09-22 13:21:10.7192771530 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/attempts.json.lock
+2026-09-22 13:21:10.7052772160 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.splitter.lock
+2026-09-22 13:20:59.2896443540 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/stage-a-controller-executions.json
+2026-09-22 13:20:59.2823294640 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/stage-a-controller.lock
+2026-09-22 08:41:43.4211763610 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/supervisor.pid
+2026-09-22 08:40:46.1992416080 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.ready
+2026-09-22 08:40:45.9307354290 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/ACCEPTANCE.ready
+2026-09-22 08:40:45.8732469580 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.structured-map.json
+2026-09-22 08:40:45.8524285720 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.md
+2026-09-22 08:40:45.8140001980 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/GLOBAL_LESSONS.md
+2026-09-22 08:36:24.2273772270 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/attempts.json
+2026-09-22 08:36:24.2219847860 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.verify-evidence.json
+2026-09-22 08:36:24.2002506860 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-A.ready
+2026-09-22 08:36:24.1948046930 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-A.progress.md
+2026-09-22 08:36:24.1855799010 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.split-transaction.json
+2026-09-22 08:36:24.1824129330 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.split-status.json
+2026-09-22 08:36:24.1691979610 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.scope.md
+2026-09-22 08:36:24.1661279690 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-A.scope.md
+2026-09-22 08:36:24.1283334910 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.verify-evidence.json
+2026-09-22 08:36:24.1038068130 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/probes/ephemeris_moons.json
+2026-09-22 08:36:24.1036192740 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D002.ready
+2026-09-22 08:36:24.0980967010 /tmp/a2-d003b-corrective-canary.oTDlKK/project/precondition.txt
+2026-09-22 08:36:24.0979491400 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D001.ready
+2026-09-22 08:36:24.0927536820 /tmp/a2-d003b-corrective-canary.oTDlKK/project/bootstrap.txt
+2026-09-22 08:36:24.0054556650 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.structured.json
+2026-09-22 08:36:24.0018155960 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/ACCEPTANCE.md
+2026-09-22 08:36:23.9877113310 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/bin/control-status
+2026-09-22 08:36:23.9836119740 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/bin/run-checks
+2026-09-22 08:36:23.9762905910 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/CONTROL_CONTRACT.md
+2026-09-22 08:36:23.9344241520 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/ORIGINAL_TASK.md
+2026-09-22 08:36:23.9337520270 /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/.stage-a-bootstrap.lock
+
+=== SPLITTER/CORRECTIVE STATE FILES ===
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/bin/control-status
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/CONTROL_CONTRACT.md
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/control-status.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/split.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.split-status.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.splitter.lock
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.split-transaction.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.split-status.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.split-transaction.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/split-leaves.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/splits.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/stage-a-controller-executions.json
+/tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/stage-a-controller.lock
+
+=== RELEVANT CONTENT FROM SMALL STATE FILES ===
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/bootstrap.txt (10 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/control-status.json (9934 bytes) ---
+37:      "total_dispatches": 1,
+38:      "unmaterialized_dispatch_reusable": false,
+40:      "verification_wait_session": "",
+70:      "total_dispatches": 1,
+71:      "unmaterialized_dispatch_reusable": false,
+73:      "verification_wait_session": "",
+76:    "D003": {
+99:        "D003-A",
+100:        "D003-B"
+105:      "split_state": "accepted",
+106:      "total_dispatches": 2,
+107:      "unmaterialized_dispatch_reusable": false,
+109:      "verification_wait_session": "",
+112:    "D003-A": {
+139:      "total_dispatches": 1,
+140:      "unmaterialized_dispatch_reusable": false,
+142:      "verification_wait_session": "",
+145:    "D003-B": {
+168:        "D003-B1",
+169:        "D003-B2"
+174:      "split_state": "accepted",
+175:      "total_dispatches": 2,
+176:      "unmaterialized_dispatch_reusable": false,
+178:      "verification_wait_session": "",
+181:    "D003-B1": {
+208:      "total_dispatches": 0,
+209:      "unmaterialized_dispatch_reusable": false,
+211:      "verification_wait_session": "",
+214:    "D003-B2": {
+229:        "D003-B1"
+243:      "total_dispatches": 0,
+244:      "unmaterialized_dispatch_reusable": false,
+246:      "verification_wait_session": "",
+264:        "D003"
+278:      "total_dispatches": 0,
+279:      "unmaterialized_dispatch_reusable": false,
+281:      "verification_wait_session": "",
+292:  "project": "/tmp/a2-d003b-corrective-canary.oTDlKK/project",
+299:    "productive_sessions": 0,
+307:    "error": "RuntimeError: scheduler_db_unavailable: v1 session status unavailable: <urlopen error [Errno 111] Connection refused>",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.guard.json (12197 bytes) ---
+51:    "D003": {
+59:      "id": "D003",
+76:        "D003-A",
+77:        "D003-B"
+84:    "D003-A": {
+90:      "id": "D003-A",
+101:      "parent": "D003",
+113:      "verify_command": "python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-A.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"",
+117:    "D003-B": {
+125:      "id": "D003-B",
+130:        "D003-A"
+140:      "parent": "D003",
+145:        "D003-B1",
+146:        "D003-B2"
+154:      "split_handoff_source": "D003-A",
+162:    "D003-B1": {
+168:      "id": "D003-B1",
+173:        "D003-A"
+180:      "parent": "D003-B",
+193:      "verify_command": "python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-B1.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"",
+197:    "D003-B2": {
+205:      "id": "D003-B2",
+210:        "D003-A",
+211:        "D003-B1"
+221:      "parent": "D003-B",
+232:      "split_handoff_source": "D003-B1",
+252:        "D003"
+268:  "project": "/tmp/a2-d003b-corrective-canary.oTDlKK/project",
+274:    "D003": 2,
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.structured.json (3101 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/IMPLEMENTATION_PLAN.structured-map.json (561 bytes) ---
+5:    "D003": "fixture_probe_moons",
+12:    "fixture_probe_moons": "D003"
+22:      "D003"
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/probes/ephemeris_moons.json (107 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/blockers.json (435 bytes) ---
+1:{"execution_blockers":[],"protocol":"v2-materialized-control-query-v1","resume_phase":"execution","scheduler":{"active_deliverables":[],"active_workers":0,"available_worker_slots":0,"error":"RuntimeError: scheduler_db_unavailable: v1 session status unavailable: <urlopen error [Errno 111] Connection refused>","max_concurrent_workers":5,"reserved_workers":0},"source_bytes":9934,"state_error":false,"state_version":"cc508495f3686039"}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/decision.json (985 bytes) ---
+1:{"acceptance":{"complete":true,"next_action":"ready"},"acceptance_complete":true,"acceptance_validation_complete":false,"eligible":["D003-B1"],"eligible_roles":{"D003-B1":"probe-builder"},"execution_blockers":[],"plan":{"blocked":false,"complete":true,"next_action":"ready","planner_failures":0,"repair_affected_keys":[],"repair_whole_plan":false},"protocol":"v2-materialized-control-query-v1","reference":{"attempts":0,"foundation_state":"not-required","max_attempts":3,"policy":"none","productive_sessions":0,"stagnant_tail":0},"reference_validation":{"state":"not-required"},"resume_phase":"execution","scheduler":{"active_deliverables":[],"active_workers":0,"available_worker_slots":0,"error":"RuntimeError: scheduler_db_unavailable: v1 session status unavailable: <urlopen error [Errno 111] Connection refused>","max_concurrent_workers":5,"reserved_workers":0},"source_bytes":9934,"split_required":[],"state_error":false,"state_version":"cc508495f3686039","tests_complete":false}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/deterministic-shadow.json (238 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/eligible.json (479 bytes) ---
+1:{"eligible":["D003-B1"],"eligible_roles":{"D003-B1":"probe-builder"},"protocol":"v2-materialized-control-query-v1","resume_phase":"execution","scheduler":{"active_deliverables":[],"active_workers":0,"available_worker_slots":0,"error":"RuntimeError: scheduler_db_unavailable: v1 session status unavailable: <urlopen error [Errno 111] Connection refused>","max_concurrent_workers":5,"reserved_workers":0},"source_bytes":9934,"state_error":false,"state_version":"cc508495f3686039"}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D001-context.json (855 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D001.json (671 bytes) ---
+1:{"allowed_attempts":2,"attempt_ledger_valid":true,"attempt_limit_reached":false,"attempts":1,"automatic_attempts_consumed":1,"automatic_limit":2,"complete":true,"contract_deps_missing":[],"deliverable":"D001","eligible":false,"ineligibility_reasons":["complete"],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"implementer","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":1,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D002-context.json (861 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D002.json (671 bytes) ---
+1:{"allowed_attempts":2,"attempt_ledger_valid":true,"attempt_limit_reached":false,"attempts":1,"automatic_attempts_consumed":1,"automatic_limit":2,"complete":true,"contract_deps_missing":[],"deliverable":"D002","eligible":false,"ineligibility_reasons":["complete"],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"implementer","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":1,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-A-context.json (3564 bytes) ---
+1:{"acceptance_ids":[],"acceptance_musts":[],"complexity":"S","context_error":"","contract_deps":[],"contract_version":"d45b30a1cb3bfc9a","creates_or_updates":[],"current_progress":"HANDOFF_READY: true\n\nFindings:\nfixture handoff\n\nEvidence:\nbootstrap.txt\n\nNext step:\nwriter creates owned moon records\n","deep_reasoning":false,"deliverable":"D003-A","done_when":"Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; no project artifact is modified.","launch_deps":["D001","D002"],"name":"Record one bounded Galilean-moon acquisition handoff","outcome":"Record one bounded Galilean-moon acquisition handoff","owned_artifact_paths":[],"owned_artifacts":"none","parent_acceptance_ids":["A003"],"parent_acceptance_musts":[{"id":"A003","text":"The moons fixture uses valid records."}],"parent_outcome_context":"Frozen non-error VECTORS records exist for commands 501, 502, 503, and 504.","protocol":"v2-leaf-context-v1","reads_existing":["bootstrap.txt"],"reference_policy":"none","repeated_operations":0,"role":"probe-builder","source_kind":"split-child","split_handoff_only":true,"split_handoff_source":"","split_scope":"# D003-A split-child scope\n\nParent: D003\n\n## Parent contract boundary \u2014 supervisor preserved\n\nThe parent outcome is retained for eventual parent collapse and for the dependent writer. It is CONTEXT ONLY for THIS progress child: it does NOT expand this child's executable work. The complete executable obligation for THIS child is the bounded Child scope below. Do not perform parent work that is not explicitly named in that Child scope.\n\nParent outcome (context only): Frozen non-error VECTORS records exist for commands 501, 502, 503, and 504.\n\n## Progress-only handoff protocol \u2014 supervisor enforced\n\nTHIS child must NOT create or modify the final project artifact or attempt the final parent output. Its complete deliverable is only the bounded discovery/acquisition/diagnosis in Child scope plus the durable progress handoff below. Record reusable results in `.opencode-v2/work/D003-A.progress.md` using all of these exact labels:\n\n`HANDOFF_READY: true`\n\n`Findings:`\n\n`Evidence:`\n\n`Next step:`\n\nThe progress file is this child's durable deliverable. Keep concrete IDs, commands, API shapes, paths, values, or failure causes needed by the dependent writer so it does not repeat the probe.\n\n## Bounded child decomposition\n\nThe following Child scope is authoritative and complete for THIS progress-only child. Do not infer additional executable work from the parent outcome above.\n\nChild scope: Record one bounded Galilean-moon acquisition handoff\n\nOwned artifacts: none\n\nChild Verify command: `python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-A.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"`\n\nChild Done when: Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; no project artifact is modified.\n","verify_command":"python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-A.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"","verify_deps":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-A.json (675 bytes) ---
+1:{"allowed_attempts":3,"attempt_ledger_valid":true,"attempt_limit_reached":false,"attempts":1,"automatic_attempts_consumed":1,"automatic_limit":3,"complete":true,"contract_deps_missing":[],"deliverable":"D003-A","eligible":false,"ineligibility_reasons":["complete"],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"probe-builder","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":1,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-B1-context.json (4785 bytes) ---
+1:{"acceptance_ids":[],"acceptance_musts":[],"complexity":"S","context_error":"","contract_deps":[],"contract_version":"81770502103f6149","creates_or_updates":[],"current_progress":"","deep_reasoning":false,"deliverable":"D003-B1","done_when":"Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; no project artifact is modified.","launch_deps":["D001","D002","D003-A"],"name":"Probe and diagnose why the canonical moons Verify reported missing moons JSON records: inspect `.opencode-v2/probes/ephemeris_moons.json` for a non-empty `commands` map with at least four entries and check `fixtures/vectors/moons/` for at least four `.json` records each at least 200 chars, containing a `$$SOE` or `X =` field and no 404/error marker. Record findings, evidence, and the exact record-acquisition/creation next step in this child's progress handoff without creating the final records.","outcome":"Probe and diagnose why the canonical moons Verify reported missing moons JSON records: inspect `.opencode-v2/probes/ephemeris_moons.json` for a non-empty `commands` map with at least four entries and check `fixtures/vectors/moons/` for at least four `.json` records each at least 200 chars, containing a `$$SOE` or `X =` field and no 404/error marker. Record findings, evidence, and the exact record-acquisition/creation next step in this child's progress handoff without creating the final records.","owned_artifact_paths":[],"owned_artifacts":"none","parent_acceptance_ids":["A003"],"parent_acceptance_musts":[{"id":"A003","text":"The moons fixture uses valid records."}],"parent_outcome_context":"Create the frozen Galilean-moon probe records","protocol":"v2-leaf-context-v1","reads_existing":[".opencode-v2/probes/ephemeris_moons.json","fixtures/vectors/moons"],"reference_policy":"none","repeated_operations":0,"role":"probe-builder","source_kind":"split-child","split_handoff_only":true,"split_handoff_source":"","split_scope":"# D003-B1 split-child scope\n\nParent: D003-B\n\n## Parent contract boundary \u2014 supervisor preserved\n\nThe parent outcome is retained for eventual parent collapse and for the dependent writer. It is CONTEXT ONLY for THIS progress child: it does NOT expand this child's executable work. The complete executable obligation for THIS child is the bounded Child scope below. Do not perform parent work that is not explicitly named in that Child scope.\n\nParent outcome (context only): Create the frozen Galilean-moon probe records\n\n## Progress-only handoff protocol \u2014 supervisor enforced\n\nTHIS child must NOT create or modify the final project artifact or attempt the final parent output. Its complete deliverable is only the bounded discovery/acquisition/diagnosis in Child scope plus the durable progress handoff below. Record reusable results in `.opencode-v2/work/D003-B1.progress.md` using all of these exact labels:\n\n`HANDOFF_READY: true`\n\n`Findings:`\n\n`Evidence:`\n\n`Next step:`\n\nThe progress file is this child's durable deliverable. Keep concrete IDs, commands, API shapes, paths, values, or failure causes needed by the dependent writer so it does not repeat the probe.\n\n## Bounded child decomposition\n\nThe following Child scope is authoritative and complete for THIS progress-only child. Do not infer additional executable work from the parent outcome above.\n\nChild scope: Probe and diagnose why the canonical moons Verify reported missing moons JSON records: inspect `.opencode-v2/probes/ephemeris_moons.json` for a non-empty `commands` map with at least four entries and check `fixtures/vectors/moons/` for at least four `.json` records each at least 200 chars, containing a `$$SOE` or `X =` field and no 404/error marker. Record findings, evidence, and the exact record-acquisition/creation next step in this child's progress handoff without creating the final records.\n\nOwned artifacts: none\n\nChild Verify command: `python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-B1.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"`\n\nChild Done when: Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; no project artifact is modified.\n","verify_command":"python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-B1.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"","verify_deps":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-B1.json (666 bytes) ---
+1:{"allowed_attempts":3,"attempt_ledger_valid":true,"attempt_limit_reached":false,"attempts":0,"automatic_attempts_consumed":0,"automatic_limit":3,"complete":false,"contract_deps_missing":[],"deliverable":"D003-B1","eligible":true,"ineligibility_reasons":[],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"probe-builder","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":0,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-B2-context.json (5332 bytes) ---
+1:{"acceptance_ids":["A003"],"acceptance_musts":[{"id":"A003","text":"The moons fixture uses valid records."}],"complexity":"S","context_error":"","contract_deps":[],"contract_version":"018fcce35a872ae4","creates_or_updates":[".opencode-v2/probes/ephemeris_moons.json","fixtures/vectors/moons"],"current_progress":"","deep_reasoning":false,"deliverable":"D003-B2","done_when":"The owned probe and records satisfy the exact parent Verify.","launch_deps":["D001","D002","D003-A","D003-B1"],"name":"Consume the predecessor handoff and complete the frozen Galilean-moon probe records: ensure `.opencode-v2/probes/ephemeris_moons.json` has a `commands` object with at least four entries and `fixtures/vectors/moons/` contains at least four `.json` records, each at least 200 characters containing a `$$SOE` or `X =` field and no 404 or error text.","outcome":"Consume the predecessor handoff and complete the frozen Galilean-moon probe records: ensure `.opencode-v2/probes/ephemeris_moons.json` has a `commands` object with at least four entries and `fixtures/vectors/moons/` contains at least four `.json` records, each at least 200 characters containing a `$$SOE` or `X =` field and no 404 or error text.","owned_artifact_paths":[".opencode-v2/probes/ephemeris_moons.json","fixtures/vectors/moons/"],"owned_artifacts":"`.opencode-v2/probes/ephemeris_moons.json`, `fixtures/vectors/moons/`","parent_acceptance_ids":["A003"],"parent_acceptance_musts":[{"id":"A003","text":"The moons fixture uses valid records."}],"parent_outcome_context":"Create the frozen Galilean-moon probe records","protocol":"v2-leaf-context-v1","reads_existing":[".opencode-v2/probes/ephemeris_moons.json","fixtures/vectors/moons"],"reference_policy":"none","repeated_operations":0,"role":"implementer","source_kind":"split-child","split_handoff_only":false,"split_handoff_source":"D003-B1","split_scope":"# D003-B2 split-child scope\n\nParent: D003-B\n\n## Parent contract boundary \u2014 supervisor preserved\n\nThe parent outcome below is CONTEXT ONLY for THIS split child. It is retained verbatim so literals and domain meaning are not lost, but it does NOT expand this child's executable work. The supervisor enforces the complete parent outcome, parent Verify, and parent Done-when later when collapsing the split.\n\nParent outcome (context only): Create the frozen Galilean-moon probe records\n\nParent Acceptance IDs (context): A003\n\nImmediate parent Verify command (parent finalization only): `test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4||!fs.statSync(p).isDirectory())process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'`\n\nImmediate parent Done when (parent finalization only): The owned probe and records satisfy the exact parent Verify.\n\n## Required predecessor handoff \u2014 supervisor enforced\n\nBefore doing project work, read `.opencode-v2/work/D003-B1.progress.md`. Treat its concrete findings/evidence as the durable result of the prior bounded probe. Consume that handoff and finish the artifact stage; do not repeat the predecessor's investigation unless direct validation disproves it.\n\n## Bounded child decomposition\n\nThe following Child scope, Owned artifacts, Child Verify, and Child Done-when are the COMPLETE executable obligation for THIS child. Do not perform other parent work merely because it appears in parent context above.\n\nChild scope: Consume the predecessor handoff and complete the frozen Galilean-moon probe records: ensure `.opencode-v2/probes/ephemeris_moons.json` has a `commands` object with at least four entries and `fixtures/vectors/moons/` contains at least four `.json` records, each at least 200 characters containing a `$$SOE` or `X =` field and no 404 or error text.\n\nOwned artifacts: `.opencode-v2/probes/ephemeris_moons.json`, `fixtures/vectors/moons/`\n\nChild Verify command: `test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4)process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'`\n\nChild Done when: The owned probe and records satisfy the exact parent Verify.\n","verify_command":"test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4)process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'","verify_deps":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-B2.json (695 bytes) ---
+1:{"allowed_attempts":3,"attempt_ledger_valid":true,"attempt_limit_reached":false,"attempts":0,"automatic_attempts_consumed":0,"automatic_limit":3,"complete":false,"contract_deps_missing":[],"deliverable":"D003-B2","eligible":false,"ineligibility_reasons":["launch_deps_missing"],"infrastructure_grants_remaining":0,"launch_deps_missing":["D003-B1"],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"implementer","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":0,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003-B.json (713 bytes) ---
+1:{"allowed_attempts":2,"attempt_ledger_valid":true,"attempt_limit_reached":true,"attempts":2,"automatic_attempts_consumed":2,"automatic_limit":2,"complete":false,"contract_deps_missing":[],"deliverable":"D003-B","eligible":false,"ineligibility_reasons":["attempt_limit_reached"],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"implementer","running":false,"split_children":["D003-B1","D003-B2"],"split_generation":0,"split_required":false,"split_state":"accepted","total_dispatches":2,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D003.json (711 bytes) ---
+1:{"allowed_attempts":2,"attempt_ledger_valid":true,"attempt_limit_reached":true,"attempts":2,"automatic_attempts_consumed":2,"automatic_limit":2,"complete":false,"contract_deps_missing":[],"deliverable":"D003","eligible":false,"ineligibility_reasons":["attempt_limit_reached"],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"probe-builder","running":false,"split_children":["D003-A","D003-B"],"split_generation":0,"split_required":false,"split_state":"accepted","total_dispatches":2,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D004-context.json (917 bytes) ---
+1:{"acceptance_ids":["A004"],"acceptance_musts":[{"id":"A004","text":"Canonical final checks are recorded."}],"complexity":"S","context_error":"","contract_deps":[],"contract_version":"6d8a7bf3bbeb78a5","creates_or_updates":[],"current_progress":"","deep_reasoning":false,"deliverable":"D004","done_when":"The canonical test manifest is ready.","launch_deps":["D003"],"name":"Record final canary checks","outcome":"The canonical test manifest is available.","owned_artifact_paths":[".opencode-v2/TEST_CHECKS.json"],"owned_artifacts":"`.opencode-v2/TEST_CHECKS.json`","parent_acceptance_ids":[],"parent_acceptance_musts":[],"parent_outcome_context":"","protocol":"v2-leaf-context-v1","reads_existing":[],"reference_policy":"none","repeated_operations":0,"role":"test-builder","source_kind":"plan-leaf","split_handoff_only":false,"split_handoff_source":"","verify_command":".opencode-v2/bin/run-checks","verify_deps":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/leaves/D004.json (690 bytes) ---
+1:{"allowed_attempts":3,"attempt_ledger_valid":true,"attempt_limit_reached":false,"attempts":0,"automatic_attempts_consumed":0,"automatic_limit":3,"complete":false,"contract_deps_missing":[],"deliverable":"D004","eligible":false,"ineligibility_reasons":["launch_deps_missing"],"infrastructure_grants_remaining":0,"launch_deps_missing":["D003"],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"test-builder","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":0,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/query/split.json (170 bytes) ---
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/attempts.json (2014 bytes) ---
+7:      "sessions": [
+15:      "sessions": [
+19:    "D003": {
+38:      "sessions": [
+39:        "fixture-parent-D003-1",
+40:        "fixture-parent-D003-2"
+48:    "D003-A": {
+51:      "sessions": [
+52:        "fixture-D003-A-handoff"
+55:    "D003-B": {
+74:      "sessions": [
+75:        "synthetic-D003-B-1",
+76:        "synthetic-D003-B-2"
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.split-status.json (278 bytes) ---
+3:    "D003-B1",
+4:    "D003-B2"
+6:  "claim_count": 1,
+10:  "parent_id": "D003-B",
+11:  "state": "accepted",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.split-transaction.json (5261 bytes) ---
+3:    "D003-B1": {
+9:      "id": "D003-B1",
+14:        "D003-A"
+21:      "parent": "D003-B",
+34:      "verify_command": "python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-B1.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"",
+38:    "D003-B2": {
+46:      "id": "D003-B2",
+51:        "D003-A",
+52:        "D003-B1"
+62:      "parent": "D003-B",
+73:      "split_handoff_source": "D003-B1",
+84:    "D003-B1",
+85:    "D003-B2"
+90:  "parent_id": "D003-B",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003-B.verify-evidence.json (2603 bytes) ---
+2:  "deliverable": "D003-B",
+11:      "session": "synthetic-D003-B-1",
+23:      "session": "synthetic-D003-B-2",
+36:    "session": "synthetic-D003-B-2",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.split-status.json (254 bytes) ---
+3:    "D003-A",
+4:    "D003-B"
+9:  "parent_id": "D003",
+10:  "state": "accepted",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.split-transaction.json (3683 bytes) ---
+3:    "D003-A": {
+9:      "id": "D003-A",
+20:      "parent": "D003",
+32:      "verify_command": "python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-A.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"",
+36:    "D003-B": {
+44:      "id": "D003-B",
+49:        "D003-A"
+59:      "parent": "D003",
+70:      "split_handoff_source": "D003-A",
+80:    "D003-A",
+81:    "D003-B"
+86:  "parent_id": "D003",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/D003.verify-evidence.json (2610 bytes) ---
+2:  "deliverable": "D003",
+11:      "session": "fixture-parent-D003-1",
+23:      "session": "fixture-parent-D003-2",
+36:    "session": "fixture-parent-D003-2",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/split-leaves.json (9395 bytes) ---
+4:    "D003": {
+6:        "D003-A": {
+12:          "id": "D003-A",
+23:          "parent": "D003",
+35:          "verify_command": "python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-A.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"",
+39:        "D003-B": {
+47:          "id": "D003-B",
+52:            "D003-A"
+62:          "parent": "D003",
+73:          "split_handoff_source": "D003-A",
+83:        "D003-A",
+84:        "D003-B"
+89:    "D003-B": {
+91:        "D003-B1": {
+97:          "id": "D003-B1",
+102:            "D003-A"
+109:          "parent": "D003-B",
+122:          "verify_command": "python3 -c \"from pathlib import Path; t=Path('.opencode-v2/work/D003-B1.progress.md').read_text(); lines=[x.strip() for x in t.splitlines()]; markers=[x for x in lines if x.startswith('HANDOFF_READY:')]; assert markers==['HANDOFF_READY: true']; assert all(x in lines for x in ('Findings:','Evidence:','Next step:')); assert len(t.strip()) >= 80\"",
+126:        "D003-B2": {
+134:          "id": "D003-B2",
+139:            "D003-A",
+140:            "D003-B1"
+150:          "parent": "D003-B",
+161:          "split_handoff_source": "D003-B1",
+172:        "D003-B1",
+173:        "D003-B2"
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/splits.json (543 bytes) ---
+3:  "protocol": "v2-task-split-proposal-v2",
+7:        "D003-A",
+8:        "D003-B"
+10:      "parent": "D003",
+17:        "D003-B1",
+18:        "D003-B2"
+20:      "parent": "D003-B",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/.opencode-v2/work/stage-a-controller-executions.json (848 bytes) ---
+5:        "agent": "task-splitter",
+6:        "deliverable": "D003-B",
+12:        "sessions": [
+13:          "synthetic-D003-B-1",
+14:          "synthetic-D003-B-2"
+20:      "root_session": "ses_f382943eaffewNUQaNN8DMUYuP",
+
+--- /tmp/a2-d003b-corrective-canary.oTDlKK/project/precondition.txt (13 bytes) ---
+
+=== CANARY CREATOR CONTRACT ===
+5:import argparse
+209:            request["canary_first_turn_instruction"]=(
+211:                "response to be exactly CANARY_FIRST_RESPONSE_INVALID, with no "
+252:    ap=argparse.ArgumentParser(description=__doc__)
+253:    ap.add_argument("--project",type=Path); ap.add_argument("--task-file",type=Path)
+254:    ap.add_argument("--selftest",action="store_true")
+255:    ap.add_argument("--d003-b-equivalent",action="store_true")
+256:    ap.add_argument("--first-turn-invalid",action="store_true",
+
+=== SAVED V5 DIAGNOSTIC SCRIPT ===
+#!/usr/bin/env bash
+set -uo pipefail
+
+BASE="/home/bking/AI/a2-canaries/20260922-184222"
+PROJECT="$BASE/project"
+
+ROOT_SESSION="ses_f3600b189ffetLKGxVNz975KV2"
+CHILD_SESSION="ses_f3600af1effeNAMtT5W5jStBxL"
+EXECUTION_ID="6559443846905786a5bbeeb530d6714280ba82768d70bda10e33d17bd837579a"
+DISPATCH_TOKEN="prt_0c9ff506d001R2AZw8KFtLwSPI"
+
+OUT="$HOME/Downloads/a2-d003b-primary-lifecycle-diagnosis-$(date +%Y%m%d-%H%M%S).txt"
+
+mkdir -p "$HOME/Downloads"
+
+exec > >(tee "$OUT") 2>&1
+
+section() {
+    echo
+    echo "======================================================================"
+    echo "$1"
+    echo "======================================================================"
+}
+
+section "D003-B corrective canary v5 — read-only lifecycle diagnosis"
+date --iso-8601=seconds
+echo "BASE=$BASE"
+echo "PROJECT=$PROJECT"
+echo "ROOT_SESSION=$ROOT_SESSION"
+echo "CHILD_SESSION=$CHILD_SESSION"
+echo "EXECUTION_ID=$EXECUTION_ID"
+echo "DISPATCH_TOKEN=$DISPATCH_TOKEN"
+
+section "Canary directory existence"
+for p in "$BASE" "$PROJECT" "$PROJECT/.opencode-v2" "$PROJECT/.opencode-v2/work"; do
+    if [[ -e "$p" ]]; then
+        echo "EXISTS: $p"
+    else
+        echo "MISSING: $p"
+    fi
+done
+
+section "Current D003-B durable files"
+if [[ -d "$PROJECT/.opencode-v2/work" ]]; then
+    find "$PROJECT/.opencode-v2/work" \
+        -maxdepth 1 -type f \
+        \( -name 'D003-B*' -o \
+           -name 'root-session.json' -o \
+           -name 'stage-a-controller-executions.json' \) \
+        -printf '%TY-%Tm-%Td %TH:%TM:%TS  %10s  %p\n' 2>/dev/null \
+        | sort
+fi
+
+for f in \
+    "$PROJECT/.opencode-v2/work/root-session.json" \
+    "$PROJECT/.opencode-v2/work/stage-a-controller-executions.json" \
+    "$PROJECT/.opencode-v2/work/D003-B.split-status.json" \
+    "$PROJECT/.opencode-v2/work/D003-B.split-request.json" \
+    "$PROJECT/.opencode-v2/work/D003-B.splitter-primary-response-1.txt" \
+    "$PROJECT/.opencode-v2/work/D003-B.splitter-corrective-response-1.txt" \
+    "$PROJECT/.opencode-v2/work/D003-B.splitter.lock"
+do
+    echo
+    echo "----- $f -----"
+    if [[ -f "$f" ]]; then
+        cat "$f"
+    else
+        echo "MISSING"
+    fi
+done
+
+section "Search persisted canary evidence for the exact sessions and markers"
+
+PATTERN="${ROOT_SESSION}|${CHILD_SESSION}|${EXECUTION_ID}|${DISPATCH_TOKEN}|CANARY_FIRST_RESPONSE_INVALID|Summarize the task tool output above|corrective_turn_count|corrective|task-splitter"
+
+if command -v timeout >/dev/null 2>&1; then
+    timeout 30s grep -RInI -E "$PATTERN" "$BASE" 2>/dev/null || true
+else
+    grep -RInI -E "$PATTERN" "$BASE" 2>/dev/null || true
+fi
+
+section "Potential logs / databases / runtime files"
+
+find "$BASE" -type f \
+    -printf '%TY-%Tm-%Td %TH:%TM:%TS  %10s  %p\n' 2>/dev/null \
+    | sort
+
+section "SQLite/OpenCode persisted state"
+
+python3 - "$BASE" "$ROOT_SESSION" "$CHILD_SESSION" "$EXECUTION_ID" "$DISPATCH_TOKEN" <<'PY'
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+needles = sys.argv[2:]
+
+sqlite_files = []
+
+for p in base.rglob("*"):
+    try:
+        if not p.is_file():
+            continue
+        with p.open("rb") as f:
+            if f.read(16) == b"SQLite format 3\x00":
+                sqlite_files.append(p)
+    except Exception:
+        pass
+
+print(f"SQLite databases found: {len(sqlite_files)}")
+
+def qi(name):
+    return '"' + name.replace('"', '""') + '"'
+
+for db in sqlite_files:
+    print()
+    print("=" * 78)
+    print("DATABASE:", db)
+    print("=" * 78)
+
+    try:
+        con = sqlite3.connect(
+            f"file:{db}?mode=ro",
+            uri=True,
+            timeout=2,
+        )
+        con.row_factory = sqlite3.Row
+    except Exception as e:
+        print("OPEN ERROR:", repr(e))
+        continue
+
+    try:
+        tables = [
+            row[0]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        ]
+        print("TABLES:", ", ".join(tables))
+
+        print()
+        print("--- table counts ---")
+        for table in tables:
+            try:
+                n = con.execute(
+                    f"SELECT COUNT(*) FROM {qi(table)}"
+                ).fetchone()[0]
+                print(f"{table}: {n}")
+            except Exception as e:
+                print(f"{table}: COUNT ERROR {e!r}")
+
+        print()
+        print("--- relevant schemas ---")
+        for table in tables:
+            low = table.lower()
+            if any(k in low for k in (
+                "session", "message", "part", "task",
+                "event", "error", "permission"
+            )):
+                try:
+                    schema = con.execute(
+                        "SELECT sql FROM sqlite_master "
+                        "WHERE type='table' AND name=?",
+                        (table,),
+                    ).fetchone()
+                    print(f"\n[{table}]")
+                    print(schema[0] if schema else "(no schema)")
+                except Exception as e:
+                    print(f"{table}: SCHEMA ERROR {e!r}")
+
+        print()
+        print("--- rows containing relevant IDs/markers ---")
+
+        search_needles = list(needles) + [
+            "CANARY_FIRST_RESPONSE_INVALID",
+            "Summarize the task tool output above",
+            "corrective",
+            "task-splitter",
+        ]
+
+        for table in tables:
+            try:
+                cols = con.execute(
+                    f"PRAGMA table_info({qi(table)})"
+                ).fetchall()
+            except Exception:
+                continue
+
+            text_cols = []
+            for c in cols:
+                name = c[1]
+                typ = (c[2] or "").upper()
+                # SQLite frequently stores JSON/text in weakly typed columns.
+                if (
+                    "CHAR" in typ
+                    or "TEXT" in typ
+                    or "CLOB" in typ
+                    or typ == ""
+                ):
+                    text_cols.append(name)
+
+            if not text_cols:
+                continue
+
+            conditions = []
+            params = []
+
+            for col in text_cols:
+                for needle in search_needles:
+                    conditions.append(
+                        f"CAST({qi(col)} AS TEXT) LIKE ?"
+                    )
+                    params.append(f"%{needle}%")
+
+            if not conditions:
+                continue
+
+            sql = (
+                f"SELECT rowid AS __rowid__, * "
+                f"FROM {qi(table)} "
+                f"WHERE {' OR '.join(conditions)} "
+                f"LIMIT 200"
+            )
+
+            try:
+                rows = con.execute(sql, params).fetchall()
+            except Exception as e:
+                print(f"\n[{table}] QUERY ERROR: {e!r}")
+                continue
+
+            if not rows:
+                continue
+
+            print()
+            print(f"### TABLE {table}: {len(rows)} matching row(s)")
+
+            for row in rows:
+                d = dict(row)
+                print("---")
+                for k, v in d.items():
+                    s = repr(v)
+                    if len(s) > 8000:
+                        s = s[:8000] + "...<TRUNCATED>"
+                    print(f"{k}={s}")
+
+    except Exception as e:
+        print("DATABASE ERROR:", repr(e))
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+PY
+
+section "Text/log files mentioning root or child"
+
+python3 - "$BASE" "$ROOT_SESSION" "$CHILD_SESSION" <<'PY'
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+needles = [x.encode() for x in sys.argv[2:]]
+
+for p in base.rglob("*"):
+    try:
+        if not p.is_file() or p.stat().st_size > 50 * 1024 * 1024:
+            continue
+
+        data = p.read_bytes()
+
+        if any(n in data for n in needles):
+            print(p)
+    except Exception:
+        pass
+PY
+
+section "Any remaining canary/OpenCode processes"
+ps -ef | grep -E \
+    'a2-canaries/20260922-184222|127\.0\.0\.1:34551|opencode-v1\.18\.31' \
+    | grep -v grep || true
+
+section "Port 34551"
+if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep ':34551' || echo "not listening"
+else
+    echo "ss unavailable"
+fi
+
+section "Diagnosis markers"
+echo "We need to establish:"
+echo "1. Did child $CHILD_SESSION receive/persist a user prompt?"
+echo "2. Did it make a real SYV/Qwen model request?"
+echo "3. Did it persist an assistant response?"
+echo "4. Does CANARY_FIRST_RESPONSE_INVALID exist in native message/part state?"
+echo "5. Did the child become terminal?"
+echo "6. Did the parent TaskTool/SubtaskPart receive a child result?"
+echo "7. Did controller reconciliation observe that terminal/result state?"
+echo "8. Was corrective intent ever persisted?"
+echo "9. Was any synthetic 'Summarize ... and continue' parent turn generated?"
+
+section "Result"
+echo "RESULT_FILE=$OUT"
+
+# Clipboard, best effort.
+if command -v wl-copy >/dev/null 2>&1; then
+    wl-copy < "$OUT" || true
+    echo "Copied result with wl-copy."
+elif command -v xclip >/dev/null 2>&1; then
+    xclip -selection clipboard < "$OUT" || true
+    echo "Copied result with xclip."
+elif command -v xsel >/dev/null 2>&1; then
+    xsel --clipboard --input < "$OUT" || true
+    echo "Copied result with xsel."
+else
+    echo "No clipboard helper found."
+fi
+
+
+=== REGRESSION TEST ===
+test_all_controller_subtask_builders_omit_command (__main__.TransportRootNoContinuationTests.test_all_controller_subtask_builders_omit_command) ... ok
+test_corrective_splitter_dispatch_omits_command (__main__.TransportRootNoContinuationTests.test_corrective_splitter_dispatch_omits_command) ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+OK
+
+JOB_000012_OK
+
+
+======================================================================
+FINISHED: 2026-09-22T19:17:09Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
