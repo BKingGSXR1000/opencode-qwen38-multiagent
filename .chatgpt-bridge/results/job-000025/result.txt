@@ -1,0 +1,248 @@
+======================================================================
+JOB: job-000025
+JOB_COMMIT: 290cfc1796cd454bc31d966399b9382f67772ad2
+STARTED: 2026-09-22T21:07:36Z
+======================================================================
+
+=== STAGE_A_PREFLIGHT CREATION ===
+    leaves = manifest.get("leaves") if isinstance(manifest.get("leaves"), dict) else {}
+    for action in launches:
+        did = str(action["deliverable"])
+        leaf = leaves.get(did)
+        require(isinstance(leaf, dict), f"launch leaf is absent: {did}")
+        owned = leaf.get("owned_artifacts")
+        require(isinstance(owned, str) and owned.strip(), f"launch leaf has no owned artifacts: {did}")
+
+
+def runtime_audit(project: Path, base_url: str, root_session: str) -> dict:
+    backend_get_audit()
+    supervisor_binding_audit(project)
+    resolved = controller.resolve_root_session(project, base_url, root_session)
+    require(resolved == root_session, "technical root session mismatch")
+    worktree = opencode_identity_audit(project, base_url, root_session)
+    result = controller.one_pass(project, True)
+    route = tick.action_route(result["actions"])
+    owned_artifact_audit(project, result["actions"])
+    canonical_verify_audit()
+    return {
+        "state_version": result["state_version"], "actions": result["actions"],
+        "route": route, "project": str(project.resolve()), "worktree": str(worktree),
+    }
+
+
+def write_proof(path: Path, project: Path, base_url: str, root_session: str, runtime: dict) -> None:
+    now = int(time.time())
+    proof = {
+        "protocol": PROOF_PROTOCOL,
+        "project": str(project.resolve()),
+        "base_url": base_url.rstrip("/"),
+        "root_session": root_session,
+        "state_version": runtime["state_version"],
+        "issued_at": now,
+        "expires_at": now + 600,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(proof, sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def verify_proof(path: Path, project: Path, base_url: str, root_session: str) -> None:
+    proof = read_json(path, "consolidated preflight proof")
+    require(proof.get("protocol") == PROOF_PROTOCOL, "preflight proof protocol mismatch")
+    require(proof.get("project") == str(project.resolve()), "preflight proof project mismatch")
+    require(proof.get("base_url") == base_url.rstrip("/"), "preflight proof base URL mismatch")
+    require(proof.get("root_session") == root_session, "preflight proof root mismatch")
+    require(int(proof.get("expires_at") or 0) >= int(time.time()), "preflight proof expired")
+
+
+def selftest() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        proof = project / "preflight-proof.json"
+        runtime = {"state_version": "state-a", "actions": [], "route": "no-dispatch"}
+        write_proof(proof, project, "http://127.0.0.1:57123", "ses-root", runtime)
+        verify_proof(proof, project, "http://127.0.0.1:57123", "ses-root")
+        try:
+            verify_proof(proof, project, "http://127.0.0.1:57124", "ses-root")
+        except PreflightError:
+            pass
+        else:
+            raise AssertionError("wrong base URL was accepted")
+        seen = {}
+        def fake_request(method: str, url: str, payload=None):
+            seen.update(method=method, url=url)
+            return 200, {"directory": str(project)}
+        require(opencode_identity_audit(project, "http://127.0.0.1:57123", "ses-root", fake_request) == Path("/"), "non-Git worktree audit failed")
+        require(seen["method"] == "GET", "identity audit must not dispatch")
+    print("stage-a preflight selftest: OK")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run non-dispatching Stage-A preflight gates.")
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--task-file", type=Path)
+    parser.add_argument("--base-url", default="")
+    parser.add_argument("--root-session", default="")
+    parser.add_argument("--write-proof", type=Path)
+    parser.add_argument("--selftest", action="store_true")
+    ns = parser.parse_args()
+    if ns.selftest:
+        selftest()
+        return 0
+    if ns.project is None or ns.task_file is None or not ns.base_url:
+        parser.error("--project, --task-file, and --base-url are required")
+
+=== START-STAGE-A-RUN PREFLIGHT USAGE ===
+fi
+"$ROOT/scripts/run-a2-v11831-server.sh" "$PROJECT" "$PORT" >"$ROOT/logs/stage-a-server-$PORT.log" 2>&1 &
+for _ in {1..120}; do
+  [[ "$(http_status "$BASE_URL/session/status")" == "200" ]] && break
+  sleep 0.25
+done
+[[ "$(http_status "$BASE_URL/session/status")" == "200" ]] || {
+  echo "ERROR: OpenCode server did not become ready at $BASE_URL" >&2
+  exit 1
+}
+
+"$ROOT/scripts/start-a2-v11831-supervisor.sh" "$PROJECT" "$BASE_URL" >/dev/null
+ROOT_RECEIPT="$(python3 "$ROOT/scripts/create-stage-a-root.py" --project "$PROJECT" --base-url "$BASE_URL")"
+ROOT_SESSION="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["root_session"])' <<<"$ROOT_RECEIPT")"
+
+for _ in {1..120}; do
+  [[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] && break
+  sleep 0.25
+done
+[[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] || { echo "ERROR: supervisor did not materialize deterministic shadow" >&2; exit 1; }
+
+PREFLIGHT_PROOF="$(mktemp /tmp/stage-a-preflight-proof.XXXXXX)"
+python3 "$ROOT/scripts/stage_a_preflight.py" \
+  --project "$PROJECT" --task-file "$TASK_FILE" --base-url "$BASE_URL" \
+  --root-session "$ROOT_SESSION" --write-proof "$PREFLIGHT_PROOF"
+
+exec python3 "$ROOT/scripts/drive-stage-a-run.py" --project "$PROJECT" --base-url "$BASE_URL" \
+  --root-session "$ROOT_SESSION" --preflight-proof "$PREFLIGHT_PROOF" --max-ticks "$MAX_TICKS"
+
+=== DRIVE-STAGE-A-RUN PREFLIGHT USAGE ===
+#!/usr/bin/env python3
+"""Quietly drive a generic Stage-A run from its deterministic projection."""
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import time
+from pathlib import Path
+
+import stage_a_controller as controller
+import stage_a_preflight as preflight
+
+
+_tick_spec = importlib.util.spec_from_file_location(
+    "stage_a_tick", Path(__file__).with_name("run-stage-a-tick.py")
+)
+if _tick_spec is None or _tick_spec.loader is None:
+    raise RuntimeError("Stage-A tick module is unavailable")
+tick = importlib.util.module_from_spec(_tick_spec)
+_tick_spec.loader.exec_module(tick)
+
+
+class DriverError(RuntimeError):
+    pass
+
+
+def compact_event(receipt: dict) -> dict:
+    if receipt.get("outcome") == "dispatched":
+        action = ((receipt.get("receipt") or {}).get("action") or {})
+        replay = bool((receipt.get("receipt") or {}).get("replay_suppressed"))
+        return {"event": "replay-observed" if replay else "dispatched", "action": action}
+    actions = receipt.get("actions") if isinstance(receipt.get("actions"), list) else []
+    return {"event": "no-dispatch", "actions": actions}
+
+
+def terminal(actions: list[object]) -> int | None:
+    kinds = {str(item.get("kind") or "") for item in actions if isinstance(item, dict)}
+    if "complete" in kinds:
+        return 0
+    if kinds & {"blocked", "needs_projection"}:
+        return 2
+    return None
+
+
+def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: float, max_ticks: int) -> int:
+    preflight.verify_proof(proof, project, base_url, root_session)
+    dispatched = 0
+    last_event = ""
+    while max_ticks == 0 or dispatched < max_ticks:
+        try:
+            receipt = tick.execute_one(project, base_url, root_session)
+        except controller.ControllerError as exc:
+            # A root can be transiently busy while its child materializes. This
+            # is neither a scheduling decision nor a reason to dispatch again.
+            if "transport root is not idle" not in str(exc):
+                raise DriverError(str(exc)) from exc
+            time.sleep(poll)
+            continue
+        event = compact_event(receipt)
+        rendered = json.dumps(event, sort_keys=True)
+        if rendered != last_event:
+            print(rendered, flush=True)
+            last_event = rendered
+        if event["event"] == "dispatched":
+            dispatched += 1
+        if receipt.get("outcome") == "no-dispatch":
+            result = terminal(receipt.get("actions") or [])
+            if result is not None:
+                return result
+        time.sleep(poll)
+    return 0
+
+
+def selftest() -> None:
+    if compact_event({"outcome": "dispatched", "receipt": {"action": {"agent": "a"}}}) != {
+        "event": "dispatched", "action": {"agent": "a"}
+    }:
+        raise DriverError("dispatch receipt compaction mismatch")
+    if terminal([{"kind": "complete"}]) != 0 or terminal([{"kind": "blocked"}]) != 2:
+        raise DriverError("terminal state classification mismatch")
+    if terminal([{"kind": "wait"}]) is not None:
+        raise DriverError("wait was classified terminal")
+    print("stage-a driver selftest: OK")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Drive a generic Stage-A run without reading model transcripts."
+    )
+    parser.add_argument("--project", type=Path)
+    parser.add_argument("--base-url", default="")
+    parser.add_argument("--root-session", default="")
+    parser.add_argument("--preflight-proof", type=Path)
+    parser.add_argument("--poll", type=float, default=1.0)
+    parser.add_argument("--max-ticks", type=int, default=0)
+    parser.add_argument("--selftest", action="store_true")
+    ns = parser.parse_args()
+    if ns.selftest:
+        selftest()
+        return 0
+    if ns.project is None or not ns.base_url or not ns.root_session or ns.preflight_proof is None:
+        parser.error("--project, --base-url, --root-session, and --preflight-proof are required unless --selftest is used")
+    if ns.poll <= 0 or ns.max_ticks < 0:
+        parser.error("--poll must be > 0 and --max-ticks must be >= 0")
+    return drive(ns.project.resolve(), ns.base_url, ns.root_session, ns.preflight_proof, ns.poll, ns.max_ticks)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except DriverError as exc:
+        raise SystemExit(f"ERROR: {exc}")
+
+JOB_000025_OK
+
+
+======================================================================
+FINISHED: 2026-09-22T21:07:36Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
