@@ -1,0 +1,107 @@
+======================================================================
+JOB: job-000030
+JOB_COMMIT: 1d1e30e85bce07b60a69752b1c43c240dc26d438
+STARTED: 2026-09-22T21:16:45Z
+======================================================================
+
+=== RECOVER VLLM_API_KEY FROM EXISTING USER PROCESS ===
+VLLM_API_KEY: recovered (value not printed)
+=== VERIFY EXISTING SERVER/ROOT ===
+server: OK
+root=ses_f350f29a8ffeE24xJvn8ZyvfBj
+=== CREATE PREFLIGHT PROOF ===
+{"post_requests": 0, "proof": "/home/bking/AI/a2-canaries/20260922-230614-d003b-live/preflight-proof.json", "protocol": "v2-stage-a-consolidated-preflight-v1", "runtime": {"actions": [{"agent": "task-splitter", "deliverable": "D003-B", "generation": 1, "kind": "launch"}], "project": "/home/bking/AI/a2-canaries/20260922-230614-d003b-live/project", "route": "task-splitter", "state_version": "ccb3c4ed37a34c24", "worktree": "/"}, "static": "PASS", "worker_launches": 0}
+preflight: OK
+=== DISPATCH PRIMARY SPLITTER ===
+{
+  "outcome": "dispatched",
+  "protocol": "v2-stage-a-tick-v1",
+  "receipt": {
+    "action": {
+      "agent": "task-splitter",
+      "deliverable": "D003-B",
+      "generation": 1,
+      "kind": "launch"
+    },
+    "execution_id": "bc2ec7ef2880f279385f8fb9ac4f051d09673c5c501fdbcc1fe9c4da5e1a6a96",
+    "http_status": 204,
+    "idempotency_intent_persisted": true,
+    "protocol": "v2-stage-a-controller-execute-v2",
+    "replay_suppressed": false,
+    "root_session": "ses_f350f29a8ffeE24xJvn8ZyvfBj",
+    "state_version": "ccb3c4ed37a34c24",
+    "transport": "prompt_async+SubtaskPart"
+  }
+}
+=== WAIT FOR SPLITTER LIFECYCLE ===
+STATUS split-required|||||
+STATUS splitter-active|1||||
+STATUS splitter-corrective-awaiting-output|1|1|||intent-persisted
+STATUS split-retryable|1|1|||intent-persisted
+=== FINAL SPLIT STATUS ===
+{
+  "archived_proposal": "",
+  "claim_count": 1,
+  "corrective_archive": ".opencode-v2/work/D003-B.split-proposal.corrective-rejected-1.json",
+  "corrective_context_sha256": "8a52b2c5d5096e203394147f431ccc86bfd11205ffa1cfafeab1176283b83233",
+  "corrective_dispatch_state": "intent-persisted",
+  "corrective_dispatch_token": "",
+  "corrective_execution_id": "9ced2c75dd1e608b7c74a7d0358c61475a51bb068e1440516d456bd6a4ed42ba",
+  "corrective_first_output_sha256": "5566ff758021cc48c4501da8ee9108b14a4ed13fed656c1a125f12b661e88148",
+  "corrective_primary_response": ".opencode-v2/work/D003-B.splitter-primary-response-1.txt",
+  "corrective_reason_sha256": "2b56b70fd35c5248ecac2387f39cd6b442f4c359fa97feaf6969cdfb63112627",
+  "corrective_root_session": "ses_f350f29a8ffeE24xJvn8ZyvfBj",
+  "corrective_session": "",
+  "corrective_turn_count": 1,
+  "generation": 1,
+  "lease_until_epoch": 0,
+  "owner": "supervisor",
+  "parent_id": "D003-B",
+  "proposal_failures": 1,
+  "reason": "splitter corrective turn dispatch failed: http-not-connected",
+  "session": "ses_f35058c64ffe0E25TxVTWnBNqe",
+  "state": "split-retryable",
+  "timestamp": "2026-09-22T21:16:55Z"
+}
+=== RESPONSE ARCHIVES ===
+--- D003-B.splitter-primary-response-1.txt ---
+{"depth": 1, "generation": 1, "parent_id": "D003-B", "proposals": [{"creates_or_updates": [".opencode-v2/probes/ephemeris_moons.json", "fixtures/vectors/moons/"], "depends_on_sibling": "", "done_when": "The .opencode-v2/probes/ephemeris_moons.json file is non-empty valid JSON with at least 4 commands entries, fixtures/vectors/moons/ contains at least 4 .json files each at least 200 bytes with no 404/error text and containing a $$SOE or X= marker, and the parent Verify command succeeds.", "owned_artifacts": "`.opencode-v2/probes/ephemeris_moons.json`, `fixtures/vectors/moons/`", "reads_existing": [".opencode-v2/probes/ephemeris_moons.json", "fixtures/vectors/moons/"], "role": "implementer", "scope": "Read `.opencode-v2/probes/ephemeris_moons.json` and the existing `fixtures/vectors/moons/` directory to diagnose why the parent Verify fails, then write the complete frozen Galilean-moon probe records: the `.opencode-v2/probes/ephemeris_moons.json` file (non-empty JSON with a `commands` object of at least 4 entries) and at least 4 JSON vector files inside `fixtures/vectors/moons/`, each at least 200 bytes and containing no 404/error text while matching either a $$SOE or X= pattern.", "verify_command": "test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4||!fs.statSync(p).isDirectory())process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'"}], "protocol": "v2-task-split-proposal-v2"}
+=== CONTROLLER EXECUTIONS ===
+{
+  "executions": {
+    "bc2ec7ef2880f279385f8fb9ac4f051d09673c5c501fdbcc1fe9c4da5e1a6a96": {
+      "action": {
+        "agent": "task-splitter",
+        "deliverable": "D003-B",
+        "generation": 1,
+        "kind": "launch"
+      },
+      "baseline_attempt": {
+        "count": 2,
+        "sessions": [
+          "synthetic-D003-B-1",
+          "synthetic-D003-B-2"
+        ]
+      },
+      "baseline_child_ids": [],
+      "created_at_ms": 1790111805726,
+      "execution_id": "bc2ec7ef2880f279385f8fb9ac4f051d09673c5c501fdbcc1fe9c4da5e1a6a96",
+      "root_session": "ses_f350f29a8ffeE24xJvn8ZyvfBj",
+      "state_version": "ccb3c4ed37a34c24",
+      "transport": "prompt_async+SubtaskPart",
+      "transport_may_have_been_attempted": true
+    }
+  },
+  "owner": "stage-a-controller",
+  "protocol": "v2-stage-a-controller-execution-ledger-v1"
+}
+=== PROJECT PROCESSES ===
+JOB_000030_DONE
+
+
+======================================================================
+FINISHED: 2026-09-22T21:23:45Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
