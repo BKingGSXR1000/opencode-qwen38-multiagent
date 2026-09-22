@@ -1,0 +1,20 @@
+======================================================================
+JOB: job-000028
+JOB_COMMIT: 2792f5d8beba030b6205b2253b2193474dd9a170
+STARTED: 2026-09-22T21:12:16Z
+======================================================================
+
+=== RESUME EXISTING CANARY ===
+PROJECT=/home/bking/AI/a2-canaries/20260922-230614-d003b-live/project
+BASE_URL=http://127.0.0.1:58443
+ROOT_SESSION=ses_f350f29a8ffeE24xJvn8ZyvfBj
+=== CREATE PREFLIGHT PROOF ===
+PREFLIGHT_FAIL: VLLM_API_KEY is unavailable
+
+
+======================================================================
+FINISHED: 2026-09-22T21:12:16Z
+RETURN_CODE: 1
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
