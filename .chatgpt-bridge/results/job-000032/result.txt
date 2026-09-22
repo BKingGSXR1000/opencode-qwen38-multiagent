@@ -1,0 +1,1166 @@
+======================================================================
+JOB: job-000032
+JOB_COMMIT: 5bac665c2c387bc86f390363b80be4c780a46835
+STARTED: 2026-09-22T21:28:50Z
+======================================================================
+
+=== HTTPCONTROL CLASS / REQUEST / ENSURE ===
+5905:class OpenCodeHTTP:
+5923:    def request(self,method,path,payload=None,timeout=3):
+6108:    def ensure(self):
+
+                and isinstance(data.get("content"),list)
+                and any(
+                    isinstance(part,dict) and part.get("type")=="tool"
+                    for part in data["content"]
+                )
+            ):
+                return ""
+        if len(assistants)!=1:
+            return ""
+        msg=assistants[0]
+        err=msg.get("error") if isinstance(msg.get("error"),dict) else {}
+        content=msg.get("content") if isinstance(msg.get("content"),list) else []
+        tokens=msg.get("tokens") if isinstance(msg.get("tokens"),dict) else {}
+        if (
+            msg.get("finish")=="error"
+            and err.get("type")=="aborted"
+            and not content
+            and not any(int(tokens.get(k) or 0) for k in ("input","output","reasoning","cache"))
+        ):
+            return "immediate-runtime-cancel zero-token-zero-tool aborted"
+    except Exception:
+        return ""
+    return ""
+
+
+class OpenCodeHTTP:
+    def __init__(self):
+        self.base=None
+        self.password=None
+        self.prefix=None
+        self.mode=None
+        self.last_discover=0
+        self.last_wait_log=0
+
+    def headers(self,json_body=False):
+        h={"Accept":"application/json"}
+        if self.password:
+            tok=base64.b64encode(f"opencode:{self.password}".encode()).decode()
+            h["Authorization"]=f"Basic {tok}"
+        if json_body:
+            h["Content-Type"]="application/json"
+        return h
+
+    def request(self,method,path,payload=None,timeout=3):
+        if not self.base:
+            raise RuntimeError("no server")
+        body=json.dumps(payload).encode() if payload is not None else None
+        req=urllib.request.Request(
+            self.base+path,
+            data=body,
+            method=method,
+            headers=self.headers(payload is not None),
+        )
+        with urllib.request.urlopen(req,timeout=timeout) as r:
+            raw=r.read()
+        if not raw:
+            return {}
+        try:
+            obj=json.loads(raw)
+        except Exception:
+            return raw.decode("utf-8","replace")
+        return obj.get("data") if isinstance(obj,dict) and set(obj)=={"data"} else obj
+
+    def discover(self):
+        explicit=str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip().rstrip("/")
+        if explicit:
+            self.base=explicit
+            self.password=(
+                os.environ.get("V2_OPENCODE_PASSWORD")
+                or os.environ.get("OPENCODE_PASSWORD")
+                or os.environ.get("OPENCODE_SERVER_PASSWORD")
+            )
+            self.prefix=""
+            self.mode="v1"
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            try:
+                obj=self.request("GET","/session/status"+q,timeout=2)
+                if not isinstance(obj,dict):
+                    raise RuntimeError("v1 /session/status did not return an object")
+                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+                return True
+            except Exception as exc:
+                self.base=self.password=self.prefix=None
+                self.mode=None
+                log(f"HTTP_CONTROL_V1_WAIT base={explicit} error={type(exc).__name__}")
+                return False
+
+        target=os.path.realpath(str(ROOT/"xdg"/"config"))
+        ss=""
+        try:
+            ss=subprocess.check_output(
+                ["ss","-ltnp"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+        # Completion hooks run in a plugin subprocess.  V1's plugin host can
+        # sanitize V2_OPENCODE_BASE_URL even though the parent server was
+        # launched with it.  Discover only this repository's pinned v1 binary,
+        # then prove the exact PROJECT endpoint before continuing a splitter.
+        # This is transport identity recovery, not a broader server search.
+
+=== ALL HTTP STATE RESETS / ASSIGNMENTS ===
+2528:    if http.mode!="v1": return False,"splitter-corrective-requires-v1-runtime"
+5907:        self.base=None
+5910:        self.mode=None
+5946:            self.base=explicit
+5953:            self.mode="v1"
+5961:                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+5962:                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+5965:                self.base=self.password=self.prefix=None
+5966:                self.mode=None
+5967:                log(f"HTTP_CONTROL_V1_WAIT base={explicit} error={type(exc).__name__}")
+6004:                    self.base=f"http://127.0.0.1:{port}"
+6007:                    self.mode="v1"
+6014:                            f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 "
+6018:                            "HTTP_CONTROL_CONNECTED",
+6026:        self.base=self.password=self.prefix=None
+6027:        self.mode=None
+6072:                    self.base=f"http://127.0.0.1:{port}"
+6089:                            self.mode="beta"
+6091:                                f"HTTP_CONTROL_CONNECTED base={self.base} "
+6095:                                "HTTP_CONTROL_CONNECTED",
+6104:        self.base=self.password=self.prefix=None
+6105:        self.mode=None
+6118:            log("HTTP_CONTROL_WAIT no compatible OpenCode server discovered")
+6128:            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+6132:            self.base=self.prefix=None
+6133:            self.mode=None
+6143:        paths=((f"/session/{qsid}"+q,) if self.mode=="v1" else (f"/api/session/{qsid}",f"/session/{qsid}"))
+6156:        if self.mode=="v1":
+6189:        if self.mode=="v1":
+6243:        if self.mode=="v1":
+6267:        if self.mode=="v1":
+6297:        if self.mode=="v1":
+
+=== OUTER POLL LOOP AROUND GENERIC HTTP_POLL_ERROR ===
+                    if candidate_outcome and not checkpoint.get("aborted"):
+                        checkpoint["aborted"]=True
+                        if candidate_outcome=="invalid":
+                            reason="planner_fresh_candidate_invalid"
+                            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                                record_planner_restart(sid,reason)
+                        else:
+                            reason="planner_fresh_candidate_ready"
+                        abort_session(sid,reason,agent)
+                        log(
+                            f"PLANNER_FRESH_HANDOFF session={sid} "
+                            f"outcome={candidate_outcome}"
+                        )
+                        csv(
+                            "PLANNER_FRESH_HANDOFF",sid,agent,
+                            f"outcome={candidate_outcome}",
+                        )
+                        planner_retired=True
+
+                    progress_reason=(
+                        "" if planner_retired else planner_retirement_reason(
+                            sid,
+                            time.monotonic()-checkpoint["started"],
+                            existing_plan,
+                            paused=planner_compaction_active,
+                        )
+                    )
+                    if progress_reason and not checkpoint.get("aborted"):
+                        checkpoint["aborted"]=True
+                        if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                            record_planner_restart(sid,progress_reason)
+                        abort_session(sid,progress_reason,agent)
+                        planner_retired=True
+
+                if can_watch and st["aborted_key"]!=key and not planner_retired:
+                    hs,hr,ht=watchdog_limits(agent)
+
+                    reason=planner_context_reason(
+                        agent,shape["context_input"],tool_running
+                    )
+                    if not reason:
+                        if reasoning>=hr:
+                            reason=f"reasoning_chars={reasoning}"
+                        elif text_chars>=ht:
+                            reason=f"text_chars={text_chars}"
+                        elif age>=hs:
+                            reason=f"no_tool_age={int(age)}s"
+
+                    if reason:
+                        st["aborted_key"]=key
+                        if agent=="implementation-planner":
+                            if planner_restart_count()>=MAX_PLANNER_RESTARTS:
+                                reason=f"planner_restart_limit={MAX_PLANNER_RESTARTS} {reason}"
+                            else:
+                                record_planner_restart(sid,reason)
+                        if abort_session(
+                            sid,
+                            f"runaway {reason} reasoning_chars={reasoning} text_chars={text_chars}",
+                            agent,
+                        ):
+                            abort_count[sid]=abort_count.get(sid,0)+1
+
+                if fallback_reason and not (live or {}).get("fallback_aborted"):
+                    if live is not None: live["fallback_aborted"]=True
+                    abort_session(sid,f"runaway {fallback_reason}",agent)
+
+                fallback_state=(live or {}).get("fallback_decision") or {}
+                phase=session_watchdog_phase(
+                    shape,live,backend_snapshot,visible_age=age
+                )
+                row={
+                    "session":sid,
+                    "agent":agent,
+                    "parent":parent,
+                    "deliverable":did,
+                    "attempt":attempt,
+                    "reasoning":reasoning,
+                    "text":text_chars,
+                    "reasoning_tokens":shape.get("reasoning_tokens",0),
+                    "output_tokens":shape.get("output_tokens",0),
+                    "cache_tokens":shape.get("cache_tokens",0),
+                    "tool_running":tool_running,
+                    "context_input":shape["context_input"],
+                    "observable":shape.get("observable",False),
+                    "assistant_completed":shape.get("assistant_completed",False),
+                    "watchdog_phase":phase,
+                    "visible_no_progress_age":round(age,3),
+                    "sse_connected":bool(live and live.get("connected")),
+                    "sse_last_progress_age":(
+                        round(max(0.0,time.monotonic()-live["last_progress"]),3)
+                        if live and isinstance(live.get("last_progress"),(int,float))
+                        else None
+                    ),
+                    "invisible_no_progress_age":round(float((live or {}).get("fallback_elapsed") or 0),3),
+                    "invisible_watchdog":fallback_state,
+                    "seen":now,
+                    "directory":directory or PROJECT or "",
+                    "status":statuses.get(sid),
+                }
+                rows[sid]=row
+                if parent:
+                    emit_watchdog_telemetry(sid,row,backend_snapshot)
+
+            payload={
+                "generated":now,
+                "project":PROJECT or "",
+                "source":"http-status+message-poll-v2.6.7b",
+                "backend":backend_snapshot,
+                "sessions":list(rows.values()),
+            }
+            tmp=LIVE_STATUS.with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True,exist_ok=True)
+            tmp.write_text(json.dumps(payload,separators=(",",":")))
+            os.replace(tmp,LIVE_STATUS)
+
+            if root_context_candidate and not child_active:
+                sid,context_input=root_context_candidate
+                abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
+            stop_inactive_event_watches(active)
+            sync_reference_gate()
+            sync_reference_validation_gate()
+            sync_control_status_snapshot()
+            nudged=maybe_nudge_idle_root(active,child_active)
+            if not nudged:
+                maybe_continue_root(active,child_active)
+            maybe_launch_lessons(active,child_active)
+            merge_lesson_candidates()
+
+        except Exception as e:
+            log(f"HTTP_POLL_ERROR {e!r}")
+
+        time.sleep(POLL)
+
+def pending_ledger_session_ids():
+    """Current unclassified materialized attempts survive supervisor restart."""
+    pending=set()
+    data=load_attempts()
+    entries=data.get("deliverables",{})
+    if not isinstance(entries,dict):
+        raise StateCorruptionError("attempt ledger deliverables must be an object")
+    for did,entry in entries.items():
+
+=== FILESYSTEM ATOMIC/TEMP HELPERS ===
+1182-    path=split_proposal_path(did)
+1183-    if not path.exists():
+1184-        return ""
+1185-    status=load_split_status(did)
+1186-    n=int(status.get("proposal_failures") or 0)+1
+1187-    archived=path.with_name(f"{did}.split-proposal.failed-{n}.json")
+1188-    if archived.exists():
+1189-        archived.unlink()
+1190:    os.replace(path,archived)
+1191-    return str(archived.relative_to(Path(PROJECT)))
+1192-
+1193-
+1194-def record_splitter_failure(did, reason, session="", validation=False):
+1195-    status=load_split_status(did)
+1196-    claims=int(status.get("claim_count") or 0)
+1197-    failures=int(status.get("proposal_failures") or 0)+1
+1198-    archived=archive_failed_split_proposal(did)
+--
+2481-    path=split_proposal_path(did)
+2482-    if not path.exists():
+2483-        return ""
+2484-    archived=path.with_name(
+2485-        f"{did}.split-proposal.corrective-rejected-{claim_count}.json"
+2486-    )
+2487-    if archived.exists():
+2488-        archived.unlink()
+2489:    os.replace(path,archived)
+2490-    return str(archived.relative_to(Path(PROJECT)))
+2491-
+2492-
+2493-def _primary_splitter_execution_root(parent):
+2494-    ledger=load_json_object(
+2495-        Path(PROJECT)/".opencode-v2"/"work"/"stage-a-controller-executions.json",
+2496-        default_missing={"executions":{}},label="controller execution ledger",
+2497-    )
+--
+3980-            result[relative]=hashlib.sha256(path.read_bytes()).hexdigest()
+3981-        except OSError:
+3982-            continue
+3983-    return result
+3984-
+3985-def write_ownership_baseline(did):
+3986-    """Capture state before the provider can run the claimed worker."""
+3987-    path=ownership_baseline_path(did); path.parent.mkdir(parents=True,exist_ok=True)
+3988:    tmp=path.with_suffix(".tmp")
+3989-    tmp.write_text(json.dumps({"owner":"supervisor","deliverable":did,
+3990-                               "files":project_fingerprints()},sort_keys=True)+"\n")
+3991:    os.replace(tmp,path)
+3992-
+3993-def execution_baseline_path(did,attempt):
+3994-    return Path(PROJECT)/".opencode-v2/work"/f"{did}.attempt-{int(attempt)}.execution-baseline.json"
+3995-
+3996-def execution_scope_fingerprints(did):
+3997-    """Fingerprint only this leaf's durable owned/progress scope."""
+3998-    root=Path(PROJECT)
+3999-    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+--
+4271-)
+4272-
+4273-def supervisor_dynamic_control_path(path):
+4274-    if path in SUPERVISOR_DYNAMIC_CONTROL_PATHS:
+4275-        return True
+4276-    if any(path.startswith(prefix) for prefix in SUPERVISOR_DYNAMIC_CONTROL_PREFIXES):
+4277-        return True
+4278-    # Supervisor atomic writes use same-directory temporary names such as
+4279:    # .opencode-v2/.control-status.json.geel2cvt.tmp. They can appear/disappear
+4280-    # while a worker ownership baseline is live and are not worker mutations.
+4281-    # Explicit worker targeting is still checked by ownership_violations(), and
+4282-    # Bubblewrap remains the shell/direct-write containment boundary.
+4283-    for canonical in SUPERVISOR_DYNAMIC_CONTROL_PATHS:
+4284-        parent,name=canonical.rsplit("/",1)
+4285:        if path.startswith(f"{parent}/.{name}.") and path.endswith(".tmp"):
+4286-            return True
+4287-    return False
+4288-# V2.6.9 SUPERVISOR DYNAMIC OWNERSHIP EXEMPTION END
+4289-
+4290-def ownership_violations(did,sid=""):
+4291-    """Return changes attributable to this leaf outside declared ownership.
+4292-
+4293-    Whole-project snapshots are retained, but files owned by a sibling session
+--
+4871-            "status=complete\n"
+4872-            f"deliverable={did}\n"
+4873-            f"attempt={count}\n"
+4874-            "verified=true\n"
+4875-            "owner=supervisor\n"
+4876-            f"verify_sha256={hashlib.sha256((verified_command or str((load_manifest().get('leaves') or {}).get(did,{}).get('verify_command') or '')).encode()).hexdigest()}\n"
+4877-            f"protocol={LEAF_READY_PROTOCOL}\n"
+4878-        )
+4879:        tmp=path.with_suffix(".tmp")
+4880-        tmp.write_text(body)
+4881:        os.replace(tmp,path)
+4882-        log(f"SUPERVISOR_LEAF_READY deliverable={did} attempt={count}")
+4883-        csv("SUPERVISOR_LEAF_READY","","supervisor",f"{did} attempt={count}")
+4884-        return True,"finalized"
+4885-    except Exception as exc:
+4886-        return False,f"ready-write-error-{type(exc).__name__}"
+4887-
+4888-def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_override=""):
+4889-    """Fail-closed finalization after artifacts, ownership, deps, and Verify pass.
+--
+6853-            "ORIGINAL_TASK_CAPTURE_MISSING",
+6854-            sid,
+6855-            "orchestrator",
+6856-            PROJECT,
+6857-        )
+6858-        return False
+6859-
+6860-    path.parent.mkdir(parents=True, exist_ok=True)
+6861:    tmp = path.with_suffix(".tmp")
+6862-    tmp.write_text(task.rstrip() + "\n")
+6863:    os.replace(tmp, path)
+6864-
+6865-    log(
+6866-        f"ORIGINAL_TASK_CAPTURED session={sid} "
+6867-        f"chars={len(task)} path={path}"
+6868-    )
+6869-    csv(
+6870-        "ORIGINAL_TASK_CAPTURED",
+6871-        sid,
+--
+7308-def _sync_reference_gate(path,data):
+7309-    if not PROJECT or data.get("state") in {"not-applicable","not-required"}:
+7310-        return data
+7311-    path.parent.mkdir(parents=True,exist_ok=True)
+7312-    payload={"owner":"supervisor",**data}
+7313-    rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
+7314-    try:
+7315-        if not path.exists() or path.read_text(errors="replace")!=rendered:
+7316:            tmp=path.with_suffix(".tmp")
+7317-            tmp.write_text(rendered)
+7318:            os.replace(tmp,path)
+7319-            log(
+7320-                f"REFERENCE_GATE phase={data.get('phase')} state={data.get('state')} "
+7321-                f"attempts={data.get('attempts',0)} productive={data.get('productive_sessions',0)} "
+7322-                f"stagnant={data.get('stagnant_tail',0)}"
+7323-            )
+7324-    except Exception as e:
+7325-        log(f"REFERENCE_GATE_WRITE_ERROR {e!r}")
+7326-    return data
+7327-
+7328-
+7329-def sync_reference_gate():
+7330-    data=reference_gate_snapshot()
+7331:    path=Path(PROJECT)/".opencode-v2/reference-gate.json" if PROJECT else Path("/tmp/none")
+7332-    return _sync_reference_gate(path,data)
+7333-
+7334-
+7335-def sync_reference_validation_gate():
+7336-    data=reference_validation_gate_snapshot()
+7337:    path=Path(PROJECT)/".opencode-v2/reference-validation-gate.json" if PROJECT else Path("/tmp/none")
+7338-    return _sync_reference_gate(path,data)
+7339-# V2.6.9 GAMETESTNEW7 REFERENCE GATE END
+7340-
+7341-def maybe_nudge_idle_root(active_sids,child_active):
+7342-    """Resume an idle completed root while durable work is still pending."""
+7343-    global root_same_session_idle_since
+7344-
+7345-    # Stage A: external deterministic controller owns semantic continuation.
+--
+7568-        except Exception as e:
+7569-            log(f"CONTROL_GUARD_ERROR {e!r}")
+7570-        time.sleep(0.5)
+7571-
+7572-def sync_global_lessons():
+7573-    if not PROJECT: return
+7574-    try:
+7575-        src=ROOT/"knowledge"/"LESSONS_GLOBAL.md"; dst=Path(PROJECT)/".opencode-v2"/"GLOBAL_LESSONS.md"
+7576:        if src.exists(): dst.parent.mkdir(parents=True,exist_ok=True); tmp=dst.with_suffix(".tmp"); tmp.write_text(src.read_text()); os.replace(tmp,dst)
+7577-    except Exception as e: log(f"LESSONS_SYNC_ERROR {e!r}")
+7578-
+7579-def merge_lesson_candidates():
+7580-    if not PROJECT: return
+7581-    try:
+7582-        import hashlib
+7583-        ctrl=Path(PROJECT)/".opencode-v2"; ready=ctrl/"LESSONS.ready"; cand=ctrl/"LESSONS_GLOBAL_CANDIDATES.md"
+7584-        if not ready.exists() or not cand.exists(): return
+--
+7862-
+7863-            payload={
+7864-                "generated":now,
+7865-                "project":PROJECT or "",
+7866-                "source":"http-status+message-poll-v2.6.7b",
+7867-                "backend":backend_snapshot,
+7868-                "sessions":list(rows.values()),
+7869-            }
+7870:            tmp=LIVE_STATUS.with_suffix(".tmp")
+7871-            tmp.parent.mkdir(parents=True,exist_ok=True)
+7872-            tmp.write_text(json.dumps(payload,separators=(",",":")))
+7873:            os.replace(tmp,LIVE_STATUS)
+7874-
+7875-            if root_context_candidate and not child_active:
+7876-                sid,context_input=root_context_candidate
+7877-                abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
+7878-            stop_inactive_event_watches(active)
+7879-            sync_reference_gate()
+7880-            sync_reference_validation_gate()
+7881-            sync_control_status_snapshot()
+
+=== FILE-NOT-FOUND HANDLING / UNLINK / REPLACE ===
+150-    line=f"[{time.strftime('%Y-%m-%dT%H:%M:%S%z')}] {msg}"
+151-    with open(LOG,"a",encoding="utf-8") as f: f.write(line+"\n")
+152-    print(line,file=sys.stderr,flush=True)
+153-
+154-def csv(kind,sid="",agent="",detail=""):
+155:    new=not CSV.exists(); detail=str(detail).replace('"','""')
+156-    with open(CSV,"a",encoding="utf-8") as f:
+157-        if new: f.write("timestamp,event,session,agent,detail\n")
+158-        f.write(f'{time.strftime("%Y-%m-%dT%H:%M:%S%z")},{kind},{sid},{agent},"{detail}"\n')
+159-
+160-def db_connect(): return sqlite3.connect(f"file:{DB}?mode=ro",uri=True,timeout=1)
+--
+1001-        raise ValueError(f"{field} must be a JSON array")
+1002-    result=[]; seen=set()
+1003-    for item in raw:
+1004-        if not isinstance(item,str) or not item.strip():
+1005-            raise ValueError(f"{field} entries must be non-empty strings")
+1006:        value=item.strip().replace("\\","/")
+1007-        path=Path(value)
+1008-        if path.is_absolute() or ".." in path.parts or value.startswith("./"):
+1009-            raise ValueError(f"{field} contains non-canonical path: {item}")
+1010-        canonical=path.as_posix()
+1011-        if canonical in ("",".",".git") or canonical.startswith(".git/"):
+--
+1184-        return ""
+1185-    status=load_split_status(did)
+1186-    n=int(status.get("proposal_failures") or 0)+1
+1187-    archived=path.with_name(f"{did}.split-proposal.failed-{n}.json")
+1188-    if archived.exists():
+1189:        archived.unlink()
+1190:    os.replace(path,archived)
+1191-    return str(archived.relative_to(Path(PROJECT)))
+1192-
+1193-
+1194-def record_splitter_failure(did, reason, session="", validation=False):
+1195-    status=load_split_status(did)
+--
+1240-    model_ref=model_ref or task_splitter_model_ref()
+1241-    try:
+1242-        provider,model=model_ref.split("/",1)
+1243-        config=json.loads((ROOT/"xdg"/"config"/"opencode"/"opencode.jsonc").read_text())
+1244-        profile=config["provider"][provider]["models"][model]
+1245:    except (ValueError,KeyError,FileNotFoundError,json.JSONDecodeError) as exc:
+1246-        raise RuntimeError(f"unresolvable task-splitter model profile {model_ref!r}") from exc
+1247-    payload=json.dumps(
+1248-        {"agent":"task-splitter","model":model_ref,"profile":profile},
+1249-        sort_keys=True,separators=(",",":"),ensure_ascii=True,
+1250-    )
+--
+1544-        "resolved_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+1545-        "original_archive":recovery.get("archive"),
+1546-        "rejected_repair_packet":repair,
+1547-        "reason":"deterministically disproven prerequisite-artifacts parent repair",
+1548-    })
+1549:    repair_path.unlink()
+1550-    if not _finalize_current_plan_without_rearm():
+1551-        atomic_write_json(repair_path,repair)
+1552-        return False,"current-plan-finalization-failed"
+1553-    with dispatch_lock:
+1554-        with attempt_lock():
+--
+1718-            text,
+1719-        )
+1720-    binding=str(binding_outcome or "").strip()
+1721-    if binding:
+1722-        for prefix in ("Inherit:", "Inherited outcome:", "Parent outcome:"):
+1723:            text=text.replace(f"{prefix} {binding}", "")
+1724-        text=re.sub(r"[ \t]{2,}", " ", text).strip(" ;")
+1725-    return text
+1726-
+1727-
+1728-def render_split_child_scope(child_id,parent,child,parent_leaf):
+--
+1895-        generation=txn["generation"],
+1896-        children=expected,
+1897-        transaction_id=txn["transaction_id"],
+1898-        lease_until_epoch=0,
+1899-    )
+1900:    split_request_path(parent).unlink(missing_ok=True)
+1901:    split_proposal_path(parent).unlink(missing_ok=True)
+1902-
+1903-    committed=dict(txn)
+1904-    committed["state"]="committed"
+1905-    committed["committed_at"]=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+1906-    atomic_write_json(split_transaction_path(parent),committed)
+--
+2193-        split_request_path(did),
+2194-        split_proposal_path(did),
+2195-        split_status_path(did),
+2196-        split_transaction_path(did),
+2197-    ):
+2198:        path.unlink(missing_ok=True)
+2199-
+2200-
+2201-def _archive_split_state_for_contract_repair(did):
+2202-    """Snapshot mutable split control records before a plan repair retires them."""
+2203-    paths=(
+--
+2373-            ),
+2374-            "message":repair_message,
+2375-        }],
+2376-        "baseline":_repair_baseline(repair_keys),
+2377-    })
+2378:    (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").unlink(missing_ok=True)
+2379-
+2380-    with dispatch_lock:
+2381-        with attempt_lock():
+2382-            data=load_attempts()
+2383-            entry=(data.get("deliverables") or {}).get(did)
+--
+2483-        return ""
+2484-    archived=path.with_name(
+2485-        f"{did}.split-proposal.corrective-rejected-{claim_count}.json"
+2486-    )
+2487-    if archived.exists():
+2488:        archived.unlink()
+2489:    os.replace(path,archived)
+2490-    return str(archived.relative_to(Path(PROJECT)))
+2491-
+2492-
+2493-def _primary_splitter_execution_root(parent):
+2494-    ledger=load_json_object(
+--
+3761-    atomic_write_json(verify_wait_path(did),payload)
+3762-    return payload
+3763-
+3764-
+3765-def clear_verify_wait(did):
+3766:    verify_wait_path(did).unlink(missing_ok=True)
+3767-    verify_wait_log_state.pop(did,None)
+3768-
+3769-
+3770-def load_verify_wait(did):
+3771-    path=verify_wait_path(did)
+--
+3869-                        "source":"supervisor-plan-contract-revision",
+3870-                        "previous_verify_sha256":hashlib.sha256(old_command.encode()).hexdigest(),
+3871-                        "current_verify_sha256":digest,
+3872-                        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+3873-                    })
+3874:                ready.unlink(missing_ok=True)
+3875-                changed.append(did)
+3876-            if changed:
+3877-                save_attempts(data)
+3878-    for did in changed:
+3879-        log(f"PLAN_CONTRACT_READY_REVOKED deliverable={did}")
+--
+3986-    """Capture state before the provider can run the claimed worker."""
+3987-    path=ownership_baseline_path(did); path.parent.mkdir(parents=True,exist_ok=True)
+3988-    tmp=path.with_suffix(".tmp")
+3989-    tmp.write_text(json.dumps({"owner":"supervisor","deliverable":did,
+3990-                               "files":project_fingerprints()},sort_keys=True)+"\n")
+3991:    os.replace(tmp,path)
+3992-
+3993-def execution_baseline_path(did,attempt):
+3994-    return Path(PROJECT)/".opencode-v2/work"/f"{did}.attempt-{int(attempt)}.execution-baseline.json"
+3995-
+3996-def execution_scope_fingerprints(did):
+--
+4156-    quoted=[rel,absolute]
+4157-
+4158-    def direct_path_matches(value):
+4159-        if not isinstance(value,str):
+4160-            return False
+4161:        value=value.replace("\\","/")
+4162-        return value==rel or value.endswith("/"+rel) or value==absolute
+4163-
+4164-    for name,inp in session_tool_inputs(sid):
+4165-        if name in {"edit","write","apply_patch"}:
+4166-            for key in ("path","file","filePath","filename"):
+--
+4298-    """
+4299-    try:
+4300-        baseline=json.loads(ownership_baseline_path(did).read_text())
+4301-        before=baseline.get("files") if baseline.get("owner")=="supervisor" else None
+4302-        if not isinstance(before,dict): return ["invalid ownership baseline"]
+4303:    except FileNotFoundError:
+4304-        return []
+4305-    except Exception:
+4306-        return ["invalid ownership baseline"]
+4307-    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+4308-    allowed=owned_artifact_paths(leaf)+[f".opencode-v2/work/{did}.progress.md"]
+--
+4441-
+4442-
+4443-def _project_relative_tool_path(value):
+4444-    if not isinstance(value,str) or not value.strip():
+4445-        return ""
+4446:    value=value.strip().replace("\\","/")
+4447:    project=str(Path(PROJECT).resolve(strict=False)).replace("\\","/").rstrip("/")
+4448-    if value.startswith(project+"/"):
+4449-        value=value[len(project)+1:]
+4450-    if value.startswith("./"):
+4451-        value=value[2:]
+4452-    path=Path(value)
+--
+4493-    if not isinstance(command,str):
+4494-        return False
+4495-    for rel in owned:
+4496-        candidates=[
+4497-            rel,
+4498:            str((Path(PROJECT)/rel).resolve(strict=False)).replace("\\","/"),
+4499-        ]
+4500-        for target in candidates:
+4501-            q=re.escape(target)
+4502-            patterns=(
+4503-                rf"(?:>|>>)\s*['\"]?{q}(?:['\"]|\s|$)",
+--
+4560-    return out
+4561-
+4562-def _tool_targets_exact_project_path(tool,args,target):
+4563-    if tool not in {"read","write","edit","apply_patch","patch","multiedit"}:
+4564-        return False
+4565:    target=target.replace("\\","/")
+4566:    target_abs=str((Path(PROJECT)/target).resolve(strict=False)).replace("\\","/")
+4567-    for raw in _target_path_values(args):
+4568:        value=str(raw).replace("\\","/")
+4569-        if value in {target,"./"+target,target_abs}:
+4570-            return True
+4571-    return False
+4572-
+4573-
+--
+4798-        for key in ("filePath","file_path","path","filename"):
+4799-            value=args.get(key)
+4800-            if isinstance(value,str):
+4801-                values.append(value)
+4802-    expected=f".opencode-v2/work/{parent}.split-request.json"
+4803:    expected_abs=str((Path(PROJECT)/expected).resolve(strict=False)).replace("\\","/")
+4804-    allowed={expected,"./"+expected,expected_abs}
+4805:    normalized={str(v).replace("\\","/") for v in values}
+4806-    if not normalized.intersection(allowed):
+4807-        return "deny",f"task-splitter may read only {expected}"
+4808-    return "allow",expected
+4809-
+4810-
+--
+4876-            f"verify_sha256={hashlib.sha256((verified_command or str((load_manifest().get('leaves') or {}).get(did,{}).get('verify_command') or '')).encode()).hexdigest()}\n"
+4877-            f"protocol={LEAF_READY_PROTOCOL}\n"
+4878-        )
+4879-        tmp=path.with_suffix(".tmp")
+4880-        tmp.write_text(body)
+4881:        os.replace(tmp,path)
+4882-        log(f"SUPERVISOR_LEAF_READY deliverable={did} attempt={count}")
+4883-        csv("SUPERVISOR_LEAF_READY","","supervisor",f"{did} attempt={count}")
+4884-        return True,"finalized"
+4885-    except Exception as exc:
+4886-        return False,f"ready-write-error-{type(exc).__name__}"
+--
+5985-        # This is transport identity recovery, not a broader server search.
+5986-        v1_binary=os.path.realpath(str(ROOT/"runtime"/"opencode-v1.18.31"/"opencode"))
+5987-        for proc in Path("/proc").glob("[0-9]*"):
+5988-            try:
+5989-                pid=int(proc.name)
+5990:                cmd=(proc/"cmdline").read_bytes().replace(
+5991-                    b"\0",b" "
+5992-                ).decode("utf-8","replace")
+5993-                if not cmd.startswith(v1_binary+" serve "):
+5994-                    continue
+5995-                ports=[]
+--
+6030-        # opencode2 -> opencode2.exe serve --stdio --port 0
+6031-        # The child owns a random 127.0.0.1 TCP port and OPENCODE_PASSWORD.
+6032-        for proc in Path("/proc").glob("[0-9]*"):
+6033-            try:
+6034-                pid=int(proc.name)
+6035:                cmd=(proc/"cmdline").read_bytes().replace(
+6036-                    b"\0",b" "
+6037-                ).decode("utf-8","replace")
+6038-
+6039-                low=cmd.lower()
+6040-                if "opencode2" not in low:
+--
+6858-        return False
+6859-
+6860-    path.parent.mkdir(parents=True, exist_ok=True)
+6861-    tmp = path.with_suffix(".tmp")
+6862-    tmp.write_text(task.rstrip() + "\n")
+6863:    os.replace(tmp, path)
+6864-
+6865-    log(
+6866-        f"ORIGINAL_TASK_CAPTURED session={sid} "
+6867-        f"chars={len(task)} path={path}"
+6868-    )
+--
+7058-        root_rollover_path(),
+7059-        {"owner":"supervisor","count":count,"latest_session":sid,"phase":phase},
+7060-    )
+7061-    # A successful fresh-root launch supersedes any stale blocker left after an
+7062-    # operator/manual recovery that reset the rollover budget.
+7063:    root_continuation_block_path().unlink(missing_ok=True)
+7064-
+7065-
+7066-# V2.6.9 GAMETESTNEW7 REFERENCE GATE BEGIN
+7067-REFERENCE_FOUNDATION_MARKER="<!-- REFERENCE_FOUNDATION_READY -->"
+7068-REFERENCE_POLICY_RE=re.compile(
+--
+7313-    rendered=json.dumps(payload,indent=2,sort_keys=True)+"\n"
+7314-    try:
+7315-        if not path.exists() or path.read_text(errors="replace")!=rendered:
+7316-            tmp=path.with_suffix(".tmp")
+7317-            tmp.write_text(rendered)
+7318:            os.replace(tmp,path)
+7319-            log(
+7320-                f"REFERENCE_GATE phase={data.get('phase')} state={data.get('state')} "
+7321-                f"attempts={data.get('attempts',0)} productive={data.get('productive_sessions',0)} "
+7322-                f"stagnant={data.get('stagnant_tail',0)}"
+7323-            )
+--
+7503-            [sys.executable,str(ROOT/"scripts"/"control-guard.py"),
+7504-             "--project",PROJECT,flag],
+7505-            capture_output=True,text=True,timeout=8
+7506-        )
+7507-        if r.returncode!=0:
+7508:            detail=(r.stdout+r.stderr).strip().replace("\n"," | ")
+7509-            log(f"CONTROL_GUARD_INVALID kind={kind} detail={detail[:1600]}")
+7510-            return False
+7511-        if kind=="plan":
+7512-            reconcile_plan_contract_revisions()
+7513-            rearm_splits_after_parent_contract_repair()
+
+=== SPLITTER COMPLETION/CORRECTIVE CALL CHAIN ===
+2514-        "\nPRIMARY_SPLITTER_RESPONSE_END\n"
+2515-        "DETERMINISTIC_VALIDATION_FAILURE_BEGIN\n"+reason+
+2516-        "\nDETERMINISTIC_VALIDATION_FAILURE_END\n"
+2517-        "This is the single correction opportunity for the existing logical splitter claim. "
+2518-        "The response above was rejected for the exact deterministic reason shown. "
+2519-        "Emit only one valid bare JSON object conforming to the splitter schema."
+2520-    )
+2521-
+2522-
+2523-# Keep the corrective launch a fresh native task-splitter child of the same
+2524-# technical root, but deliberately omit SubtaskPart.command.  A truthy
+2525-# command makes OpenCode resume the v2noop parent after task completion.
+2526:def dispatch_splitter_corrective_turn(root,prompt):
+2527-    if not http.ensure(): return False,"http-not-connected"
+2528-    if http.mode!="v1": return False,"splitter-corrective-requires-v1-runtime"
+2529-    try:
+2530-        query=urllib.parse.urlencode({"directory":PROJECT})
+2531-        http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
+2532-            payload={"agent":"transport-root","model":{"providerID":"v2noop","modelID":"root-noop"},
+2533-                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter"}]},timeout=12)
+2534-        return True,"accepted"
+2535-    except Exception as exc:
+2536-        return False,repr(exc)
+2537-
+2538-
+2539:def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=""):
+2540-    """Persist and dispatch the sole corrective *native child* of one claim."""
+2541-    status=load_split_status(did)
+2542-    if int(status.get("corrective_turn_count") or 0) >= 1:
+2543-        return False,"splitter-corrective-turn-already-consumed"
+2544-    if not session or not dispatch_token:
+2545-        return False,"splitter-corrective-turn-missing-session-or-token"
+2546-    claim_count=int(status.get("claim_count") or 0)
+2547-    archived=_archive_corrective_split_proposal(did,claim_count)
+2548-    request=load_json_object(split_request_path(did),label=f"split request {did}")
+2549-    root=_primary_splitter_execution_root(did)
+2550-    if not root: return False,"splitter-corrective-root-missing"
+2551-    primary_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.splitter-primary-response-{claim_count}.txt"
+--
+2564-        corrective_session="",
+2565-        corrective_dispatch_token="",
+2566-        corrective_first_output_sha256=first_sha,
+2567-        corrective_archive=archived,
+2568-        corrective_context_sha256=context_sha,
+2569-        corrective_execution_id=hashlib.sha256(json.dumps({"parent":did,"claim":claim_count,"root":root,"primary":session,"reason":hashlib.sha256(reason.encode()).hexdigest()},sort_keys=True).encode()).hexdigest(),
+2570-        corrective_root_session=root,
+2571-        corrective_reason_sha256=hashlib.sha256(reason.encode()).hexdigest(),
+2572-        corrective_primary_response=str(primary_path.relative_to(Path(PROJECT))),
+2573-        corrective_dispatch_state="intent-persisted",
+2574-        reason=f"invalid splitter response; one bounded corrective turn: {reason}"[:1000],
+2575-    )
+2576:    ok,detail=dispatch_splitter_corrective_turn(root,context)
+2577-    if ok:
+2578-        save_split_status(
+2579-            did,"splitter-corrective-awaiting-output",
+2580-            claim_count=claim_count,
+2581-            dispatch_token=dispatch_token,
+2582-            lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+2583-            corrective_dispatch_state="post-accepted",
+2584-        )
+2585-        log(
+2586-            f"SPLITTER_CORRECTIVE_CHILD_POST_ACCEPTED parent={did} root={root} "
+2587-            f"claim={claim_count}"
+2588-        )
+--
+2738-        )
+2739-        log(f"SPLIT_PROPOSAL_REJECTED parent={did} retryable={retryable} reason={exc}")
+2740-        return False,state
+2741-    request=load_json_object(split_request_path(did),label=f"split request {did}")
+2742-    try:
+2743-        if payload.get("protocol")==SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL:
+2744-            # A model cannot authorize parent repair.  A well-formed false
+2745-            # Verify assertion receives one same-claim corrective continuation;
+2746-            # malformed assertions still take the ordinary finite failure path.
+2747-            if _false_parent_contract_invalid(did,payload,request):
+2748-                status=load_split_status(did)
+2749-                if int(status.get("corrective_turn_count") or 0) < 1:
+2750:                    return begin_splitter_corrective_turn(
+2751-                        did,session,str(status.get("dispatch_token") or ""),
+2752-                        "parent-contract-invalid-unavailable",json.dumps(payload,sort_keys=True),
+2753-                    )
+2754-            return request_parent_contract_repair(did,payload,request)
+2755-        if (
+2756-            payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL
+2757-            or payload.get("parent_id")!=did
+2758-            or payload.get("depth")!=split_depth(did)
+2759-            or payload.get("generation")!=request.get("generation",1)
+2760-        ):
+2761-            raise ValueError("proposal protocol, parent, depth, or generation does not match request")
+2762-        children=persist_split(did,payload.get("proposals"))
+2763-        log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
+2764-        return True,"accepted"
+2765-    except (ValueError,KeyError,TypeError) as exc:
+2766-        status=load_split_status(did)
+2767-        if session and status.get("dispatch_token") and int(status.get("corrective_turn_count") or 0) < 1:
+2768:            return begin_splitter_corrective_turn(
+2769-                did,session,str(status.get("dispatch_token") or ""),
+2770-                str(exc),json.dumps(payload,sort_keys=True),
+2771-            )
+2772-        retryable,state=record_splitter_failure(
+2773-            did,str(exc),session=session,validation=True
+2774-        )
+2775-        log(f"SPLIT_PROPOSAL_REJECTED parent={did} retryable={retryable} reason={exc}")
+2776-        return False,state
+2777-
+2778-
+2779-def claim_splitter(parent, dispatch_token):
+2780-    """Cross-process lease one splitter for this exact dispatch token."""
+--
+2827-def parse_splitter_final_json(text):
+2828-    # Accept only one exact bare JSON object and nothing else.
+2829-    text=(text or "").strip()
+2830-    if not text or text.startswith("```") or text.endswith("```"):
+2831-        return None
+2832-    try:
+2833-        obj=json.loads(text)
+2834-    except Exception:
+2835-        return None
+2836-    return obj if isinstance(obj,dict) else None
+2837-
+2838-
+2839:def recover_pending_splitter_completion(parent,status,now=None):
+2840-    """Recover splitter final JSON after execute.after has returned.
+2841-
+2842-    OpenCode may not persist the child final assistant text until the task
+2843-    execute.after hook returns. Waiting synchronously inside that hook therefore
+2844-    cannot reliably make the text visible. Persist a pending session ID and let
+2845-    the normal 0.5s reconciliation loop read it afterward.
+2846-    """
+2847-    status=status if isinstance(status,dict) else {}
+2848-    session=str(status.get("completion_pending_session") or "")
+2849-    if not session:
+2850-        return False,"not-pending"
+2851-    token=str(status.get("completion_pending_token") or "")
+--
+2876-    # assistant text is durable.  Only classify the response once the durable
+2877-    # child-session text exists.
+2878-    if text.strip():
+2879-        save_split_status(
+2880-            parent,"splitter-active",
+2881-            claim_count=int(status.get("claim_count") or 0),
+2882-            dispatch_token=active_token or token,
+2883-            lease_until_epoch=status.get("lease_until_epoch",0),
+2884-            completion_pending_session="",
+2885-            completion_pending_token="",
+2886-            completion_pending_deadline_epoch=0,
+2887-        )
+2888:        return begin_splitter_corrective_turn(
+2889-            parent,
+2890-            session,
+2891-            token or active_token,
+2892-            "response did not contain the required bare JSON object",
+2893-            text,
+2894-        )
+2895-
+2896-    now=time.time() if now is None else float(now)
+2897-    try:
+2898-        deadline=float(status.get("completion_pending_deadline_epoch") or 0)
+2899-    except (TypeError,ValueError):
+2900-        deadline=0
+--
+2943-        claim_count=int(status.get("claim_count") or 0),
+2944-        dispatch_token=token,
+2945-        lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+2946-        corrective_dispatch_state="response-durable",
+2947-    )
+2948-    log(
+2949-        f"SPLITTER_CORRECTIVE_OUTPUT_RECOVERED parent={parent} "
+2950-        f"session={session} claim={status.get('claim_count')}"
+2951-    )
+2952-    return process_split_proposal(parent,session,require_proposal=True)
+2953-
+2954-
+2955:def complete_splitter(parent, session="", dispatch_token="", output_text=""):
+2956-    """Accept completion only from the currently leased splitter token."""
+2957-    with splitter_state_lock(parent):
+2958-        txn=load_split_transaction(parent)
+2959-        if txn.get("state")=="committed": return True,"accepted"
+2960-        status=load_split_status(parent)
+2961-        corrective=status.get("state")=="splitter-corrective-awaiting-output"
+2962-        expected=(status.get("corrective_dispatch_token") if corrective else status.get("dispatch_token"))
+2963-        if status.get("state") not in {"splitter-active","splitter-corrective-awaiting-output"}: return False,"stale-splitter-state"
+2964-        if not dispatch_token or expected!=dispatch_token:
+2965-            return False,"stale-splitter-completion"
+2966-        if corrective and session:
+2967-            save_split_status(parent,"splitter-corrective-awaiting-output",
+--
+3051-                continue
+3052-            if state=="splitter-corrective-awaiting-output":
+3053-                recovered,_=recover_splitter_corrective_output(did,status)
+3054-                status=load_split_status(did)
+3055-                state=status.get("state")
+3056-                if recovered or state!="splitter-corrective-awaiting-output":
+3057-                    continue
+3058-            if state=="splitter-active":
+3059-                pending_session=str(
+3060-                    status.get("completion_pending_session") or ""
+3061-                )
+3062-                if pending_session:
+3063:                    recovered,pending_detail=recover_pending_splitter_completion(
+3064-                        did,status
+3065-                    )
+3066-                    status=load_split_status(did)
+3067-                    state=status.get("state")
+3068-                    if not recovered and pending_detail=="completion-pending":
+3069-                        continue
+3070-                    if not recovered and state!="splitter-active":
+3071-                        continue
+3072-
+3073-                if state=="splitter-active" and not split_proposal_path(did).exists():
+3074-                    try:
+3075-                        expired=float(status.get("lease_until_epoch") or 0) <= time.time()
+--
+8659-        return
+8660-    if args.recover_splitter_execution_contract:
+8661-        if unknown or not args.project or args.prior_splitter_steps is None:
+8662-            raise SystemExit("splitter execution-contract recovery requires --project --prior-splitter-steps")
+8663-        PROJECT=args.project
+8664-        ok,detail=recover_splitter_execution_contract(
+8665-            args.recover_splitter_execution_contract,args.prior_splitter_steps
+8666-        )
+8667-        if not ok:
+8668-            raise SystemExit(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_DENY parent={args.recover_splitter_execution_contract} reason={detail}")
+8669-        print(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_ALLOW parent={args.recover_splitter_execution_contract} reason={detail}")
+8670-        return
+8671:    if args.complete_splitter:
+8672-        if unknown or not args.project or not args.dispatch_token:
+8673-            raise SystemExit("splitter completion requires --project --complete-splitter --dispatch-token")
+8674-        PROJECT=args.project
+8675-        try: output=base64.b64decode(args.splitter_output_b64 or "").decode("utf-8")
+8676-        except Exception: raise SystemExit("SPLIT_FAILED invalid splitter output encoding")
+8677:        ok,detail=complete_splitter(args.complete_splitter,args.prompt or "",args.dispatch_token,output)
+8678:        print(f"SPLIT_{'ACCEPTED' if ok else 'FAILED'} parent={args.complete_splitter} result={detail}")
+8679-        if not ok: raise SystemExit(3)
+8680-        return
+8681-        return
+8682-    if args.project:
+8683-        PROJECT=args.project
+8684-    if not PROJECT:
+8685-        raise SystemExit("supervisor daemon requires --project or V2_PROJECT")
+8686-    ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} implementation_compactions=3 fourth_compaction=retire")
+8687-    threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()
+8688-if __name__=="__main__": main()
+
+=== CURRENT SUPERVISOR PID/FD DETAIL ===
+SUP_PID=454907
+    PID    PPID                  STARTED     ELAPSED STAT WCHAN                          COMMAND
+ 454907    2319 Tue Sep 22 23:06:15 2026       22:35 Sl   hrtimer_nanosleep              python3 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py
+--- fds ---
+0 -> /dev/null
+1 -> /dev/null
+2 -> /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/logs/supervisor-stderr.log
+
+=== PROJECT TMP/LOCK FILES ===
+2026-09-22 23:06:15.1776248890 0 /home/bking/AI/a2-canaries/20260922-230614-d003b-live/project/.opencode-v2/.stage-a-bootstrap.lock
+2026-09-22 23:16:45.7099810770 0 /home/bking/AI/a2-canaries/20260922-230614-d003b-live/project/.opencode-v2/work/stage-a-controller.lock
+2026-09-22 23:16:53.4279609740 11 /home/bking/AI/a2-canaries/20260922-230614-d003b-live/project/.opencode-v2/work/attempts.json.lock
+2026-09-22 23:28:50.7074789730 11 /home/bking/AI/a2-canaries/20260922-230614-d003b-live/project/.opencode-v2/work/D003-B.splitter.lock
+
+=== RUN SERVER SCRIPT ===
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT="/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831"
+BIN="$(cat "$ROOT/runtime/opencode-v1.18.31.path")"
+PROJECT="${1:?usage: $0 /absolute/project/path [port]}"
+PORT="${2:-57042}"
+
+[[ -d "$PROJECT" ]] || { echo "ERROR: project does not exist: $PROJECT" >&2; exit 1; }
+[[ -x "$BIN" ]] || { echo "ERROR: OpenCode v1.18.31 binary missing: $BIN" >&2; exit 1; }
+
+CANONICAL_CONFIG_HOME="$ROOT/xdg/config"
+OVERLAY_CONFIG_HOME="$(mktemp -d /tmp/stage-a-opencode-config.XXXXXX)"
+cleanup_overlay(){
+  rm -rf -- "$OVERLAY_CONFIG_HOME"
+}
+trap cleanup_overlay EXIT
+python3 "$ROOT/scripts/stage_a_path_permissions.py" \
+  --project "$PROJECT" --config-home "$CANONICAL_CONFIG_HOME" \
+  --overlay-root "$OVERLAY_CONFIG_HOME" >/dev/null
+export XDG_CONFIG_HOME="$OVERLAY_CONFIG_HOME"
+export XDG_DATA_HOME="$ROOT/xdg/data-v11831-a2"
+export XDG_CACHE_HOME="$ROOT/xdg/cache-v11831-a2"
+export XDG_STATE_HOME="$ROOT/xdg/state-v11831-a2"
+export V2_ROOT="$ROOT"
+export V2_OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"
+export V2_OPENCODE_BASE_URL="http://127.0.0.1:$PORT"
+export V2_OPENCODE_SESSION_TABLE="session"
+export OPENCODE_DISABLE_PROJECT_CONFIG=true
+export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+
+: "${VLLM_API_KEY:?VLLM_API_KEY must be exported before starting A2 v1.18.31}"
+
+mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+
+echo "============================================================"
+echo " OpenCode V2 A2 / v1.18.31 integration server"
+echo "============================================================"
+echo "Root    : $ROOT"
+echo "Project : $PROJECT"
+echo "Port    : $PORT"
+echo "Config  : $XDG_CONFIG_HOME/opencode/opencode.jsonc"
+echo
+echo "Background subagents: enabled"
+echo "Technical root model : v2noop/root-noop"
+echo "Semantic models      : syv/qwen38-*"
+echo
+"$BIN" serve --hostname 127.0.0.1 --port "$PORT" &
+SERVER_PID=$!
+wait "$SERVER_PID"
+
+=== SERVER 58443 ENV RELEVANT ===
+SERVER_PID=34371
+XDG_DATA_HOME=/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/data-v11831-a2
+XDG_CONFIG_HOME=/tmp/stage-a-opencode-config.S0tjv7
+PWD=/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831
+HOME=/home/bking
+
+=== REPEATED STATUS PROBE (20x) ===
+01 code=200 body={}
+02 code=200 body={}
+03 code=200 body={}
+04 code=200 body={}
+05 code=200 body={}
+06 code=200 body={}
+07 code=200 body={}
+08 code=200 body={}
+09 code=200 body={}
+10 code=200 body={}
+11 code=200 body={}
+12 code=200 body={}
+13 code=200 body={}
+14 code=200 body={}
+15 code=200 body={}
+16 code=200 body={}
+17 code=200 body={}
+18 code=200 body={}
+19 code=200 body={}
+20 code=200 body={}
+JOB_000032_OK
+
+
+======================================================================
+FINISHED: 2026-09-22T21:28:53Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
