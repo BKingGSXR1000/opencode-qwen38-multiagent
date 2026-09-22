@@ -1,0 +1,105 @@
+======================================================================
+JOB: job-000007
+JOB_COMMIT: f32afe3bf07c897d21374aa1e8903dfade4bcaba
+STARTED: 2026-09-22T18:52:16Z
+======================================================================
+
+=== WAKE SCRIPT ===
+#!/usr/bin/env bash
+set -euo pipefail
+
+TITLE='AI LLMs - Continue Canary Debugging — Mozilla Firefox'
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 'message to send'"
+    exit 2
+fi
+
+MESSAGE="$*"
+
+mapfile -t WINDOWS < <(
+    xdotool search --onlyvisible --name "^${TITLE}$" 2>/dev/null || true
+)
+
+if [[ ${#WINDOWS[@]} -ne 1 ]]; then
+    echo "ERROR: expected exactly one ChatGPT Firefox window, found ${#WINDOWS[@]}"
+    printf '  %s\n' "${WINDOWS[@]:-}"
+    exit 1
+fi
+
+WIN="${WINDOWS[0]}"
+
+ACTUAL_TITLE="$(xdotool getwindowname "$WIN" 2>/dev/null || true)"
+if [[ "$ACTUAL_TITLE" != "$TITLE" ]]; then
+    echo "ERROR: window title changed:"
+    echo "  $ACTUAL_TITLE"
+    exit 1
+fi
+
+# Put exact text in clipboard; avoids keyboard-layout problems.
+printf '%s' "$MESSAGE" | xclip -selection clipboard
+
+# Bring only the designated ChatGPT window forward.
+xdotool windowactivate --sync "$WIN"
+sleep 0.4
+
+# Determine window geometry.
+eval "$(
+    xdotool getwindowgeometry --shell "$WIN" \
+      | grep -E '^(WIDTH|HEIGHT)='
+)"
+
+# Click safely inside the ChatGPT composer near the bottom-center.
+CLICK_X=$(( WIDTH * 55 / 100 ))
+CLICK_Y=$(( HEIGHT - 90 ))
+
+xdotool mousemove --window "$WIN" "$CLICK_X" "$CLICK_Y"
+xdotool click 1
+sleep 0.2
+
+# Paste exact message.
+xdotool key --clearmodifiers ctrl+v
+sleep 0.2
+
+# Send.
+xdotool key --clearmodifiers Return
+
+echo "SENT: $MESSAGE"
+
+=== FIREFOX WINDOWS ===
+count=3
+window=52428823 title=WhatsApp\ —\ Mozilla\ Firefox
+window=52429462 title=Firefox
+window=52568849 title=AI\ LLMs\ -\ Run\ bridge\ diagnostic\ —\ Mozilla\ Firefox
+
+=== FIREFOX PROCESSES ===
+bking      38836    2319  8 08:20 ?        01:02:34 /snap/firefox/8863/usr/lib/firefox/firefox
+bking      38843    2319  0 08:20 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/crashhelper 38836 9 /tmp/ 11 20260904071051
+bking      39006   38836  0 08:20 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -ipcHandle 0 -signalPipe 1 -initialChannelId {631f9c39-a01d-4d48-9477-9cd1a6c6dcb5} -parentPid 38836 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 1 forkserver
+bking      39009   39006  0 08:20 ?        00:00:07 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -parentBuildID 20260904071051 -prefsHandle 0:38771 -prefMapHandle 1:295990 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {1d808c86-b2fb-4ea4-b370-8adc4d4ab785} -parentPid 38836 -crashHelperPid 38843 -crashHelper 5 -crashReporter 6 -appDir /snap/firefox/8863/usr/lib/firefox/browser 2 socket
+bking      39026   39006  0 08:20 ?        00:00:21 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:38896 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {5b18bf2d-6101-4203-8fcf-011932c77930} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 3 tab
+bking      39036   39006  1 08:20 ?        00:08:23 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -parentBuildID 20260904071051 -prefsHandle 0:38896 -prefMapHandle 1:295990 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {f52f2112-c16c-4817-bc5e-0c025d07becb} -parentPid 38836 -crashHelperPid 38843 -crashHelper 5 -crashReporter 6 -appDir /snap/firefox/8863/usr/lib/firefox/browser 4 rdd
+bking      39111   39006  0 08:20 ?        00:02:11 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:33779 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {d6ddc112-db33-45e7-a4c1-ea3c4599a0ab} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 7 tab
+bking      39128   39006  6 08:20 ?        00:48:26 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:33779 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {a3adb60e-bf70-488c-acdc-f23b3ed1aaac} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 8 tab
+bking      39441   39006  0 08:20 ?        00:00:50 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:33779 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {cd87bb33-d251-41b1-8bc7-c48348df879d} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 11 tab
+bking      39491   39006  0 08:20 ?        00:00:06 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:39033 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {ed7b2c22-64d5-46ad-b01b-10807feefad4} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 13 tab
+bking      39734   39006  0 08:20 ?        00:05:21 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51431 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {0f68169e-7ce2-49be-b354-5c1aa0d5cb3b} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 14 tab
+bking      39921   39006  0 08:20 ?        00:00:16 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -parentBuildID 20260904071051 -sandboxingKind 0 -prefsHandle 0:56658 -prefMapHandle 1:295990 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {d112a773-0f88-4281-b4ae-c8ddb807c572} -parentPid 38836 -crashHelperPid 38843 -crashHelper 5 -crashReporter 6 -appDir /snap/firefox/8863/usr/lib/firefox/browser 15 utility
+bking      52003   39006  0 08:41 ?        00:00:33 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51472 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {17c06669-5da2-44ec-bc3d-0a2aa650fca2} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 16 tab
+bking     101195   39006  0 18:13 ?        00:00:24 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51783 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {4c1adf58-6d11-4f50-b530-64a5b6cf8df8} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 18 tab
+bking     103498   39006  0 18:28 ?        00:00:04 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51784 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {de899c66-b57a-4299-b861-0ee1536ff7e1} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 26 tab
+bking     103567   39006  0 18:28 ?        00:00:01 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51784 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {4dc1a68a-049e-4b37-b530-32671e029ea4} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 27 tab
+bking     105189   39006  0 18:32 ?        00:00:09 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51785 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {d9318a71-37ab-4e29-b899-9465f9e373be} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 34 tab
+bking     132778   39006  0 19:41 ?        00:00:04 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52082 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {0f577212-c658-4559-82b0-0cbe1209cf37} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 56 tab
+bking     136553   39006  0 19:50 ?        00:00:13 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52082 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {650e3150-f6cb-47d4-a52e-2dde4965f6a9} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 60 tab
+bking     141237   39006  0 20:03 ?        00:00:05 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52083 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {3038eac1-d520-481c-b5d0-bbccc0714e58} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 63 tab
+bking     145492   39006  0 20:14 ?        00:00:11 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52082 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {e6130c57-8884-44a8-b14a-31d2f88303a1} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 70 tab
+bking     369722   39006  0 20:52 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52186 -prefMapHandle 1:295990 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {50affebb-add0-402b-b26c-cd3a88af6ef5} -parentPid 38836 -crashHelperPid 38843 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 95 tab
+
+
+======================================================================
+FINISHED: 2026-09-22T18:52:16Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
