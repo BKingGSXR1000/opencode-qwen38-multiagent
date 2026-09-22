@@ -344,3 +344,8 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   invalid-contract assertions under the real local Qwen. The runtime was
   stopped. This establishes a prompt-only limitation, not a permission,
   transport, ownership, or scheduler failure.
+- During the initial claim-7 preflight supervisor startup, two pre-existing
+  historical sessions outside this D003 path (D005/D007) were observed and
+  classified as infrastructure-aborted for noncanonical runtime handoff. No
+  new semantic session was launched for either. This is an isolation concern
+  for future retained preflight runs; D002/D003/D004 accounting was unaffected.

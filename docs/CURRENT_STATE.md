@@ -246,6 +246,12 @@ The next remedy needs an explicit architectural decision on a deterministic
 fallback/claim policy for repeatedly false invalid-contract assertions; do not
 issue D003 claim 8 or another D003-B splitter claim.
 
+An initial retained supervisor startup also observed two old unrelated native
+sessions (D005/D007) and classified their noncanonical runtime handoffs as
+infrastructure aborts; it launched no new D005/D007 semantic worker. Treat
+this as a retained-run isolation concern. D002/D003/D004 accounting above was
+not changed by that observation.
+
 ## Retained-state protection
 Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 
