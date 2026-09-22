@@ -1,0 +1,10 @@
+{
+  "allow_sudo": false,
+  "id": "job-000011",
+  "protocol": "chatgpt-local-job-v1",
+  "ready": true,
+  "script": "run.sh",
+  "script_sha256": "e7c496f31e2f987de776c408f812fdeebba0403eefa779b63fa63ec352f3bbd8",
+  "source": "chatgpt-local-ingress-v1",
+  "timeout_seconds": 60
+}
