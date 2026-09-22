@@ -1,5 +1,5 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { join } from "node:path";
 
 const HARD_MAX_CHILD_RESULT_CHARS = 2500;
@@ -186,6 +186,23 @@ function supervisor(directory, args, extraEnv = {}) {
     "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
     "--project", directory, ...args,
   ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+}
+
+function supervisorDetached(directory, args, extraEnv = {}) {
+  // A task completion hook runs on the v1 server's active request path.  The
+  // sole corrective splitter continuation must be dispatched only after that
+  // request returns, otherwise its status probe re-enters the same server and
+  // times out.  This preserves the same exact CLI payload and environment
+  // while releasing the hook synchronously.
+  const child = spawn("python3", [
+    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+    "--project", directory, ...args,
+  ], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, ...extraEnv },
+  });
+  child.unref();
 }
 
 async function activeSessionIDsForSupervisor(client, directory) {
@@ -509,10 +526,11 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
         if (!parent) {
           throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
         }
+        const corrective = /^SPLITTER_CORRECTIVE_ORDINAL:\s*1\s*$/m.test(String(prompt || ""));
         supervisor(directory, [
           "--agent", "task-splitter",
           "--prompt", prompt,
-          "--claim-splitter", hookCallID(event),
+          corrective ? "--claim-corrective-splitter" : "--claim-splitter", hookCallID(event),
         ]);
         return;
       }
@@ -590,11 +608,12 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
         const token = hookCallID(event);
         const encoded = Buffer.from(rawResult, "utf8").toString("base64");
         try {
-          supervisor(directory, [
+          supervisorDetached(directory, [
             "--complete-splitter", splitterParent,
             "--prompt", session,
             "--dispatch-token", token,
             "--splitter-output-b64", encoded,
+            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
           ]);
         } catch {
         }

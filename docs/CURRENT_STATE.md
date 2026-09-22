@@ -276,3 +276,23 @@ Proceed autonomously through `ROADMAP.md`. Use local Qwen/OpenCode when it is th
 Keep Work context small: exact DB rows, exact session/event grep, bounded log/file ranges, targeted diffs; avoid ingesting whole run trees or giant logs.
 
 Update this file after meaningful state changes so a fresh Work session can resume without reconstructing history.
+
+## Unproven corrective-native-child transport — 2026-09-22
+
+The bounded correction policy now treats one logical splitter claim as at most
+two native `task-splitter` children: a primary child plus one corrective child.
+The corrective child is separately intent-bound to the existing claim, primary
+session, deterministic rejection hash, ordinal `1`, and technical root; it
+does not increment the splitter claim count or grant another recovery budget.
+The direct context carries the unchanged canonical split request, primary
+response, exact deterministic rejection, and a bare-JSON-only instruction.
+
+Focused splitter component coverage passes (26 tests), as do Python/Node syntax
+checks. A fresh disposable D003-B-equivalent preflight passed with zero POSTs
+and zero worker launches. Its primary response was deterministically invalid;
+the corrective intent persisted at claim count `1` / corrective count `1`, and
+the corrective root `prompt_async` returned HTTP 204. However, no second native
+child appeared under the root, so that accepted POST remains transport-ambiguous.
+No replay was attempted. This implementation is component-tested but is **not
+yet proven end-to-end live**. The disposable runtime was stopped. Retained
+D003-B/D003/D002/D004 state and recovery budgets were not touched.

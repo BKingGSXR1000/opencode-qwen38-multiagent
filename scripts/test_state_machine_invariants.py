@@ -658,6 +658,162 @@ class SplitStateMachineTests(unittest.TestCase):
                 "D001",payload,json.loads((self.work/"D001.split-request.json").read_text())
             )
 
+    def _false_parent_invalid(self):
+        return {
+            "protocol":supervisor.SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "field":"verify_command",
+            "reason":"the model incorrectly claims this structurally valid Verify command is invalid",
+        }
+
+    def _claim_false_parent_invalid(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        self.assertEqual(supervisor.claim_splitter("D001","claim-1"),(True,"claimed"))
+        (self.work/"stage-a-controller-executions.json").write_text(json.dumps({
+            "executions":{"primary":{"root_session":"technical-root", "action":{
+                "agent":"task-splitter","deliverable":"D001"}}}}))
+        sent=[]
+        old=supervisor.dispatch_splitter_corrective_turn
+        supervisor.dispatch_splitter_corrective_turn=lambda session,text: (sent.append((session,text)) or (True,"accepted"))
+        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old)
+        outcome=supervisor.complete_splitter(
+            "D001","splitter-session","claim-1",json.dumps(self._false_parent_invalid()),
+        )
+        self.assertEqual(outcome,(True,"splitter-corrective-turn-pending"))
+        self.assertEqual(len(sent),1)
+        self.assertEqual(sent[0][0],"technical-root")
+        self.assertIn("SPLITTER_CORRECTIVE_ORDINAL: 1",sent[0][1])
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"splitter-corrective-awaiting-output")
+        self.assertEqual((status["claim_count"],status.get("proposal_failures",0)),(1,0))
+        self.assertEqual(status["corrective_turn_count"],1)
+        supervisor.save_split_status("D001","splitter-corrective-awaiting-output",
+            claim_count=1,corrective_session="corrective-session",
+            corrective_dispatch_token="corrective-token")
+        self.assertTrue((self.work/"D001.split-proposal.corrective-rejected-1.json").is_file())
+        return sent
+
+    def test_false_parent_invalid_gets_one_corrective_turn_and_valid_reply_accepts_same_claim(self):
+        self._claim_false_parent_invalid()
+        valid={
+            "protocol":supervisor.SPLIT_PROPOSAL_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "proposals":self.proposals(),
+        }
+        old=supervisor.last_assistant_text_db
+        supervisor.last_assistant_text_db=lambda session: json.dumps(valid)
+        self.addCleanup(setattr,supervisor,"last_assistant_text_db",old)
+        supervisor.reconcile_split_proposals()
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"accepted")
+        self.assertEqual(status["claim_count"],1)
+        self.assertEqual(status.get("proposal_failures",0),0)
+        self.assertEqual(status["corrective_turn_count"],1)
+        self.assertEqual(status["children"],["D001-A","D001-B"])
+
+    def test_second_invalid_corrective_reply_fails_claim_without_a_third_turn(self):
+        sent=self._claim_false_parent_invalid()
+        old=supervisor.last_assistant_text_db
+        supervisor.last_assistant_text_db=lambda session: json.dumps(self._false_parent_invalid())
+        self.addCleanup(setattr,supervisor,"last_assistant_text_db",old)
+        # Same canonical object proves the duplicate-output guard waits; a
+        # distinct invalid object then consumes the claim normally.
+        supervisor.reconcile_split_proposals()
+        self.assertEqual(len(sent),1)
+        second=dict(self._false_parent_invalid())
+        second["reason"]="the second response repeats an unsupported claim despite the deterministic result"
+        supervisor.last_assistant_text_db=lambda session: json.dumps(second)
+        supervisor.reconcile_split_proposals()
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"split-retryable")
+        self.assertEqual((status["claim_count"],status["proposal_failures"]),(1,1))
+        self.assertEqual(status["corrective_turn_count"],1)
+        self.assertEqual(len(sent),1)
+
+    def test_deterministically_invalid_parent_uses_existing_repair_without_corrective_turn(self):
+        self.parent["verify_command"]=""
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.parent},
+        }))
+        supervisor.record_leaf_failure("D001","second","genuine")
+        self.assertEqual(supervisor.claim_splitter("D001","claim-1"),(True,"claimed"))
+        sent=[]
+        old_dispatch=supervisor.dispatch_splitter_corrective_turn
+        old_repair=supervisor._request_parent_contract_repair
+        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+        supervisor._request_parent_contract_repair=lambda *args: (True,"parent-contract-repair")
+        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old_dispatch)
+        self.addCleanup(setattr,supervisor,"_request_parent_contract_repair",old_repair)
+        self.assertEqual(supervisor.complete_splitter(
+            "D001","splitter-session","claim-1",json.dumps(self._false_parent_invalid()),
+        ),(True,"parent-contract-repair"))
+        self.assertEqual(sent,[])
+
+    def test_missing_owned_artifacts_with_valid_verify_gets_one_corrective_split_turn(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        self.assertEqual(supervisor.claim_splitter("D001","claim-1"),(True,"claimed"))
+        (self.work/"stage-a-controller-executions.json").write_text(json.dumps({
+            "executions":{"primary":{"root_session":"technical-root", "action":{
+                "agent":"task-splitter","deliverable":"D001"}}}}))
+        payload={
+            **self._false_parent_invalid(),"field":"prerequisite_artifacts",
+            "reason":"a parent-owned artifact is absent after a valid Verify failure",
+        }
+        sent=[]
+        old=supervisor.dispatch_splitter_corrective_turn
+        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old)
+        self.assertEqual(supervisor.complete_splitter(
+            "D001","splitter-session","claim-1",json.dumps(payload),
+        ),(True,"splitter-corrective-turn-pending"))
+        self.assertEqual(len(sent),1)
+        self.assertFalse((self.ctrl/"IMPLEMENTATION_PLAN.repair.json").exists())
+
+    def test_missing_bare_json_gets_one_corrective_turn_then_valid_response_accepts(self):
+        supervisor.record_leaf_failure("D001","second","genuine")
+        self.assertEqual(supervisor.claim_splitter("D001","claim-1"),(True,"claimed"))
+        (self.work/"stage-a-controller-executions.json").write_text(json.dumps({
+            "executions":{"primary":{"root_session":"technical-root", "action":{
+                "agent":"task-splitter","deliverable":"D001"}}}}))
+        sent=[]
+        old_dispatch=supervisor.dispatch_splitter_corrective_turn
+        old_last=supervisor.last_assistant_text_db
+        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+        supervisor.last_assistant_text_db=lambda session: ""
+        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old_dispatch)
+        self.addCleanup(setattr,supervisor,"last_assistant_text_db",old_last)
+        self.assertEqual(supervisor.complete_splitter(
+            "D001","splitter-session","claim-1","Maximum steps reached",
+        ),(True,"splitter-corrective-turn-pending"))
+        self.assertIn("required bare JSON",sent[0][1])
+        supervisor.save_split_status("D001","splitter-corrective-awaiting-output",
+            claim_count=1,corrective_session="corrective-session",
+            corrective_dispatch_token="corrective-token")
+        supervisor.last_assistant_text_db=lambda session: json.dumps({
+            "protocol":supervisor.SPLIT_PROPOSAL_PROTOCOL,"parent_id":"D001",
+            "depth":0,"generation":1,"proposals":self.proposals(),
+        })
+        supervisor.reconcile_split_proposals()
+        status=supervisor.load_split_status("D001")
+        self.assertEqual((status["state"],status["claim_count"]),("accepted",1))
+
+    def test_mixed_invalid_types_do_not_get_a_second_corrective_turn(self):
+        self._claim_false_parent_invalid()
+        sent=[]
+        old_dispatch=supervisor.dispatch_splitter_corrective_turn
+        old_last=supervisor.last_assistant_text_db
+        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+        supervisor.last_assistant_text_db=lambda session: "not bare JSON"
+        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old_dispatch)
+        self.addCleanup(setattr,supervisor,"last_assistant_text_db",old_last)
+        supervisor.reconcile_split_proposals()
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["proposal_failures"],1)
+        self.assertEqual(status["corrective_turn_count"],1)
+        self.assertEqual(sent,[])
+
     def test_read_only_parent_reaches_finite_terminal_state(self):
         manifest=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
         leaf=manifest["leaves"]["D001"]

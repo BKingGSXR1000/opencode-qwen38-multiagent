@@ -875,6 +875,14 @@ def save_split_status(did, state, **detail):
         "execution_contract_recovery_fingerprints",
         "direct_context_recovery_fingerprints",
         "false_parent_contract_repair_recovery_fingerprints",
+        # A corrective turn is a bounded continuation of one already-claimed
+        # splitter session.  Keep its audit fields through every terminal
+        # transition; they are evidence, not a new recovery budget.
+        "corrective_turn_count","corrective_session","corrective_dispatch_token",
+        "corrective_first_output_sha256","corrective_archive",
+        "corrective_context_sha256","corrective_dispatch_state",
+        "corrective_execution_id","corrective_root_session",
+        "corrective_reason_sha256","corrective_primary_response",
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -2240,6 +2248,25 @@ def _detach_split_overlay_for_contract_repair(did):
 
 
 def request_parent_contract_repair(did, payload, request):
+    field,reason,verify_errors=_validate_parent_contract_invalid_payload(
+        did,payload,request,
+    )
+    if verify_errors:
+        return _request_parent_contract_repair(
+            did,field,reason,request,verify_errors,
+        )
+    raise ValueError(
+        "parent-contract-invalid verify_command lacks a deterministic contract defect"
+    )
+
+
+def _validate_parent_contract_invalid_payload(did, payload, request):
+    """Validate the alternate splitter form without granting it authority.
+
+    The caller decides whether an otherwise well-formed assertion becomes a
+    repair request or the single corrective-turn case.  This keeps the
+    semantic claim separate from deterministic Verify truth.
+    """
     allowed={"protocol","parent_id","depth","generation","field","reason"}
     if set(payload) != allowed:
         raise ValueError("parent-contract-invalid payload has wrong fields")
@@ -2266,10 +2293,11 @@ def request_parent_contract_repair(did, payload, request):
         parent_contract.get("verify_command") if isinstance(parent_contract,dict) else ""
     )
     verify_errors=validate_verify_command(verify_command)
-    if not verify_errors:
-        raise ValueError(
-            "parent-contract-invalid verify_command lacks a deterministic contract defect"
-        )
+    return field,reason,verify_errors
+
+
+def _request_parent_contract_repair(did, field, reason, request, verify_errors):
+    """Enter the existing repair route after deterministic proof only."""
 
     key=_structured_plan_symbolic_key(did)
     repair_path=Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.repair.json"
@@ -2402,6 +2430,167 @@ def request_parent_contract_repair(did, payload, request):
         f"{did} key={key} field={field}"
     )
     return True,"parent-contract-repair"
+
+
+# This is deliberately a correction of an unavailable conclusion, not a
+# semantic decomposition hint.  The canonical request remains the full source
+# of facts and the child retains its original model/profile and no-tool policy.
+SPLITTER_FALSE_PARENT_INVALID_CONTEXT=(
+    "The supervisor independently validated that the parent contract's exact "
+    "Verify command is structurally valid. `parent-contract-invalid` is not "
+    "available for this claim. Missing required artifacts are unfinished "
+    "failing work and may be assigned to split children. Emit a valid bare "
+    "split proposal under the existing schema only."
+)
+
+
+def splitter_corrective_context(reason):
+    """Return only the deterministic defect, never a semantic solution."""
+    if reason=="parent-contract-invalid-unavailable":
+        return SPLITTER_FALSE_PARENT_INVALID_CONTEXT
+    return (
+        f"Your previous response was deterministically invalid: {reason}. "
+        "Emit only one valid bare JSON object conforming to the existing splitter schema."
+    )
+
+
+def _splitter_response_fingerprint(text):
+    raw=str(text or "").strip()
+    payload=parse_splitter_final_json(raw)
+    canonical=(
+        json.dumps(payload,sort_keys=True,separators=(",",":"))
+        if isinstance(payload,dict) else raw
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _false_parent_contract_invalid(did,payload,request):
+    """True only for a well-formed false Verify assertion eligible to correct."""
+    try:
+        field,_,verify_errors=_validate_parent_contract_invalid_payload(
+            did,payload,request,
+        )
+    except (ValueError,KeyError,TypeError):
+        return False
+    return field=="verify_command" and not verify_errors
+
+
+def _archive_corrective_split_proposal(did,claim_count):
+    path=split_proposal_path(did)
+    if not path.exists():
+        return ""
+    archived=path.with_name(
+        f"{did}.split-proposal.corrective-rejected-{claim_count}.json"
+    )
+    if archived.exists():
+        archived.unlink()
+    os.replace(path,archived)
+    return str(archived.relative_to(Path(PROJECT)))
+
+
+def _primary_splitter_execution_root(parent):
+    ledger=load_json_object(
+        Path(PROJECT)/".opencode-v2"/"work"/"stage-a-controller-executions.json",
+        default_missing={"executions":{}},label="controller execution ledger",
+    )
+    for item in (ledger.get("executions") or {}).values():
+        action=item.get("action") if isinstance(item,dict) else {}
+        if isinstance(action,dict) and action.get("agent")=="task-splitter" and action.get("deliverable")==parent:
+            root=str(item.get("root_session") or "")
+            if root: return root
+    return ""
+
+
+def corrective_splitter_prompt(parent,request,primary_output,reason):
+    """Direct context for the only corrective native child of one claim."""
+    return (
+        f"SPLIT_PARENT: {parent}\nSPLITTER_CORRECTIVE_ORDINAL: 1\n"
+        "CANONICAL_SPLIT_REQUEST_JSON_BEGIN\n"
+        +json.dumps(request,sort_keys=True,separators=(",",":"))+
+        "\nCANONICAL_SPLIT_REQUEST_JSON_END\n"
+        "PRIMARY_SPLITTER_RESPONSE_BEGIN\n"+primary_output+
+        "\nPRIMARY_SPLITTER_RESPONSE_END\n"
+        "DETERMINISTIC_VALIDATION_FAILURE_BEGIN\n"+reason+
+        "\nDETERMINISTIC_VALIDATION_FAILURE_END\n"
+        "This is the single correction opportunity for the existing logical splitter claim. "
+        "The response above was rejected for the exact deterministic reason shown. "
+        "Emit only one valid bare JSON object conforming to the splitter schema."
+    )
+
+
+def dispatch_splitter_corrective_turn(root,prompt):
+    if not http.ensure(): return False,"http-not-connected"
+    if http.mode!="v1": return False,"splitter-corrective-requires-v1-runtime"
+    try:
+        query=urllib.parse.urlencode({"directory":PROJECT})
+        http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
+            payload={"agent":"transport-root","model":{"providerID":"v2noop","modelID":"root-noop"},
+                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter","command":"stage-a-controller"}]},timeout=12)
+        return True,"accepted"
+    except Exception as exc:
+        return False,repr(exc)
+
+
+def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=""):
+    """Persist and dispatch the sole corrective *native child* of one claim."""
+    status=load_split_status(did)
+    if int(status.get("corrective_turn_count") or 0) >= 1:
+        return False,"splitter-corrective-turn-already-consumed"
+    if not session or not dispatch_token:
+        return False,"splitter-corrective-turn-missing-session-or-token"
+    claim_count=int(status.get("claim_count") or 0)
+    archived=_archive_corrective_split_proposal(did,claim_count)
+    request=load_json_object(split_request_path(did),label=f"split request {did}")
+    root=_primary_splitter_execution_root(did)
+    if not root: return False,"splitter-corrective-root-missing"
+    primary_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.splitter-primary-response-{claim_count}.txt"
+    atomic_write_text(primary_path,raw_output)
+    context=corrective_splitter_prompt(did,request,raw_output,reason)
+    context_sha=hashlib.sha256(context.encode()).hexdigest()
+    first_sha=_splitter_response_fingerprint(raw_output)
+    # Mark dispatch attempted before POST.  A transport ambiguity must never
+    # cause a second corrective POST or silently create a third model turn.
+    save_split_status(
+        did,"splitter-corrective-awaiting-output",
+        claim_count=claim_count,
+        dispatch_token=dispatch_token,
+        lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+        corrective_turn_count=1,
+        corrective_session="",
+        corrective_dispatch_token="",
+        corrective_first_output_sha256=first_sha,
+        corrective_archive=archived,
+        corrective_context_sha256=context_sha,
+        corrective_execution_id=hashlib.sha256(json.dumps({"parent":did,"claim":claim_count,"root":root,"primary":session,"reason":hashlib.sha256(reason.encode()).hexdigest()},sort_keys=True).encode()).hexdigest(),
+        corrective_root_session=root,
+        corrective_reason_sha256=hashlib.sha256(reason.encode()).hexdigest(),
+        corrective_primary_response=str(primary_path.relative_to(Path(PROJECT))),
+        corrective_dispatch_state="intent-persisted",
+        reason=f"invalid splitter response; one bounded corrective turn: {reason}"[:1000],
+    )
+    ok,detail=dispatch_splitter_corrective_turn(root,context)
+    if ok:
+        save_split_status(
+            did,"splitter-corrective-awaiting-output",
+            claim_count=claim_count,
+            dispatch_token=dispatch_token,
+            lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+            corrective_dispatch_state="post-accepted",
+        )
+        log(
+            f"SPLITTER_CORRECTIVE_CHILD_POST_ACCEPTED parent={did} root={root} "
+            f"claim={claim_count}"
+        )
+        return True,"splitter-corrective-turn-pending"
+    _,state=record_splitter_failure(
+        did,f"splitter corrective turn dispatch failed: {detail}",
+        session=session,validation=False,
+    )
+    log(
+        f"SPLITTER_CORRECTIVE_TURN_DISPATCH_FAILED parent={did} "
+        f"session={session} state={state} detail={detail}"
+    )
+    return False,state
 
 
 def rearm_splits_after_parent_contract_repair():
@@ -2547,6 +2736,16 @@ def process_split_proposal(did, session="", require_proposal=False):
     request=load_json_object(split_request_path(did),label=f"split request {did}")
     try:
         if payload.get("protocol")==SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL:
+            # A model cannot authorize parent repair.  A well-formed false
+            # Verify assertion receives one same-claim corrective continuation;
+            # malformed assertions still take the ordinary finite failure path.
+            if _false_parent_contract_invalid(did,payload,request):
+                status=load_split_status(did)
+                if int(status.get("corrective_turn_count") or 0) < 1:
+                    return begin_splitter_corrective_turn(
+                        did,session,str(status.get("dispatch_token") or ""),
+                        "parent-contract-invalid-unavailable",json.dumps(payload,sort_keys=True),
+                    )
             return request_parent_contract_repair(did,payload,request)
         if (
             payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL
@@ -2559,6 +2758,12 @@ def process_split_proposal(did, session="", require_proposal=False):
         log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
         return True,"accepted"
     except (ValueError,KeyError,TypeError) as exc:
+        status=load_split_status(did)
+        if session and status.get("dispatch_token") and int(status.get("corrective_turn_count") or 0) < 1:
+            return begin_splitter_corrective_turn(
+                did,session,str(status.get("dispatch_token") or ""),
+                str(exc),json.dumps(payload,sort_keys=True),
+            )
         retryable,state=record_splitter_failure(
             did,str(exc),session=session,validation=True
         )
@@ -2596,6 +2801,23 @@ def claim_splitter(parent, dispatch_token):
             save_split_status(parent,"splitter-active",claim_count=claims,dispatch_token=dispatch_token,lease_until_epoch=now+SPLITTER_LEASE_SECONDS)
     log(f"SPLITTER_CLAIM parent={parent} generation={load_split_status(parent).get('generation',1)} token={dispatch_token} claim={claims}")
     return True,"claimed"
+
+def claim_corrective_splitter(parent,dispatch_token):
+    """Bind one native corrective child without incrementing the claim."""
+    with splitter_state_lock(parent):
+        status=load_split_status(parent)
+        if (status.get("state")!="splitter-corrective-awaiting-output"
+            or int(status.get("corrective_turn_count") or 0)!=1):
+            return False,"corrective-not-pending"
+        existing=str(status.get("corrective_dispatch_token") or "")
+        if existing:
+            return (existing==dispatch_token),("corrective-replay" if existing==dispatch_token else "corrective-already-bound")
+        save_split_status(parent,"splitter-corrective-awaiting-output",
+            claim_count=int(status.get("claim_count") or 0),
+            corrective_dispatch_token=dispatch_token,
+            corrective_dispatch_state="native-child-bound",
+            lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS)
+    return True,"corrective-bound"
 
 def parse_splitter_final_json(text):
     # Accept only one exact bare JSON object and nothing else.
@@ -2654,15 +2876,64 @@ def recover_pending_splitter_completion(parent,status,now=None):
     return False,state
 
 
+def recover_splitter_corrective_output(parent,status):
+    """Recover the one new response after the persisted corrective prompt.
+
+    The originating false object stays in this session's history.  Comparing
+    its canonical hash prevents reconciliation from treating it as a second
+    response or sending another corrective prompt.
+    """
+    status=status if isinstance(status,dict) else {}
+    session=str(status.get("corrective_session") or "")
+    token=str(status.get("corrective_dispatch_token") or "")
+    if not session or not token:
+        return False,"corrective-state-missing-session-or-token"
+    text=last_assistant_text_db(session)
+    payload=parse_splitter_final_json(text)
+    if not text.strip():
+        return False,"corrective-output-pending"
+    digest=_splitter_response_fingerprint(text)
+    if digest==str(status.get("corrective_first_output_sha256") or ""):
+        return False,"corrective-output-pending"
+    if not isinstance(payload,dict):
+        _,state=record_splitter_failure(
+            parent,"corrective splitter response did not contain required bare JSON",
+            session=session,validation=True,
+        )
+        return False,state
+    atomic_write_json(split_proposal_path(parent),payload)
+    save_split_status(
+        parent,"splitter-corrective-processing",
+        claim_count=int(status.get("claim_count") or 0),
+        dispatch_token=token,
+        lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+        corrective_dispatch_state="response-durable",
+    )
+    log(
+        f"SPLITTER_CORRECTIVE_OUTPUT_RECOVERED parent={parent} "
+        f"session={session} claim={status.get('claim_count')}"
+    )
+    return process_split_proposal(parent,session,require_proposal=True)
+
+
 def complete_splitter(parent, session="", dispatch_token="", output_text=""):
     """Accept completion only from the currently leased splitter token."""
     with splitter_state_lock(parent):
         txn=load_split_transaction(parent)
         if txn.get("state")=="committed": return True,"accepted"
         status=load_split_status(parent)
-        if status.get("state")!="splitter-active": return False,"stale-splitter-state"
-        if not dispatch_token or status.get("dispatch_token")!=dispatch_token:
+        corrective=status.get("state")=="splitter-corrective-awaiting-output"
+        expected=(status.get("corrective_dispatch_token") if corrective else status.get("dispatch_token"))
+        if status.get("state") not in {"splitter-active","splitter-corrective-awaiting-output"}: return False,"stale-splitter-state"
+        if not dispatch_token or expected!=dispatch_token:
             return False,"stale-splitter-completion"
+        if corrective and session:
+            save_split_status(parent,"splitter-corrective-awaiting-output",
+                claim_count=int(status.get("claim_count") or 0),
+                corrective_session=session,
+                corrective_dispatch_state="native-child-completed",
+                lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS)
+            status=load_split_status(parent)
         if not split_request_path(parent).exists(): return False,"split-request-missing"
 
         payload=parse_splitter_final_json(output_text)
@@ -2683,27 +2954,13 @@ def complete_splitter(parent, session="", dispatch_token="", output_text=""):
                     session=session,validation=False,
                 )
                 return False,state
-            now=time.time()
-            try:
-                lease_until=float(status.get("lease_until_epoch") or 0)
-            except (TypeError,ValueError):
-                lease_until=0
-            deadline=now+SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS
-            save_split_status(
-                parent,"splitter-active",
-                claim_count=int(status.get("claim_count") or 0),
-                dispatch_token=dispatch_token,
-                lease_until_epoch=max(lease_until,deadline),
-                completion_pending_session=session,
-                completion_pending_token=dispatch_token,
-                completion_pending_deadline_epoch=deadline,
+            if corrective:
+                _,state=record_splitter_failure(parent,"corrective splitter response did not contain required bare JSON",session=session,validation=True)
+                return False,state
+            return begin_splitter_corrective_turn(
+                parent,session,dispatch_token,
+                "response did not contain the required bare JSON object",output_text,
             )
-            log(
-                f"SPLIT_COMPLETION_PENDING_PERSIST parent={parent} "
-                f"session={session} token={dispatch_token} "
-                f"grace={SPLITTER_COMPLETION_PERSIST_GRACE_SECONDS}s"
-            )
-            return True,"completion-pending"
 
         atomic_write_json(split_proposal_path(parent),payload)
         log(
@@ -2732,6 +2989,12 @@ def reconcile_split_proposals():
                 "split-unavailable-read-only-parent",
             }:
                 continue
+            if state=="splitter-corrective-awaiting-output":
+                recovered,_=recover_splitter_corrective_output(did,status)
+                status=load_split_status(did)
+                state=status.get("state")
+                if recovered or state!="splitter-corrective-awaiting-output":
+                    continue
             if state=="splitter-active":
                 pending_session=str(
                     status.get("completion_pending_session") or ""
@@ -2766,6 +3029,18 @@ def reconcile_split_proposals():
                                 reason="splitter lease expired",
                                 lease_until_epoch=0,
                             )
+            elif state=="splitter-corrective-awaiting-output":
+                try:
+                    expired=float(status.get("lease_until_epoch") or 0) <= time.time()
+                except (TypeError,ValueError):
+                    expired=True
+                if expired:
+                    _,terminal=record_splitter_failure(
+                        did,"splitter corrective turn completed without a new bare JSON proposal",
+                        session=str(status.get("corrective_session") or ""),
+                        validation=False,
+                    )
+                    log(f"SPLITTER_CORRECTIVE_TURN_TIMEOUT parent={did} state={terminal}")
             if split_proposal_path(did).exists():
                 process_split_proposal(did)
 
@@ -5643,6 +5918,54 @@ class OpenCodeHTTP:
         except Exception:
             pass
 
+        # Completion hooks run in a plugin subprocess.  V1's plugin host can
+        # sanitize V2_OPENCODE_BASE_URL even though the parent server was
+        # launched with it.  Discover only this repository's pinned v1 binary,
+        # then prove the exact PROJECT endpoint before continuing a splitter.
+        # This is transport identity recovery, not a broader server search.
+        v1_binary=os.path.realpath(str(ROOT/"runtime"/"opencode-v1.18.31"/"opencode"))
+        for proc in Path("/proc").glob("[0-9]*"):
+            try:
+                pid=int(proc.name)
+                cmd=(proc/"cmdline").read_bytes().replace(
+                    b"\0",b" "
+                ).decode("utf-8","replace")
+                if not cmd.startswith(v1_binary+" serve "):
+                    continue
+                ports=[]
+                for line in ss.splitlines():
+                    if f"pid={pid}" not in line:
+                        continue
+                    ports += [
+                        int(match.group(1))
+                        for match in re.finditer(r"127\.0\.0\.1:(\d+)",line)
+                    ]
+                for port in dict.fromkeys(ports):
+                    self.base=f"http://127.0.0.1:{port}"
+                    self.password=None
+                    self.prefix=""
+                    self.mode="v1"
+                    query=("?"+urllib.parse.urlencode({"directory":PROJECT})) if PROJECT else ""
+                    try:
+                        status=self.request("GET","/session/status"+query,timeout=2)
+                        if not isinstance(status,dict):
+                            raise RuntimeError("v1 /session/status did not return an object")
+                        log(
+                            f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 "
+                            f"probe=/session/status discovered-pid={pid}"
+                        )
+                        csv(
+                            "HTTP_CONTROL_CONNECTED",
+                            detail=f"{self.base} mode=v1 probe=/session/status pid={pid}",
+                        )
+                        return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        self.base=self.password=self.prefix=None
+        self.mode=None
+
         # Observed standalone topology on this machine:
         # opencode2 -> opencode2.exe serve --stdio --port 0
         # The child owns a random 127.0.0.1 TCP port and OPENCODE_PASSWORD.
@@ -5920,6 +6243,33 @@ class OpenCodeHTTP:
                 "POST",f"/api/session/{qsid}/prompt",
                 payload={"text":text,"delivery":"steer"},
                 timeout=12,
+            )
+            return True,sid
+        except urllib.error.HTTPError as e:
+            try: detail=e.read().decode("utf-8","replace")[:1000]
+            except Exception: detail=""
+            return False,f"HTTP {e.code}: {detail}"
+        except Exception as e:
+            return False,repr(e)
+
+    def continue_splitter_session(self,sid,text):
+        """Send the one supervisor-authorized follow-up to a v1 splitter.
+
+        This intentionally does not relax generic v1 session steering: only
+        the splitter state machine invokes it after recording the sole
+        corrective turn.  It neither creates a session nor supplies a model,
+        agent, or tool override, so OpenCode continues the native child with
+        its existing task-splitter configuration and permissions.
+        """
+        if not self.ensure():
+            return False,"http-not-connected"
+        if self.mode!="v1":
+            return False,"splitter-corrective-requires-v1-runtime"
+        try:
+            query=urllib.parse.urlencode({"directory":PROJECT})
+            self.request(
+                "POST",f"/session/{urllib.parse.quote(sid)}/prompt_async?{query}",
+                payload={"parts":[{"type":"text","text":text}]},timeout=12,
             )
             return True,sid
         except urllib.error.HTTPError as e:
@@ -7978,7 +8328,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -7993,7 +8343,13 @@ def main():
     ap.add_argument("--agent")
     ap.add_argument("--prompt"); ap.add_argument("--project")
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
+    ap.add_argument("--opencode-base-url",default="")
     args,unknown=ap.parse_known_args()
+    if args.opencode_base_url:
+        # The plugin completion hook runs in a short-lived child process.  Pass
+        # its known native server identity explicitly so a bounded corrective
+        # continuation does not depend on inherited discovery state.
+        os.environ["V2_OPENCODE_BASE_URL"]=args.opencode_base_url.rstrip("/")
     if args.materialize_dispatch_child:
         if unknown or not args.project or not args.agent:
             raise SystemExit(
@@ -8165,6 +8521,16 @@ def main():
         ok,detail=claim_splitter(parent,args.claim_splitter)
         if not ok: raise SystemExit(f"SPLIT_DENY parent={parent} reason={detail}")
         print(f"SPLIT_ALLOW parent={parent} generation=1")
+        return
+    if args.claim_corrective_splitter:
+        if unknown or not args.project or args.agent!="task-splitter" or args.prompt is None:
+            raise SystemExit("corrective splitter claim requires canonical task-splitter prompt")
+        PROJECT=args.project; parent=parse_split_parent(args.prompt)
+        if not parent or "SPLITTER_CORRECTIVE_ORDINAL: 1" not in args.prompt:
+            raise SystemExit("SPLIT_DENY invalid corrective splitter prompt")
+        ok,detail=claim_corrective_splitter(parent,args.claim_corrective_splitter)
+        if not ok: raise SystemExit(f"SPLIT_DENY parent={parent} reason={detail}")
+        print(f"SPLIT_CORRECTIVE_ALLOW parent={parent} ordinal=1")
         return
     if args.recover_splitter_direct_context_contract:
         if unknown or not args.project:

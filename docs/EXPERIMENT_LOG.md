@@ -349,3 +349,20 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   classified as infrastructure-aborted for noncanonical runtime handoff. No
   new semantic session was launched for either. This is an isolation concern
   for future retained preflight runs; D002/D003/D004 accounting was unaffected.
+
+## Disposable bounded corrective-native-child transport — 2026-09-22
+
+- The generalized correction implementation preserves a single logical
+  splitter claim while allowing at most one separately bound corrective native
+  `task-splitter` child. Its intent records the primary session, root, ordinal
+  `1`, state/reason identity, and canonical request context; no deterministic
+  split synthesis or extra recovery claim is permitted.
+- Focused splitter suite: PASS (26 tests). Python and plugin syntax checks:
+  PASS. Fresh disposable D003-B-equivalent preflight passed with zero semantic
+  POSTs/workers. The primary model response was deterministically invalid, and
+  corrective intent persisted with claim count 1 / corrective count 1.
+- The corrective root `prompt_async` returned HTTP 204, but no second native
+  child appeared. The POST is therefore ambiguous and was not replayed. The
+  live end-to-end proof remains incomplete; do not use this as authorization
+  for retained D003-B recovery. Retained D003-B/D003/D002/D004 were untouched
+  and the disposable runtime was stopped.
