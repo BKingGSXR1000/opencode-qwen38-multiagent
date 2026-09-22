@@ -1,0 +1,69 @@
+======================================================================
+JOB: job-000023
+JOB_COMMIT: f878ee9d8da7314f6eeac03c1df255d3364fdd66
+STARTED: 2026-09-22T21:06:14Z
+======================================================================
+
+CANARY_BASE=/home/bking/AI/a2-canaries/20260922-230614-d003b-live
+BASE_URL=http://127.0.0.1:58443
+[2026-09-22T23:06:15+0200] SUPERVISOR_LEAF_READY deliverable=D001 attempt=1
+[2026-09-22T23:06:15+0200] SUPERVISOR_LEAF_READY deliverable=D002 attempt=1
+[2026-09-22T23:06:15+0200] SUPERVISOR_LEAF_READY deliverable=D003-A attempt=1
+[2026-09-22T23:06:15+0200] DETERMINISTIC_SHADOW state=ccb3c4ed37a34c24 phase=recursive-split actions=[{"agent":"task-splitter","deliverable":"D003-B","generation":1,"kind":"launch"}]
+{
+  "action": {
+    "agent": "task-splitter",
+    "deliverable": "D003-B",
+    "generation": 1,
+    "kind": "launch"
+  },
+  "attempts": 2,
+  "ownership": [
+    ".opencode-v2/probes/ephemeris_moons.json",
+    "fixtures/vectors/moons/"
+  ],
+  "project": "/home/bking/AI/a2-canaries/20260922-230614-d003b-live/project",
+  "protocol": "v2-d003-current-state-canary-v1",
+  "split_state": "split-required",
+  "state_version": "ccb3c4ed37a34c24",
+  "verify_evidence": [
+    {
+      "attempt": 1,
+      "command": "test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4||!fs.statSync(p).isDirectory())process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'",
+      "error": "",
+      "executed": true,
+      "exit_code": 1,
+      "result": "verify-failed-1",
+      "session": "synthetic-D003-B-1",
+      "stderr": "missing moons JSON records\\n",
+      "stdout": "",
+      "timestamp": "2026-09-22T21:06:15Z"
+    },
+    {
+      "attempt": 2,
+      "command": "test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4||!fs.statSync(p).isDirectory())process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'",
+      "error": "",
+      "executed": true,
+      "exit_code": 1,
+      "result": "verify-failed-1",
+      "session": "synthetic-D003-B-2",
+      "stderr": "missing moons JSON records\\n",
+      "stdout": "",
+      "timestamp": "2026-09-22T21:06:15Z"
+    }
+  ]
+}
+454907
+ROOT_SESSION=ses_f350f29a8ffeE24xJvn8ZyvfBj
+usage: run-stage-a-tick.py [-h] [--project PROJECT] [--base-url BASE_URL]
+                           [--root-session ROOT_SESSION]
+                           [--preflight-proof PREFLIGHT_PROOF] [--selftest]
+run-stage-a-tick.py: error: --project, --base-url, --root-session, and --preflight-proof are required unless --selftest is used
+
+
+======================================================================
+FINISHED: 2026-09-22T21:06:16Z
+RETURN_CODE: 2
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================

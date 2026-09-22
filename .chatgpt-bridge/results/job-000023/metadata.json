@@ -1,0 +1,33 @@
+{
+  "finished_at": "2026-09-22T21:06:16Z",
+  "hostname": "AI-Beast",
+  "id": "job-000023",
+  "infrastructure_reason": "",
+  "interrupted": false,
+  "job_commit": "f878ee9d8da7314f6eeac03c1df255d3364fdd66",
+  "manifest": {
+    "allow_sudo": false,
+    "id": "job-000023",
+    "protocol": "chatgpt-local-job-v1",
+    "ready": true,
+    "script": "run.sh",
+    "script_sha256": "6f7d4fd57a9e802d840adf09cb3356934c5d583de70556d719e30406ec3e0ddf",
+    "source": "chatgpt-local-ingress-v1",
+    "timeout_seconds": 600
+  },
+  "protocol": "chatgpt-local-job-result-v2",
+  "returncode": 2,
+  "started_at": "2026-09-22T21:06:14Z",
+  "target_after": {
+    "branch": "a2-v11831-integration",
+    "head": "23cce479d25f1a1b90dbf2a141b6525be78c5264",
+    "status_porcelain": "M scripts/drive-stage-a-run.py\n M scripts/run-a2-v11831-server.sh\n M scripts/run-stage-a-tick.py\n M scripts/stage_a_controller.py\n M scripts/start-stage-a-run.sh\n M scripts/supervisor.py\n?? scripts/test_transport_root_no_continuation.py"
+  },
+  "target_before": {
+    "branch": "a2-v11831-integration",
+    "head": "23cce479d25f1a1b90dbf2a141b6525be78c5264",
+    "status_porcelain": "M scripts/drive-stage-a-run.py\n M scripts/run-a2-v11831-server.sh\n M scripts/run-stage-a-tick.py\n M scripts/stage_a_controller.py\n M scripts/start-stage-a-run.sh\n M scripts/supervisor.py\n?? scripts/test_transport_root_no_continuation.py"
+  },
+  "target_repo": "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831",
+  "timed_out": false
+}
