@@ -1,0 +1,863 @@
+======================================================================
+JOB: job-000037
+JOB_COMMIT: 1aeea97f894f3dc833c13805f72142bbcbdf6423
+STARTED: 2026-09-23T05:49:40Z
+======================================================================
+
+=== CONTROLLER LEDGER ===
+{
+  "executions": {
+    "bc2ec7ef2880f279385f8fb9ac4f051d09673c5c501fdbcc1fe9c4da5e1a6a96": {
+      "action": {
+        "agent": "task-splitter",
+        "deliverable": "D003-B",
+        "generation": 1,
+        "kind": "launch"
+      },
+      "baseline_attempt": {
+        "count": 2,
+        "sessions": [
+          "synthetic-D003-B-1",
+          "synthetic-D003-B-2"
+        ]
+      },
+      "baseline_child_ids": [],
+      "created_at_ms": 1790111805726,
+      "execution_id": "bc2ec7ef2880f279385f8fb9ac4f051d09673c5c501fdbcc1fe9c4da5e1a6a96",
+      "root_session": "ses_f350f29a8ffeE24xJvn8ZyvfBj",
+      "state_version": "ccb3c4ed37a34c24",
+      "transport": "prompt_async+SubtaskPart",
+      "transport_may_have_been_attempted": true
+    }
+  },
+  "owner": "stage-a-controller",
+  "protocol": "v2-stage-a-controller-execution-ledger-v1"
+}
+
+=== BASE URL + COMPLETION HOOK REFERENCES ===
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1133-        splitter = (self.AGENTS / "task-splitter.md").read_text()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1134-        plugin = (self.AGENTS.parent / "plugins/v2-bounded-subagent.js").read_text()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1135-        self.assertIn("steps: 3", splitter)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1136-        self.assertIn('"protocol": "v2-task-split-proposal-v1"', splitter)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1137-        self.assertIn("read the request, then\nwrite the proposal", splitter)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1138-        self.assertIn("--claim-splitter", plugin)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py:1139:        self.assertIn("--complete-splitter", plugin)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1140-        self.assertIn("splitter for the same generation", plugin)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1141-        self.assertIn("materializeSplitterProposal", plugin)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1142-        self.assertIn("proposalFromOutput", plugin)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1143-        self.assertIn("never derive children, scopes, IDs", plugin)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1144-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1145-    def test_root_never_resets_or_relaunches_a_blocked_planner_ledger(self):
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1624-        self.fail_twice()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1625-        request = supervisor.split_request_path("D001")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1626-        self.assertTrue(request.exists())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1627-        self.assertEqual(supervisor.claim_splitter("D001", "launch-1"), (True, "claimed"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1628-        self.assertEqual(supervisor.claim_splitter("D001", "launch-2"), (False, "splitter-active"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1629-        supervisor.split_proposal_path("D001").write_text(json.dumps(self.proposal_payload()))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py:1630:        self.assertEqual(supervisor.complete_splitter("D001", "split-session"), (True, "accepted"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1631-        self.assertFalse(request.exists())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1632-        state = control_state.snapshot(self.tmp.name)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1633-        self.assertEqual(state["leaves"]["D001"]["split_children"], ["D001-A", "D001-B"])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1634-        self.assertTrue(state["leaves"]["D001-A"]["eligible"])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1635-        self.assertTrue(state["leaves"]["D001-B"]["eligible"])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1636-        self.assertEqual(supervisor.claim_splitter("D001", "restart"), (False, "split-request-missing"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1637-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1638-    def test_splitter_missing_or_invalid_proposal_is_a_finite_explicit_failure(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1639-        self.fail_twice()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1640-        self.assertEqual(supervisor.claim_splitter("D001", "launch"), (True, "claimed"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py:1641:        self.assertEqual(supervisor.complete_splitter("D001", "split-session"),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1642-                         (False, "splitter-completed-without-durable-proposal"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1643-        leaf = control_state.snapshot(self.tmp.name)["leaves"]["D001"]
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1644-        self.assertEqual(leaf["split_state"], "splitter-failed")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1645-        state = {"acceptance":{"complete":True}, "plan":{"complete":True},
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1646-                 "leaves":{"D001":leaf}, "tests":{"complete":False},
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_control_plane.py-1647-                 "acceptance_validation":{"complete":False}}
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-357-def materialize_native_child(project: Path, base_url: str, sid: str, agent: str) -> None:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-358-    """Bind an observed child to its preclaim through supervisor-owned state."""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-359-    supervisor = Path(__file__).with_name("supervisor.py")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-360-    env = dict(os.environ)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-361-    root = supervisor.parent.parent
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-362-    env["V2_ROOT"] = str(root)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py:363:    env["V2_OPENCODE_BASE_URL"] = base_url.rstrip("/")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-364-    env["V2_OPENCODE_SESSION_TABLE"] = "session"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-365-    default_db = root / "xdg" / "data-v11831-a2" / "opencode" / "opencode.db"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-366-    if not default_db.is_file():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-367-        raise ControllerError(f"canonical Stage-A database is missing: {default_db}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-368-    env["V2_OPENCODE_DB"] = str(default_db)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-369-    proc = subprocess.run(
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1713-    ap.add_argument("--execute-first-implementation", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1714-    ap.add_argument("--execute-first-task-splitter", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1715-    ap.add_argument("--execute-first-planner", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1716-    ap.add_argument("--execute-first-semantic", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1717-    ap.add_argument("--execute-first-final-tests", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1718-    ap.add_argument("--reconcile-execution", default="")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py:1719:    ap.add_argument("--base-url", default=os.environ.get("V2_OPENCODE_BASE_URL", ""))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1720-    ap.add_argument("--root-session", default="")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1721-    ap.add_argument("--selftest", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1722-    ns = ap.parse_args()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1723-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1724-    if ns.selftest:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_controller.py-1725-        selftest()
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-15-  echo "ERROR: v1.18.31 OpenCode database is not available: $DB" >&2
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-16-  exit 1
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-17-}
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-18-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-19-export V2_ROOT="$ROOT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-20-export V2_PROJECT="$PROJECT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh:21:export V2_OPENCODE_BASE_URL="$BASE_URL"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-22-export V2_OPENCODE_DB="$DB"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-23-export V2_OPENCODE_SESSION_TABLE="session"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-24-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/start-a2-v11831-supervisor.sh-25-exec "$ROOT/scripts/start-supervisor-singleton.sh" "$PROJECT"
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-257-        self.assertEqual(supervisor.claim_splitter("D001", "split-session"), (True, "claimed"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-258-        proposal = {
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-259-            "protocol": supervisor.SPLIT_PROPOSAL_PROTOCOL, "parent_id": "D001", "depth": 0,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-260-            "generation": 1, "proposals": self.proposal(),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-261-        }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-262-        self.assertEqual(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py:263:            supervisor.complete_splitter("D001", "ses-split-child", "split-session", json.dumps(proposal)),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-264-            (True, "accepted"),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-265-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-266-        split_state = control_state.snapshot(self.project)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-267-        self.assertEqual(split_state["leaves"]["D001"]["split_children"], ["D001-A", "D001-B"])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-268-        materialized = supervisor.load_manifest()["leaves"]
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_stage_a_stabilization.py-269-        self.assertEqual(materialized["D001-A"]["owned_artifact_paths"], ["a.txt", "b.txt"])
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-673-            "executions":{"primary":{"root_session":"technical-root", "action":{
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-674-                "agent":"task-splitter","deliverable":"D001"}}}}))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-675-        sent=[]
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-676-        old=supervisor.dispatch_splitter_corrective_turn
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-677-        supervisor.dispatch_splitter_corrective_turn=lambda session,text: (sent.append((session,text)) or (True,"accepted"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-678-        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:679:        outcome=supervisor.complete_splitter(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-680-            "D001","splitter-session","claim-1",json.dumps(self._false_parent_invalid()),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-681-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-682-        self.assertEqual(outcome,(True,"splitter-corrective-turn-pending"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-683-        self.assertEqual(len(sent),1)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-684-        self.assertEqual(sent[0][0],"technical-root")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-685-        self.assertIn("SPLITTER_CORRECTIVE_ORDINAL: 1",sent[0][1])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-686-        status=supervisor.load_split_status("D001")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-687-        self.assertEqual(status["state"],"splitter-corrective-awaiting-output")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-688-        self.assertEqual((status["claim_count"],status.get("proposal_failures",0)),(1,0))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-689-        self.assertEqual(status["corrective_turn_count"],1)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-690-        supervisor.save_split_status("D001","splitter-corrective-awaiting-output",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-691-            claim_count=1,corrective_session="corrective-session",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:692:            corrective_dispatch_token="corrective-token")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-693-        self.assertTrue((self.work/"D001.split-proposal.corrective-rejected-1.json").is_file())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-694-        return sent
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-695-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-696-    def test_false_parent_invalid_gets_one_corrective_turn_and_valid_reply_accepts_same_claim(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-697-        self._claim_false_parent_invalid()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-698-        valid={
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-743-        old_dispatch=supervisor.dispatch_splitter_corrective_turn
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-744-        old_repair=supervisor._request_parent_contract_repair
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-745-        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-746-        supervisor._request_parent_contract_repair=lambda *args: (True,"parent-contract-repair")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-747-        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old_dispatch)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-748-        self.addCleanup(setattr,supervisor,"_request_parent_contract_repair",old_repair)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:749:        self.assertEqual(supervisor.complete_splitter(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-750-            "D001","splitter-session","claim-1",json.dumps(self._false_parent_invalid()),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-751-        ),(True,"parent-contract-repair"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-752-        self.assertEqual(sent,[])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-753-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-754-    def test_missing_owned_artifacts_with_valid_verify_gets_one_corrective_split_turn(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-755-        supervisor.record_leaf_failure("D001","second","genuine")
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-762-            "reason":"a parent-owned artifact is absent after a valid Verify failure",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-763-        }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-764-        sent=[]
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-765-        old=supervisor.dispatch_splitter_corrective_turn
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-766-        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-767-        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:768:        self.assertEqual(supervisor.complete_splitter(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-769-            "D001","splitter-session","claim-1",json.dumps(payload),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-770-        ),(True,"splitter-corrective-turn-pending"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-771-        self.assertEqual(len(sent),1)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-772-        self.assertFalse((self.ctrl/"IMPLEMENTATION_PLAN.repair.json").exists())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-773-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-774-    def test_missing_bare_json_gets_one_corrective_turn_then_valid_response_accepts(self):
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-781-        old_dispatch=supervisor.dispatch_splitter_corrective_turn
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-782-        old_last=supervisor.last_assistant_text_db
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-783-        supervisor.dispatch_splitter_corrective_turn=lambda *args: (sent.append(args) or (True,"accepted"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-784-        supervisor.last_assistant_text_db=lambda session: ""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-785-        self.addCleanup(setattr,supervisor,"dispatch_splitter_corrective_turn",old_dispatch)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-786-        self.addCleanup(setattr,supervisor,"last_assistant_text_db",old_last)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:787:        self.assertEqual(supervisor.complete_splitter(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-788-            "D001","splitter-session","claim-1","Maximum steps reached",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-789-        ),(True,"splitter-corrective-turn-pending"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-790-        self.assertIn("required bare JSON",sent[0][1])
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-791-        supervisor.save_split_status("D001","splitter-corrective-awaiting-output",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-792-            claim_count=1,corrective_session="corrective-session",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:793:            corrective_dispatch_token="corrective-token")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-794-        supervisor.last_assistant_text_db=lambda session: json.dumps({
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-795-            "protocol":supervisor.SPLIT_PROPOSAL_PROTOCOL,"parent_id":"D001",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-796-            "depth":0,"generation":1,"proposals":self.proposals(),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-797-        })
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-798-        supervisor.reconcile_split_proposals()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-799-        status=supervisor.load_split_status("D001")
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-832-        self.assertEqual(snap["resume_phase"],"execution-blocked")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-833-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-834-    def test_stale_splitter_lease_is_recoverable_once_then_bounded(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-835-        supervisor.record_leaf_failure("D001","second","genuine")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-836-        supervisor.save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-837-            "D001","splitter-active",claim_count=1,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:838:            lease_until_epoch=1,dispatch_token="old"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-839-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-840-        ok,detail=supervisor.claim_splitter("D001","new")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-841-        self.assertTrue(ok); self.assertEqual(detail,"claimed")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-842-        status=supervisor.load_split_status("D001")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-843-        self.assertEqual(status["claim_count"],2)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-844-        supervisor.save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-845-            "D001","splitter-active",claim_count=2,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:846:            lease_until_epoch=1,dispatch_token="new"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-847-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-848-        ok,detail=supervisor.claim_splitter("D001","third")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-849-        self.assertFalse(ok); self.assertEqual(detail,"splitter-failed")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-850-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-851-    def test_profile_recovery_requires_a_changed_profile_and_is_bounded(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-852-        supervisor.record_leaf_failure("D001","second","genuine")
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1005-        ok,detail=supervisor.process_split_proposal("D001",session="s2",require_proposal=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1006-        self.assertFalse(ok); self.assertEqual(detail,"split-validation-failed")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1007-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1008-    def test_expired_pending_splitter_completion_recovers_without_dispatch(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1009-        supervisor.record_leaf_failure("D001","second","genuine")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1010-        supervisor.save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py:1011:            "D001","splitter-active",claim_count=1,dispatch_token="split-1",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1012-            lease_until_epoch=0,completion_pending_session="no-json-session",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1013-            completion_pending_token="split-1",completion_pending_deadline_epoch=0,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1014-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1015-        before=json.loads((self.work/"attempts.json").read_text())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1016-        result=supervisor.reconcile_splits_once()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/test_state_machine_invariants.py-1017-        after=json.loads((self.work/"attempts.json").read_text())
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-166-    return name
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-167-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-168-def stage_a_transport_mode():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-169-    # Isolated v1.18.31 transport mode: technical root, external scheduler.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-170-    return (
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-171-        session_table_name()=="session"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:172:        and bool(str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-173-    )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-174-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-175-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-176-def root_agent_name():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-177-    # Beta keeps the semantic orchestrator; v1 Stage A uses a technical root.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-178-    return "transport-root" if stage_a_transport_mode() else "orchestrator"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-179-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-180-def v1_session_status_snapshot(strict=False):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-181-    # OpenCode v1.18.31 keeps live busy/retry/idle state in the session status API,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-182-    # not in a persisted session.time_idle column.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:183:    base=str(os.environ.get('V2_OPENCODE_BASE_URL') or '').rstrip('/')
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-184-    if not base:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-185-        if strict:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:186:            raise RuntimeError('V2_OPENCODE_BASE_URL is not configured')
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-187-        return {}
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-188-    query=urllib.parse.urlencode({'directory':PROJECT}) if PROJECT else ''
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-189-    url=base+'/session/status'+(('?'+query) if query else '')
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-190-    try:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-191-        req=urllib.request.Request(url,headers={'Accept':'application/json'})
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-192-        with urllib.request.urlopen(req,timeout=2.0) as resp:
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-877-        "false_parent_contract_repair_recovery_fingerprints",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-878-        # A corrective turn is a bounded continuation of one already-claimed
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-879-        # splitter session.  Keep its audit fields through every terminal
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-880-        # transition; they are evidence, not a new recovery budget.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-881-        "completion_pending_session","completion_pending_token",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-882-        "completion_pending_deadline_epoch",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:883:        "corrective_turn_count","corrective_session","corrective_dispatch_token",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-884-        "corrective_first_output_sha256","corrective_archive",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-885-        "corrective_context_sha256","corrective_dispatch_state",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-886-        "corrective_execution_id","corrective_root_session",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-887-        "corrective_reason_sha256","corrective_primary_response",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-888-    ):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-889-        if key in previous:
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2533-                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter"}]},timeout=12)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2534-        return True,"accepted"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2535-    except Exception as exc:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2536-        return False,repr(exc)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2537-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2538-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2539:def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=""):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2540-    """Persist and dispatch the sole corrective *native child* of one claim."""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2541-    status=load_split_status(did)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2542-    if int(status.get("corrective_turn_count") or 0) >= 1:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2543-        return False,"splitter-corrective-turn-already-consumed"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2544:    if not session or not dispatch_token:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2545-        return False,"splitter-corrective-turn-missing-session-or-token"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2546-    claim_count=int(status.get("claim_count") or 0)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2547-    archived=_archive_corrective_split_proposal(did,claim_count)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2548-    request=load_json_object(split_request_path(did),label=f"split request {did}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2549-    root=_primary_splitter_execution_root(did)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2550-    if not root: return False,"splitter-corrective-root-missing"
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2555-    first_sha=_splitter_response_fingerprint(raw_output)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2556-    # Mark dispatch attempted before POST.  A transport ambiguity must never
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2557-    # cause a second corrective POST or silently create a third model turn.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2558-    save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2559-        did,"splitter-corrective-awaiting-output",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2560-        claim_count=claim_count,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2561:        dispatch_token=dispatch_token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2562-        lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2563-        corrective_turn_count=1,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2564-        corrective_session="",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2565:        corrective_dispatch_token="",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2566-        corrective_first_output_sha256=first_sha,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2567-        corrective_archive=archived,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2568-        corrective_context_sha256=context_sha,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2569-        corrective_execution_id=hashlib.sha256(json.dumps({"parent":did,"claim":claim_count,"root":root,"primary":session,"reason":hashlib.sha256(reason.encode()).hexdigest()},sort_keys=True).encode()).hexdigest(),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2570-        corrective_root_session=root,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2571-        corrective_reason_sha256=hashlib.sha256(reason.encode()).hexdigest(),
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2575-    )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2576-    ok,detail=dispatch_splitter_corrective_turn(root,context)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2577-    if ok:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2578-        save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2579-            did,"splitter-corrective-awaiting-output",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2580-            claim_count=claim_count,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2581:            dispatch_token=dispatch_token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2582-            lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2583-            corrective_dispatch_state="post-accepted",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2584-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2585-        log(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2586-            f"SPLITTER_CORRECTIVE_CHILD_POST_ACCEPTED parent={did} root={root} "
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2587-            f"claim={claim_count}"
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2745-            # Verify assertion receives one same-claim corrective continuation;
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2746-            # malformed assertions still take the ordinary finite failure path.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2747-            if _false_parent_contract_invalid(did,payload,request):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2748-                status=load_split_status(did)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2749-                if int(status.get("corrective_turn_count") or 0) < 1:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2750-                    return begin_splitter_corrective_turn(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2751:                        did,session,str(status.get("dispatch_token") or ""),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2752-                        "parent-contract-invalid-unavailable",json.dumps(payload,sort_keys=True),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2753-                    )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2754-            return request_parent_contract_repair(did,payload,request)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2755-        if (
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2756-            payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2757-            or payload.get("parent_id")!=did
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2761-            raise ValueError("proposal protocol, parent, depth, or generation does not match request")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2762-        children=persist_split(did,payload.get("proposals"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2763-        log(f"SPLIT_PROPOSAL_ACCEPTED parent={did} children={','.join(children)}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2764-        return True,"accepted"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2765-    except (ValueError,KeyError,TypeError) as exc:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2766-        status=load_split_status(did)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2767:        if session and status.get("dispatch_token") and int(status.get("corrective_turn_count") or 0) < 1:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2768-            return begin_splitter_corrective_turn(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2769:                did,session,str(status.get("dispatch_token") or ""),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2770-                str(exc),json.dumps(payload,sort_keys=True),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2771-            )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2772-        retryable,state=record_splitter_failure(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2773-            did,str(exc),session=session,validation=True
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2774-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2775-        log(f"SPLIT_PROPOSAL_REJECTED parent={did} retryable={retryable} reason={exc}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2776-        return False,state
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2777-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2778-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2779:def claim_splitter(parent, dispatch_token):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2780-    """Cross-process lease one splitter for this exact dispatch token."""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2781-    if not valid_deliverable_id(parent) or not split_request_path(parent).exists():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2782-        return False,"split-request-missing"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2783:    if not dispatch_token:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2784-        return False,"splitter-dispatch-token-missing"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2785-    with splitter_state_lock(parent):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2786-        with dispatch_lock:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2787-            status=load_split_status(parent)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2788-            state=status.get("state","split-required")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2789-            claims=int(status.get("claim_count") or 0)
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2800-            if state in {"split-validation-failed","splitter-failed","split-unavailable-read-only-parent","parent-finalize-failed"}: return False,state
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2801-            if leaf_children(parent): return False,"already-split"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2802-            if claims>=splitter_claim_limit(status):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2803-                save_split_status(parent,"splitter-failed",claim_count=claims,reason="splitter claim budget exhausted",lease_until_epoch=0)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2804-                return False,"splitter-failed"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2805-            claims+=1
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2806:            save_split_status(parent,"splitter-active",claim_count=claims,dispatch_token=dispatch_token,lease_until_epoch=now+SPLITTER_LEASE_SECONDS)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2807:    log(f"SPLITTER_CLAIM parent={parent} generation={load_split_status(parent).get('generation',1)} token={dispatch_token} claim={claims}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2808-    return True,"claimed"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2809-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2810:def claim_corrective_splitter(parent,dispatch_token):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2811-    """Bind one native corrective child without incrementing the claim."""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2812-    with splitter_state_lock(parent):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2813-        status=load_split_status(parent)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2814-        if (status.get("state")!="splitter-corrective-awaiting-output"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2815-            or int(status.get("corrective_turn_count") or 0)!=1):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2816-            return False,"corrective-not-pending"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2817:        existing=str(status.get("corrective_dispatch_token") or "")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2818-        if existing:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2819:            return (existing==dispatch_token),("corrective-replay" if existing==dispatch_token else "corrective-already-bound")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2820-        save_split_status(parent,"splitter-corrective-awaiting-output",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2821-            claim_count=int(status.get("claim_count") or 0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2822:            corrective_dispatch_token=dispatch_token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2823-            corrective_dispatch_state="native-child-bound",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2824-            lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2825-    return True,"corrective-bound"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2826-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2827-def parse_splitter_final_json(text):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2828-    # Accept only one exact bare JSON object and nothing else.
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2846-    """
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2847-    status=status if isinstance(status,dict) else {}
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2848-    session=str(status.get("completion_pending_session") or "")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2849-    if not session:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2850-        return False,"not-pending"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2851-    token=str(status.get("completion_pending_token") or "")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2852:    active_token=str(status.get("dispatch_token") or "")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2853-    if token and active_token and token!=active_token:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2854-        return False,"stale-pending-token"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2855-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2856-    text=last_assistant_text_db(session)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2857-    payload=parse_splitter_final_json(text)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2858-    if isinstance(payload,dict):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2859-        atomic_write_json(split_proposal_path(parent),payload)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2860-        save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2861-            parent,"splitter-active",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2862-            claim_count=int(status.get("claim_count") or 0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2863:            dispatch_token=active_token or token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2864-            lease_until_epoch=status.get("lease_until_epoch",0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2865-            completion_pending_session="",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2866-            completion_pending_token="",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2867-            completion_pending_deadline_epoch=0,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2868-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2869-        log(
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2876-    # assistant text is durable.  Only classify the response once the durable
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2877-    # child-session text exists.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2878-    if text.strip():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2879-        save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2880-            parent,"splitter-active",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2881-            claim_count=int(status.get("claim_count") or 0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2882:            dispatch_token=active_token or token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2883-            lease_until_epoch=status.get("lease_until_epoch",0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2884-            completion_pending_session="",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2885-            completion_pending_token="",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2886-            completion_pending_deadline_epoch=0,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2887-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2888-        return begin_splitter_corrective_turn(
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2918-    The originating false object stays in this session's history.  Comparing
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2919-    its canonical hash prevents reconciliation from treating it as a second
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2920-    response or sending another corrective prompt.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2921-    """
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2922-    status=status if isinstance(status,dict) else {}
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2923-    session=str(status.get("corrective_session") or "")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2924:    token=str(status.get("corrective_dispatch_token") or "")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2925-    if not session or not token:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2926-        return False,"corrective-state-missing-session-or-token"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2927-    text=last_assistant_text_db(session)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2928-    payload=parse_splitter_final_json(text)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2929-    if not text.strip():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2930-        return False,"corrective-output-pending"
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2938-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2939-        return False,state
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2940-    atomic_write_json(split_proposal_path(parent),payload)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2941-    save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2942-        parent,"splitter-corrective-processing",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2943-        claim_count=int(status.get("claim_count") or 0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2944:        dispatch_token=token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2945-        lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2946-        corrective_dispatch_state="response-durable",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2947-    )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2948-    log(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2949-        f"SPLITTER_CORRECTIVE_OUTPUT_RECOVERED parent={parent} "
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2950-        f"session={session} claim={status.get('claim_count')}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2951-    )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2952-    return process_split_proposal(parent,session,require_proposal=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2953-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2954-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2955:def complete_splitter(parent, session="", dispatch_token="", output_text=""):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2956-    """Accept completion only from the currently leased splitter token."""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2957-    with splitter_state_lock(parent):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2958-        txn=load_split_transaction(parent)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2959-        if txn.get("state")=="committed": return True,"accepted"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2960-        status=load_split_status(parent)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2961-        corrective=status.get("state")=="splitter-corrective-awaiting-output"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2962:        expected=(status.get("corrective_dispatch_token") if corrective else status.get("dispatch_token"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2963-        if status.get("state") not in {"splitter-active","splitter-corrective-awaiting-output"}: return False,"stale-splitter-state"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:2964:        if not dispatch_token or expected!=dispatch_token:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2965-            return False,"stale-splitter-completion"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2966-        if corrective and session:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2967-            save_split_status(parent,"splitter-corrective-awaiting-output",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2968-                claim_count=int(status.get("claim_count") or 0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2969-                corrective_session=session,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2970-                corrective_dispatch_state="native-child-completed",
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2996-                # text only AFTER execute.after returns.  The corrective
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2997-                # session is already durably bound above, so leave the state
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2998-                # pending and let recover_splitter_corrective_output() read
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-2999-                # the final session text on the normal reconciliation tick.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3000-                log(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3001-                    f"SPLITTER_CORRECTIVE_COMPLETION_PENDING parent={parent} "
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:3002:                    f"session={session} token={dispatch_token}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3003-                )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3004-                return False,"corrective-output-pending"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3005-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3006-            # Same persistence race for the primary splitter.  Do not mistake
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3007-            # the TaskTool wrapper from execute.after for the child's final
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3008-            # model answer.  Give SQLite the established 15-second splitter
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3009-            # persistence grace and classify the durable child text afterward.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3010-            save_split_status(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3011-                parent,"splitter-active",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3012-                claim_count=int(status.get("claim_count") or 0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:3013:                dispatch_token=dispatch_token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3014-                lease_until_epoch=status.get("lease_until_epoch",0),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3015-                completion_pending_session=session,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:3016:                completion_pending_token=dispatch_token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3017-                completion_pending_deadline_epoch=time.time()+15,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3018-            )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3019-            log(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3020-                f"SPLITTER_COMPLETION_PENDING_AFTER_HOOK parent={parent} "
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:3021:                f"session={session} token={dispatch_token}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3022-            )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3023-            return False,"completion-pending"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3024-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3025-        atomic_write_json(split_proposal_path(parent),payload)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3026-        log(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3027-            f"SPLIT_PROPOSAL_PERSISTED_BY_SUPERVISOR parent={parent} "
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:3028:            f"session={session} token={dispatch_token} source={source or 'unknown'}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3029-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3030-        return process_split_proposal(parent,session,require_proposal=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3031-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3032-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3033-def reconcile_split_proposals():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-3034-    """Crash recovery for prepared transactions and proposal/request state."""
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5532-def available_implementation_slots(data=None, strict=False):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5533-    active=len(active_implementation_sessions(strict=strict))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5534-    reserved=reserved_dispatch_slot_count(data)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5535-    return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5536-# V2.6.9 FIVE-SLOT IMPLEMENTATION SCHEDULER END
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5537-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:5538:def preclaim_attempt(agent,text,dispatch_token):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5539-    """Atomically observe scheduler capacity and reserve one canonical attempt."""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5540-    did,violation=validate_dispatch(agent,text)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5541-    if violation:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5542-        return "denied",did,violation,0
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5543-    if did and read_only_genuine_terminal(did):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5544-        return "denied",did,"read_only_genuine_terminal",0
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5549-            if (
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5550-                agent in IMPLEMENTATION_AGENTS
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5551-                and not existing_slot
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5552-                and available_implementation_slots(data,strict=True) <= 0
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5553-            ):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5554-                return "denied",did,"worker_slots_full",0
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:5555:            claim,n=claim_attempt(f"dispatch:{dispatch_token}",did)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5556-            if claim in {"claimed","existing"}:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5557-                if claim=="claimed":
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5558-                    write_ownership_baseline(did)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5559-                ensure_execution_baseline(did,n)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5560-                authorized = n > AUTOMATIC_ATTEMPT_LIMIT
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5561-                suffix = " operator_authorized=true" if authorized else ""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:5562:                log(f"DISPATCH_CLAIM token={dispatch_token} agent={agent} deliverable={did} attempt={n}{suffix}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:5563:                csv("DISPATCH_CLAIM",f"dispatch:{dispatch_token}",agent,f"{did} attempt={n}{suffix}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5564-                return "claimed",did,"",n
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5565-            return "denied",did,("attempt_limit" if claim=="limit" else "attempt_ledger_invalid"),n
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5566-    except (RuntimeError,StateCorruptionError) as exc:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5567-        log(f"DISPATCH_SCHEDULER_DENY deliverable={did} error={exc}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5568-        return "denied",did,"worker_scheduler_unavailable",0
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5569-
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5938-            obj=json.loads(raw)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5939-        except Exception:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5940-            return raw.decode("utf-8","replace")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5941-        return obj.get("data") if isinstance(obj,dict) and set(obj)=={"data"} else obj
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5942-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5943-    def discover(self):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:5944:        explicit=str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip().rstrip("/")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5945-        if explicit:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5946-            self.base=explicit
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5947-            self.password=(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5948-                os.environ.get("V2_OPENCODE_PASSWORD")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5949-                or os.environ.get("OPENCODE_PASSWORD")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5950-                or os.environ.get("OPENCODE_SERVER_PASSWORD")
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5976-                stderr=subprocess.DEVNULL,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5977-            )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5978-        except Exception:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5979-            pass
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5980-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5981-        # Completion hooks run in a plugin subprocess.  V1's plugin host can
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:5982:        # sanitize V2_OPENCODE_BASE_URL even though the parent server was
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5983-        # launched with it.  Discover only this repository's pinned v1 binary,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5984-        # then prove the exact PROJECT endpoint before continuing a splitter.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5985-        # This is transport identity recovery, not a broader server search.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5986-        v1_binary=os.path.realpath(str(ROOT/"runtime"/"opencode-v1.18.31"/"opencode"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5987-        for proc in Path("/proc").glob("[0-9]*"):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-5988-            try:
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8385-        time.sleep(0.5)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8386-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8387-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8388-def main():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8389-    global PROJECT
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8390-    ap=argparse.ArgumentParser(add_help=False)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8391:    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8392-    ap.add_argument("--reconcile-splits-once",action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8393-    ap.add_argument("--render-runtime-prompt")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8394-    ap.add_argument("--render-dispatch-prompt")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8395-    ap.add_argument("--root-read-check")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8396-    ap.add_argument("--early-write-check")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8397-    ap.add_argument("--tool-name",default="")
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8406-    ap.add_argument("--opencode-base-url",default="")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8407-    args,unknown=ap.parse_known_args()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8408-    if args.opencode_base_url:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8409-        # The plugin completion hook runs in a short-lived child process.  Pass
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8410-        # its known native server identity explicitly so a bounded corrective
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8411-        # continuation does not depend on inherited discovery state.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8412:        os.environ["V2_OPENCODE_BASE_URL"]=args.opencode_base_url.rstrip("/")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8413-    if args.materialize_dispatch_child:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8414-        if unknown or not args.project or not args.agent:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8415-            raise SystemExit(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8416-                "native child materialization requires --project --agent "
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8417-                "--materialize-dispatch-child"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8418-            )
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8665-            args.recover_splitter_execution_contract,args.prior_splitter_steps
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8666-        )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8667-        if not ok:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8668-            raise SystemExit(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_DENY parent={args.recover_splitter_execution_contract} reason={detail}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8669-        print(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_ALLOW parent={args.recover_splitter_execution_contract} reason={detail}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8670-        return
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8671:    if args.complete_splitter:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8672:        if unknown or not args.project or not args.dispatch_token:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8673:            raise SystemExit("splitter completion requires --project --complete-splitter --dispatch-token")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8674-        PROJECT=args.project
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8675:        try: output=base64.b64decode(args.splitter_output_b64 or "").decode("utf-8")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8676-        except Exception: raise SystemExit("SPLIT_FAILED invalid splitter output encoding")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8677:        ok,detail=complete_splitter(args.complete_splitter,args.prompt or "",args.dispatch_token,output)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py:8678:        print(f"SPLIT_{'ACCEPTED' if ok else 'FAILED'} parent={args.complete_splitter} result={detail}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8679-        if not ok: raise SystemExit(3)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8680-        return
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8681-        return
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8682-    if args.project:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8683-        PROJECT=args.project
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py-8684-    if not PROJECT:
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-21-export XDG_CONFIG_HOME="$OVERLAY_CONFIG_HOME"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-22-export XDG_DATA_HOME="$ROOT/xdg/data-v11831-a2"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-23-export XDG_CACHE_HOME="$ROOT/xdg/cache-v11831-a2"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-24-export XDG_STATE_HOME="$ROOT/xdg/state-v11831-a2"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-25-export V2_ROOT="$ROOT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-26-export V2_OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh:27:export V2_OPENCODE_BASE_URL="http://127.0.0.1:$PORT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-28-export V2_OPENCODE_SESSION_TABLE="session"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-29-export OPENCODE_DISABLE_PROJECT_CONFIG=true
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-30-export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-31-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-32-: "${VLLM_API_KEY:?VLLM_API_KEY must be exported before starting A2 v1.18.31}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-33-
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-606-          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-607-        );
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-608-        const token = hookCallID(event);
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-609-        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-610-        try {
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-611-          supervisorDetached(directory, [
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js:612:            "--complete-splitter", splitterParent,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-613-            "--prompt", session,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-614-            "--dispatch-token", token,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-615-            "--splitter-output-b64", encoded,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js:616:            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-617-          ]);
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-618-        } catch {
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-619-        }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-620-      }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-621-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js-622-      let receipt;
+
+=== FALLBACK DISCOVERY WITHOUT EXPLICIT URL ===
+[2026-09-23T07:49:41+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58441 mode=v1 probe=/session/status discovered-pid=17228
+discover_ok= True
+base= http://127.0.0.1:58441
+mode= v1
+
+=== DISCOVERY WITH EXPLICIT URL ===
+[2026-09-23T07:49:41+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58443 mode=v1 probe=/session/status
+discover_ok= True
+base= http://127.0.0.1:58443
+mode= v1
+
+=== JOB 36 REJECTION WINDOW ===
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:21+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:22+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:25+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:26+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:26+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:26+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:26+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:26+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:26+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:27+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:27+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:27+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:27+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:27+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:27+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 200 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:28+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:30+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:30+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:30+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:30+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:32+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:32+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:32+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:32+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:34+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:34+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:34+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:34+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:36+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:36+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:36+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:36+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:38+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:38+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:38+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:38+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:40+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:40+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:40+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:49:40+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+
+JOB_000037_OK
+
+
+======================================================================
+FINISHED: 2026-09-23T05:49:41Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
