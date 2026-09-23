@@ -1,0 +1,149 @@
+======================================================================
+JOB: job-000041
+JOB_COMMIT: 014f9e097e6e1e2e675fc3f3a32d67ab89df3f77
+STARTED: 2026-09-23T05:56:53Z
+======================================================================
+
+=== RECOVER VLLM KEY ===
+VLLM_API_KEY recovered
+=== VERIFY REFRESHED SERVER ===
+{}
+=== CREATE FRESH CANARY ===
+[2026-09-23T07:56:54+0200] SUPERVISOR_LEAF_READY deliverable=D001 attempt=1
+[2026-09-23T07:56:54+0200] SUPERVISOR_LEAF_READY deliverable=D002 attempt=1
+[2026-09-23T07:56:54+0200] SUPERVISOR_LEAF_READY deliverable=D003-A attempt=1
+[2026-09-23T07:56:54+0200] DETERMINISTIC_SHADOW state=d5c6696f371c363f phase=recursive-split actions=[{"agent":"task-splitter","deliverable":"D003-B","generation":1,"kind":"launch"}]
+{
+  "action": {
+    "agent": "task-splitter",
+    "deliverable": "D003-B",
+    "generation": 1,
+    "kind": "launch"
+  },
+  "attempts": 2,
+  "ownership": [
+    ".opencode-v2/probes/ephemeris_moons.json",
+    "fixtures/vectors/moons/"
+  ],
+  "project": "/home/bking/AI/a2-canaries/20260923-075653-d003b-fresh/project",
+  "protocol": "v2-d003-current-state-canary-v1",
+  "split_state": "split-required",
+  "state_version": "d5c6696f371c363f",
+  "verify_evidence": [
+    {
+      "attempt": 1,
+      "command": "test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4||!fs.statSync(p).isDirectory())process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'",
+      "error": "",
+      "executed": true,
+      "exit_code": 1,
+      "result": "verify-failed-1",
+      "session": "synthetic-D003-B-1",
+      "stderr": "missing moons JSON records\\n",
+      "stdout": "",
+      "timestamp": "2026-09-23T05:56:54Z"
+    },
+    {
+      "attempt": 2,
+      "command": "test -s .opencode-v2/probes/ephemeris_moons.json && node -e 'const fs=require(\"fs\"),p=\"fixtures/vectors/moons\";const j=require(\"./.opencode-v2/probes/ephemeris_moons.json\");if(!j.commands||Object.keys(j.commands).length<4||!fs.statSync(p).isDirectory())process.exit(1);const a=fs.readdirSync(p).filter(f=>f.endsWith(\".json\"));if(a.length<4)process.exit(1);for(const f of a){const s=fs.readFileSync(p+\"/\"+f,\"utf8\");if(s.length<200||/\\b(?:404|error)\\b/i.test(s)||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'",
+      "error": "",
+      "executed": true,
+      "exit_code": 1,
+      "result": "verify-failed-1",
+      "session": "synthetic-D003-B-2",
+      "stderr": "missing moons JSON records\\n",
+      "stdout": "",
+      "timestamp": "2026-09-23T05:56:54Z"
+    }
+  ]
+}
+=== START SUPERVISOR ===
+945889
+=== CREATE ROOT ===
+{
+  "agent": "transport-root",
+  "model": "v2noop/root-noop",
+  "project": "/home/bking/AI/a2-canaries/20260923-075653-d003b-fresh/project",
+  "protocol": "v2-stage-a-root-create-v1",
+  "root_session": "ses_f33295769ffegEcmlV29de6CP6",
+  "tracker": "explicit-caller-session"
+}
+ROOT_SESSION=ses_f33295769ffegEcmlV29de6CP6
+=== PREFLIGHT ===
+{"post_requests": 0, "proof": "/home/bking/AI/a2-canaries/20260923-075653-d003b-fresh/preflight-proof.json", "protocol": "v2-stage-a-consolidated-preflight-v1", "runtime": {"actions": [{"agent": "task-splitter", "deliverable": "D003-B", "generation": 1, "kind": "launch"}], "project": "/home/bking/AI/a2-canaries/20260923-075653-d003b-fresh/project", "route": "task-splitter", "state_version": "d5c6696f371c363f", "worktree": "/"}, "static": "PASS", "worker_launches": 0}
+=== DISPATCH ===
+{
+  "outcome": "dispatched",
+  "protocol": "v2-stage-a-tick-v1",
+  "receipt": {
+    "action": {
+      "agent": "task-splitter",
+      "deliverable": "D003-B",
+      "generation": 1,
+      "kind": "launch"
+    },
+    "execution_id": "2dc75766d420fcb87cc553d87ebed1b3320ce5f084ee1cb203ecaafa0b6da688",
+    "http_status": 204,
+    "idempotency_intent_persisted": true,
+    "protocol": "v2-stage-a-controller-execute-v2",
+    "replay_suppressed": false,
+    "root_session": "ses_f33295769ffegEcmlV29de6CP6",
+    "state_version": "d5c6696f371c363f",
+    "transport": "prompt_async+SubtaskPart"
+  }
+}
+=== WAIT FOR LIFECYCLE ===
+STATUS split-required|||||
+STATUS splitter-active|1||||
+STATUS splitter-corrective-awaiting-output|1|1|||post-accepted
+=== FINAL STATUS ===
+{
+  "claim_count": 1,
+  "corrective_archive": ".opencode-v2/work/D003-B.split-proposal.corrective-rejected-1.json",
+  "corrective_context_sha256": "e136da0ed763380ef870e41b2a8e13e08f7b719b7382bd6531fd4365aca78b0f",
+  "corrective_dispatch_state": "post-accepted",
+  "corrective_dispatch_token": "",
+  "corrective_execution_id": "fba94927a64d3c3ee2fe6b67d69b4902c4998bda0a740a5f4f68f83fa892eb02",
+  "corrective_first_output_sha256": "1505d425e74422cd7997cc735f8e68eeb2fe81544225970ec0abbf46acc49a2b",
+  "corrective_primary_response": ".opencode-v2/work/D003-B.splitter-primary-response-1.txt",
+  "corrective_reason_sha256": "593b0bbd28a03175b5e6a25513feb26128203b41b8da2f56949e484cd3760d3c",
+  "corrective_root_session": "ses_f33295769ffegEcmlV29de6CP6",
+  "corrective_session": "",
+  "corrective_turn_count": 1,
+  "dispatch_token": "prt_0ccd6aacf001A2O6xB17YdT7QP",
+  "generation": 1,
+  "lease_until_epoch": 1790143621.1111126,
+  "owner": "supervisor",
+  "parent_id": "D003-B",
+  "state": "splitter-corrective-awaiting-output",
+  "timestamp": "2026-09-23T05:57:01Z"
+}
+=== RESPONSE ARCHIVES ===
+--- D003-B.splitter-primary-response-1.txt ---
+{"depth": 1, "field": "verify_command", "generation": 1, "parent_id": "D003-B", "protocol": "v2-split-parent-contract-invalid-v1", "reason": "The canonical parent verify command is intrinsically invalid/non-verifying: the node one-liner contains an unclosed string literal at the end. The final clause `...||!/(?:\\$\\$SOE|\\bX\\s*=)/.test(s))process.exit(1)}'` has an opening parenthesis for `.test(` but no closing parenthesis before `process.exit(1)`, and the whole expression lacks a closing `)`. This causes a SyntaxError in the node runtime, which is exactly what the supervisor evidence shows on both attempts (stderr: 'missing moons JSON records', exit code 1, no node error output because the syntax error aborted before the intended logic). The command therefore cannot deterministically validate the required 4+ JSON records, its >=200-byte size, its absence of 404/error markers, and its presence of `$ $SOE` or `X =` markers, so the parent contract's own verification path is defective and must be repaired rather than split into children."}
+=== NATIVE CHILDREN UNDER ROOT ===
+[
+  {
+    "id": "ses_f332954c7ffe6A73XPsomErJdG",
+    "parent_id": "ses_f33295769ffegEcmlV29de6CP6",
+    "title": "Split D003-B (@task-splitter subagent)",
+    "agent": "task-splitter",
+    "model": "{\"id\":\"qwen38-task-splitter-nothink\",\"providerID\":\"syv\",\"variant\":\"default\"}",
+    "tokens_input": 6528,
+    "tokens_output": 250,
+    "time_created": 1790143015736,
+    "time_updated": 1790143020978
+  }
+]
+CHILD_COUNT 1
+=== SYNTHETIC CONTINUATION PHRASE COUNT ===
+SYNTHETIC_CONTINUATION_COUNT 0
+CANARY_BASE=/home/bking/AI/a2-canaries/20260923-075653-d003b-fresh
+JOB_000041_OK
+
+
+======================================================================
+FINISHED: 2026-09-23T05:59:55Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
