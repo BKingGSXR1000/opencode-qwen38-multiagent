@@ -1,0 +1,493 @@
+======================================================================
+JOB: job-000038
+JOB_COMMIT: 6de3b38bd1a8f4795cde10f26d562fdc5b89f581
+STARTED: 2026-09-23T05:51:22Z
+======================================================================
+
+=== PLUGIN supervisorDetached ===
+173-  }
+174-  args.background = true;
+175-  return true;
+176-}
+177-// V2.6.9 NATIVE BACKGROUND IMPLEMENTATION END
+178-
+179-function splitParent(args) {
+180-  const prompt = typeof args?.prompt === "string" ? args.prompt : "";
+181-  return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?\n|\s*$)/)?.[1] || "";
+182-}
+183-
+184-function supervisor(directory, args, extraEnv = {}) {
+185-  return execFileSync("python3", [
+186-    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+187-    "--project", directory, ...args,
+188-  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+189-}
+190-
+191:function supervisorDetached(directory, args, extraEnv = {}) {
+192-  // A task completion hook runs on the v1 server's active request path.  The
+193-  // sole corrective splitter continuation must be dispatched only after that
+194-  // request returns, otherwise its status probe re-enters the same server and
+195-  // times out.  This preserves the same exact CLI payload and environment
+196-  // while releasing the hook synchronously.
+197-  const child = spawn("python3", [
+198-    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+199-    "--project", directory, ...args,
+200-  ], {
+201-    detached: true,
+202-    stdio: "ignore",
+203-    env: { ...process.env, ...extraEnv },
+204-  });
+205-  child.unref();
+206-}
+207-
+208-async function activeSessionIDsForSupervisor(client, directory) {
+209-  const response = await client.session.status({ query: { directory } });
+
+=== PLUGIN SPLITTER COMPLETION ===
+    },
+
+    "tool.execute.after": async (event, output) => {
+      const result = event?.result || output;
+
+      const probeKey = `${hookSessionID(event)}:${hookCallID(event)}`;
+      if (deterministicTransportToolProbeCalls.has(probeKey)) {
+        deterministicTransportToolProbeCalls.delete(probeKey);
+        transportProbeLog(directory, {
+          event: "child-tool-after",
+          session: hookSessionID(event),
+          call: hookCallID(event),
+          tool: String(event?.tool || ""),
+        });
+      }
+
+      if ((event.tool !== "subagent" && event.tool !== "task") || !result) return;
+
+      const args = hookArgs(event, output);
+      const rawResult = toolResultText(result);
+      const transportProbe = isDeterministicTransportProbe(args);
+      const splitterParent =
+        taskAgent(args) === "task-splitter" ? splitParent(args) : "";
+
+      if (transportProbe) {
+        transportProbeLog(directory, {
+          event: "task-after",
+          session: hookSessionID(event),
+          call: hookCallID(event),
+          child: String(result?.metadata?.sessionID || result?.metadata?.sessionId || ""),
+          background: result?.metadata?.background === true,
+        });
+      }
+
+      if (splitterParent) {
+        const session = String(
+          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+        );
+        const token = hookCallID(event);
+        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+        try {
+          supervisorDetached(directory, [
+            "--complete-splitter", splitterParent,
+            "--prompt", session,
+            "--dispatch-token", token,
+            "--splitter-output-b64", encoded,
+            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
+          ]);
+        } catch {
+        }
+      }
+
+      let receipt;
+      if (transportProbe) {
+        const child = String(
+          result?.metadata?.sessionID || result?.metadata?.sessionId || "unknown"
+        );
+        receipt = [
+          "V2_NATIVE_TRANSPORT_PROBE_STARTED",
+          `CHILD: ${child}`,
+          `BACKGROUND: ${result?.metadata?.background === true}`,
+        ].join("\n");
+      } else if (taskAgent(args) === "acceptance-validator") {
+        const raw = rawResult.trim();
+        const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
+        if (!modelPass) {
+
+=== SUPERVISOR opencode-base-url REFERENCES ===
+164-    if name not in {"session","session_v2"}:
+165-        raise RuntimeError(f"unsupported OpenCode session table: {name}")
+166-    return name
+167-
+168-def stage_a_transport_mode():
+169-    # Isolated v1.18.31 transport mode: technical root, external scheduler.
+170-    return (
+171-        session_table_name()=="session"
+172:        and bool(str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip())
+173-    )
+174-
+175-
+176-def root_agent_name():
+177-    # Beta keeps the semantic orchestrator; v1 Stage A uses a technical root.
+178-    return "transport-root" if stage_a_transport_mode() else "orchestrator"
+179-
+180-def v1_session_status_snapshot(strict=False):
+181-    # OpenCode v1.18.31 keeps live busy/retry/idle state in the session status API,
+182-    # not in a persisted session.time_idle column.
+183:    base=str(os.environ.get('V2_OPENCODE_BASE_URL') or '').rstrip('/')
+184-    if not base:
+185-        if strict:
+186:            raise RuntimeError('V2_OPENCODE_BASE_URL is not configured')
+187-        return {}
+188-    query=urllib.parse.urlencode({'directory':PROJECT}) if PROJECT else ''
+189-    url=base+'/session/status'+(('?'+query) if query else '')
+190-    try:
+191-        req=urllib.request.Request(url,headers={'Accept':'application/json'})
+192-        with urllib.request.urlopen(req,timeout=2.0) as resp:
+193-            raw=resp.read()
+194-        data=json.loads(raw or b'{}')
+--
+5936-            return {}
+5937-        try:
+5938-            obj=json.loads(raw)
+5939-        except Exception:
+5940-            return raw.decode("utf-8","replace")
+5941-        return obj.get("data") if isinstance(obj,dict) and set(obj)=={"data"} else obj
+5942-
+5943-    def discover(self):
+5944:        explicit=str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip().rstrip("/")
+5945-        if explicit:
+5946-            self.base=explicit
+5947-            self.password=(
+5948-                os.environ.get("V2_OPENCODE_PASSWORD")
+5949-                or os.environ.get("OPENCODE_PASSWORD")
+5950-                or os.environ.get("OPENCODE_SERVER_PASSWORD")
+5951-            )
+5952-            self.prefix=""
+--
+5974-                ["ss","-ltnp"],
+5975-                text=True,
+5976-                stderr=subprocess.DEVNULL,
+5977-            )
+5978-        except Exception:
+5979-            pass
+5980-
+5981-        # Completion hooks run in a plugin subprocess.  V1's plugin host can
+5982:        # sanitize V2_OPENCODE_BASE_URL even though the parent server was
+5983-        # launched with it.  Discover only this repository's pinned v1 binary,
+5984-        # then prove the exact PROJECT endpoint before continuing a splitter.
+5985-        # This is transport identity recovery, not a broader server search.
+5986-        v1_binary=os.path.realpath(str(ROOT/"runtime"/"opencode-v1.18.31"/"opencode"))
+5987-        for proc in Path("/proc").glob("[0-9]*"):
+5988-            try:
+5989-                pid=int(proc.name)
+5990-                cmd=(proc/"cmdline").read_bytes().replace(
+--
+8398-    ap.add_argument("--tool-args-b64",default="")
+8399-    ap.add_argument("--splitter-tool-check")
+8400-    ap.add_argument("--progress-handoff-tool-check")
+8401-    ap.add_argument("--confirm-plugin-interrupt")
+8402-    ap.add_argument("--materialize-dispatch-child")
+8403-    ap.add_argument("--agent")
+8404-    ap.add_argument("--prompt"); ap.add_argument("--project")
+8405-    ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
+8406:    ap.add_argument("--opencode-base-url",default="")
+8407-    args,unknown=ap.parse_known_args()
+8408:    if args.opencode_base_url:
+8409-        # The plugin completion hook runs in a short-lived child process.  Pass
+8410-        # its known native server identity explicitly so a bounded corrective
+8411-        # continuation does not depend on inherited discovery state.
+8412:        os.environ["V2_OPENCODE_BASE_URL"]=args.opencode_base_url.rstrip("/")
+8413-    if args.materialize_dispatch_child:
+8414-        if unknown or not args.project or not args.agent:
+8415-            raise SystemExit(
+8416-                "native child materialization requires --project --agent "
+8417-                "--materialize-dispatch-child"
+8418-            )
+8419-        PROJECT=args.project
+8420-        try:
+
+=== SUPERVISOR ARGPARSE / MAIN ===
+        if not parent: raise SystemExit("SPLIT_DENY invalid splitter prompt")
+        ok,detail=claim_splitter(parent,args.claim_splitter)
+        if not ok: raise SystemExit(f"SPLIT_DENY parent={parent} reason={detail}")
+        print(f"SPLIT_ALLOW parent={parent} generation=1")
+        return
+    if args.claim_corrective_splitter:
+        if unknown or not args.project or args.agent!="task-splitter" or args.prompt is None:
+            raise SystemExit("corrective splitter claim requires canonical task-splitter prompt")
+        PROJECT=args.project; parent=parse_split_parent(args.prompt)
+        if not parent or "SPLITTER_CORRECTIVE_ORDINAL: 1" not in args.prompt:
+            raise SystemExit("SPLIT_DENY invalid corrective splitter prompt")
+        ok,detail=claim_corrective_splitter(parent,args.claim_corrective_splitter)
+        if not ok: raise SystemExit(f"SPLIT_DENY parent={parent} reason={detail}")
+        print(f"SPLIT_CORRECTIVE_ALLOW parent={parent} ordinal=1")
+        return
+    if args.recover_splitter_direct_context_contract:
+        if unknown or not args.project:
+            raise SystemExit("splitter direct-context recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_splitter_direct_context_contract(
+            args.recover_splitter_direct_context_contract
+        )
+        if not ok:
+            raise SystemExit(f"SPLIT_DIRECT_CONTEXT_RECOVERY_DENY parent={args.recover_splitter_direct_context_contract} reason={detail}")
+        print(f"SPLIT_DIRECT_CONTEXT_RECOVERY_ALLOW parent={args.recover_splitter_direct_context_contract} reason={detail}")
+        return
+    if args.recover_false_parent_contract_repair:
+        if unknown or not args.project:
+            raise SystemExit("false parent-contract repair recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_false_parent_contract_repair(
+            args.recover_false_parent_contract_repair
+        )
+        if not ok:
+            raise SystemExit(
+                f"FALSE_PARENT_CONTRACT_REPAIR_RECOVERY_DENY "
+                f"parent={args.recover_false_parent_contract_repair} reason={detail}"
+            )
+        print(
+            f"FALSE_PARENT_CONTRACT_REPAIR_ALLOW "
+            f"parent={args.recover_false_parent_contract_repair} reason={detail}"
+        )
+        return
+    if args.resolve_false_parent_contract_repair:
+        if unknown or not args.project:
+            raise SystemExit("false parent-contract repair resolution requires --project")
+        PROJECT=args.project
+        ok,detail=resolve_false_parent_contract_repair(
+            args.resolve_false_parent_contract_repair
+        )
+        if not ok:
+            raise SystemExit(
+                f"FALSE_PARENT_CONTRACT_REPAIR_RESOLUTION_DENY "
+                f"parent={args.resolve_false_parent_contract_repair} reason={detail}"
+            )
+        print(
+            f"FALSE_PARENT_CONTRACT_REPAIR_RESOLUTION_ALLOW "
+            f"parent={args.resolve_false_parent_contract_repair} reason={detail}"
+        )
+        return
+    if args.recover_splitter_output_limit:
+        if unknown or not args.project:
+            raise SystemExit("splitter output-limit recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_splitter_output_limit(args.recover_splitter_output_limit)
+        if not ok:
+            raise SystemExit(f"SPLIT_RECOVERY_DENY parent={args.recover_splitter_output_limit} reason={detail}")
+        print(f"SPLIT_RECOVERY_ALLOW parent={args.recover_splitter_output_limit} reason={detail}")
+        return
+    if args.recover_splitter_profile_change:
+        if unknown or not args.project or not args.prior_splitter_model:
+            raise SystemExit("splitter profile recovery requires --project --prior-splitter-model")
+        PROJECT=args.project
+        ok,detail=recover_splitter_profile_change(
+            args.recover_splitter_profile_change,args.prior_splitter_model
+        )
+        if not ok:
+            raise SystemExit(f"SPLIT_PROFILE_RECOVERY_DENY parent={args.recover_splitter_profile_change} reason={detail}")
+        print(f"SPLIT_PROFILE_RECOVERY_ALLOW parent={args.recover_splitter_profile_change} reason={detail}")
+        return
+    if args.recover_splitter_execution_contract:
+        if unknown or not args.project or args.prior_splitter_steps is None:
+            raise SystemExit("splitter execution-contract recovery requires --project --prior-splitter-steps")
+        PROJECT=args.project
+        ok,detail=recover_splitter_execution_contract(
+            args.recover_splitter_execution_contract,args.prior_splitter_steps
+        )
+        if not ok:
+            raise SystemExit(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_DENY parent={args.recover_splitter_execution_contract} reason={detail}")
+        print(f"SPLIT_EXECUTION_CONTRACT_RECOVERY_ALLOW parent={args.recover_splitter_execution_contract} reason={detail}")
+        return
+    if args.complete_splitter:
+        if unknown or not args.project or not args.dispatch_token:
+            raise SystemExit("splitter completion requires --project --complete-splitter --dispatch-token")
+        PROJECT=args.project
+        try: output=base64.b64decode(args.splitter_output_b64 or "").decode("utf-8")
+        except Exception: raise SystemExit("SPLIT_FAILED invalid splitter output encoding")
+        ok,detail=complete_splitter(args.complete_splitter,args.prompt or "",args.dispatch_token,output)
+        print(f"SPLIT_{'ACCEPTED' if ok else 'FAILED'} parent={args.complete_splitter} result={detail}")
+        if not ok: raise SystemExit(3)
+        return
+        return
+    if args.project:
+        PROJECT=args.project
+    if not PROJECT:
+        raise SystemExit("supervisor daemon requires --project or V2_PROJECT")
+    ROOT.joinpath("logs").mkdir(parents=True,exist_ok=True); sync_global_lessons(); log(f"SUPERVISOR_START project={PROJECT!r} source=http-poll reason={HARD_REASONING_CHARS} text={HARD_TEXT_CHARS} implementation_compactions=3 fourth_compaction=retire")
+    threading.Thread(target=control_guard_loop,daemon=True).start(); threading.Thread(target=persisted_reconcile_loop,daemon=True).start(); api_poll_loop()
+if __name__=="__main__": main()
+
+=== PLUGIN PROCESS SPAWN REFERENCES ===
+1-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+2:import { execFileSync, spawn } from "node:child_process";
+3-import { join } from "node:path";
+4-
+5-const HARD_MAX_CHILD_RESULT_CHARS = 2500;
+6-const TARGET_MAX_CHILD_RESULT_CHARS = 1500;
+7-
+8-const WORKER_SANDBOX = "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/worker_sandbox.py";
+9-const FINALIZE_ACCEPTANCE = "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/finalize-acceptance.py";
+10-const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
+11-const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
+12-const deterministicTransportProbeRoots = new Set();
+13-const deterministicTransportToolProbeCalls = new Set();
+14-const DETERMINISTIC_TRANSPORT_TOOL_TARGET = ".opencode-v2/transport-tool-target.txt";
+--
+114-  return "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
+115-}
+116-
+117-function guardWorkerMutation(directory, event, output) {
+118-  const tool = String(event?.tool || "");
+119-  if (!MUTATION_TOOLS.has(tool)) return;
+120-  const args = hookArgs(event, output);
+121-  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+122-  const sessionID = hookSessionID(event);
+123-  const callID = hookCallID(event);
+124-  let raw;
+125-  try {
+126:    raw = execFileSync("python3", [
+127-      WORKER_SANDBOX,
+128-      "hook",
+129-      "--project", directory,
+130-      "--session", sessionID,
+131-      "--call-id", callID,
+132-      "--tool", tool,
+133-      "--args-b64", payload,
+134-    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+135-  } catch (error) {
+136-    const detail = String(error?.stderr || error?.message || error).trim();
+137-    throw new Error(detail || `WORKER_FIREWALL_DENY ${tool}`);
+138-  }
+--
+173-  }
+174-  args.background = true;
+175-  return true;
+176-}
+177-// V2.6.9 NATIVE BACKGROUND IMPLEMENTATION END
+178-
+179-function splitParent(args) {
+180-  const prompt = typeof args?.prompt === "string" ? args.prompt : "";
+181-  return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?\n|\s*$)/)?.[1] || "";
+182-}
+183-
+184-function supervisor(directory, args, extraEnv = {}) {
+185:  return execFileSync("python3", [
+186-    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+187-    "--project", directory, ...args,
+188-  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+189-}
+190-
+191:function supervisorDetached(directory, args, extraEnv = {}) {
+192-  // A task completion hook runs on the v1 server's active request path.  The
+193-  // sole corrective splitter continuation must be dispatched only after that
+194-  // request returns, otherwise its status probe re-enters the same server and
+195-  // times out.  This preserves the same exact CLI payload and environment
+196-  // while releasing the hook synchronously.
+197:  const child = spawn("python3", [
+198-    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+199-    "--project", directory, ...args,
+200-  ], {
+201:    detached: true,
+202-    stdio: "ignore",
+203-    env: { ...process.env, ...extraEnv },
+204-  });
+205-  child.unref();
+206-}
+207-
+208-async function activeSessionIDsForSupervisor(client, directory) {
+209-  const response = await client.session.status({ query: { directory } });
+210-  if (response?.error) {
+211-    throw new Error(
+212-      `DISPATCH_STATUS_SNAPSHOT_ERROR ${String(
+213-        response.error?.message || response.error || "session.status failed"
+--
+505-        transportProbeLog(directory, {
+506-          event: "task-before",
+507-          session: sessionID,
+508-          call: hookCallID(event),
+509-          agent: String(agent || ""),
+510-          background: true,
+511-        });
+512-      }
+513-
+514-      const prompt = args.prompt;
+515-
+516-      if (agent === "acceptance-validator") {
+517:        execFileSync(
+518-          "python3",
+519-          [FINALIZE_ACCEPTANCE, "--prepare", directory],
+520-          { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+521-        );
+522-      }
+523-
+524-      if (agent === "task-splitter") {
+525-        const parent = splitParent(args);
+526-        if (!parent) {
+527-          throw new Error("SPLIT_DENY task-splitter requires exact SPLIT_PARENT prompt");
+528-        }
+529-        const corrective = /^SPLITTER_CORRECTIVE_ORDINAL:\s*1\s*$/m.test(String(prompt || ""));
+--
+599-          child: String(result?.metadata?.sessionID || result?.metadata?.sessionId || ""),
+600-          background: result?.metadata?.background === true,
+601-        });
+602-      }
+603-
+604-      if (splitterParent) {
+605-        const session = String(
+606-          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+607-        );
+608-        const token = hookCallID(event);
+609-        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+610-        try {
+611:          supervisorDetached(directory, [
+612-            "--complete-splitter", splitterParent,
+613-            "--prompt", session,
+614-            "--dispatch-token", token,
+615-            "--splitter-output-b64", encoded,
+616-            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
+617-          ]);
+618-        } catch {
+619-        }
+620-      }
+621-
+622-      let receipt;
+623-      if (transportProbe) {
+--
+627-        receipt = [
+628-          "V2_NATIVE_TRANSPORT_PROBE_STARTED",
+629-          `CHILD: ${child}`,
+630-          `BACKGROUND: ${result?.metadata?.background === true}`,
+631-        ].join("\n");
+632-      } else if (taskAgent(args) === "acceptance-validator") {
+633-        const raw = rawResult.trim();
+634-        const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
+635-        if (!modelPass) {
+636-          receipt = "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS";
+637-        } else {
+638-          try {
+639:            execFileSync(
+640-              "python3",
+641-              [FINALIZE_ACCEPTANCE, directory],
+642-              { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+643-            );
+644-            receipt = "ACCEPTANCE_PASS";
+645-          } catch (error) {
+646-            const detail = String(
+647-              error?.stderr || error?.message || error
+648-            ).trim().replace(/\s+/g, " ").slice(0, 1200);
+649-            receipt =
+650-              `ACCEPTANCE_FAIL\nDETERMINISTIC_GATE: ${detail || "failed"}`;
+651-          }
+
+=== SERVER CONFIG PLUGIN COPY IDENTITY ===
+SERVER_PID=34371
+CFG=/tmp/stage-a-opencode-config.S0tjv7
+203f6ef7eab40f32f67972e5077f5f9b0ee133950001e66612ac7d7ca98919d4  /tmp/stage-a-opencode-config.S0tjv7/opencode/plugins/v2-bounded-subagent.js
+feb6f67a18e3ea9016d16d0edb4730e64ee6ce2d2a0c293865617b8147b7ea8e  /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js
+JOB_000038_OK
+
+
+======================================================================
+FINISHED: 2026-09-23T05:51:22Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
