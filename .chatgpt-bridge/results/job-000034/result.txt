@@ -1,0 +1,828 @@
+======================================================================
+JOB: job-000034
+JOB_COMMIT: f9ddd4db1988b0cddd528085f8fd97e8f56cf8af
+STARTED: 2026-09-23T05:20:11Z
+======================================================================
+
+=== EXACT ENSURE/DISCOVER ===
+            obj=json.loads(raw)
+        except Exception:
+            return raw.decode("utf-8","replace")
+        return obj.get("data") if isinstance(obj,dict) and set(obj)=={"data"} else obj
+
+    def discover(self):
+        explicit=str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip().rstrip("/")
+        if explicit:
+            self.base=explicit
+            self.password=(
+                os.environ.get("V2_OPENCODE_PASSWORD")
+                or os.environ.get("OPENCODE_PASSWORD")
+                or os.environ.get("OPENCODE_SERVER_PASSWORD")
+            )
+            self.prefix=""
+            self.mode="v1"
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            try:
+                obj=self.request("GET","/session/status"+q,timeout=2)
+                if not isinstance(obj,dict):
+                    raise RuntimeError("v1 /session/status did not return an object")
+                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+                return True
+            except Exception as exc:
+                self.base=self.password=self.prefix=None
+                self.mode=None
+                log(f"HTTP_CONTROL_V1_WAIT base={explicit} error={type(exc).__name__}")
+                return False
+
+        target=os.path.realpath(str(ROOT/"xdg"/"config"))
+        ss=""
+        try:
+            ss=subprocess.check_output(
+                ["ss","-ltnp"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+        # Completion hooks run in a plugin subprocess.  V1's plugin host can
+        # sanitize V2_OPENCODE_BASE_URL even though the parent server was
+        # launched with it.  Discover only this repository's pinned v1 binary,
+        # then prove the exact PROJECT endpoint before continuing a splitter.
+        # This is transport identity recovery, not a broader server search.
+        v1_binary=os.path.realpath(str(ROOT/"runtime"/"opencode-v1.18.31"/"opencode"))
+        for proc in Path("/proc").glob("[0-9]*"):
+            try:
+                pid=int(proc.name)
+                cmd=(proc/"cmdline").read_bytes().replace(
+                    b"\0",b" "
+                ).decode("utf-8","replace")
+                if not cmd.startswith(v1_binary+" serve "):
+                    continue
+                ports=[]
+                for line in ss.splitlines():
+                    if f"pid={pid}" not in line:
+                        continue
+                    ports += [
+                        int(match.group(1))
+                        for match in re.finditer(r"127\.0\.0\.1:(\d+)",line)
+                    ]
+                for port in dict.fromkeys(ports):
+                    self.base=f"http://127.0.0.1:{port}"
+                    self.password=None
+                    self.prefix=""
+                    self.mode="v1"
+                    query=("?"+urllib.parse.urlencode({"directory":PROJECT})) if PROJECT else ""
+                    try:
+                        status=self.request("GET","/session/status"+query,timeout=2)
+                        if not isinstance(status,dict):
+                            raise RuntimeError("v1 /session/status did not return an object")
+                        log(
+                            f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 "
+                            f"probe=/session/status discovered-pid={pid}"
+                        )
+                        csv(
+                            "HTTP_CONTROL_CONNECTED",
+                            detail=f"{self.base} mode=v1 probe=/session/status pid={pid}",
+                        )
+                        return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        self.base=self.password=self.prefix=None
+        self.mode=None
+
+        # Observed standalone topology on this machine:
+        # opencode2 -> opencode2.exe serve --stdio --port 0
+        # The child owns a random 127.0.0.1 TCP port and OPENCODE_PASSWORD.
+        for proc in Path("/proc").glob("[0-9]*"):
+            try:
+                pid=int(proc.name)
+                cmd=(proc/"cmdline").read_bytes().replace(
+                    b"\0",b" "
+                ).decode("utf-8","replace")
+
+                low=cmd.lower()
+                if "opencode2" not in low:
+                    continue
+                if "serve --stdio" not in low:
+                    continue
+
+                env={}
+                for item in (proc/"environ").read_bytes().split(b"\0"):
+                    if b"=" not in item:
+                        continue
+                    k,v=item.split(b"=",1)
+                    env[k.decode("utf-8","replace")]=v.decode("utf-8","replace")
+
+                xdg=env.get("XDG_CONFIG_HOME")
+                if xdg and os.path.realpath(xdg)!=target:
+                    continue
+
+                password=env.get("OPENCODE_PASSWORD") or env.get(
+                    "OPENCODE_SERVER_PASSWORD"
+                )
+                if not password:
+                    continue
+
+                ports=[]
+                for line in ss.splitlines():
+                    if f"pid={pid}" not in line:
+                        continue
+                    ports += [
+                        int(x.group(1))
+                        for x in re.finditer(r"127\.0\.0\.1:(\d+)",line)
+                    ]
+
+                for port in dict.fromkeys(ports):
+                    self.base=f"http://127.0.0.1:{port}"
+                    self.password=password
+
+                    probes=[]
+                    if PROJECT:
+                        probes.append(
+                            "/api/session/active?"
+                            + urllib.parse.urlencode({"directory":PROJECT})
+                        )
+                    probes += ["/api/health","/global/health"]
+
+                    for path in probes:
+                        try:
+                            # Any successful 2xx response proves this is the
+                            # isolated V2 OpenCode HTTP service. {} is valid.
+                            self.request("GET",path,timeout=2)
+                            self.prefix="/api"
+                            self.mode="beta"
+                            log(
+                                f"HTTP_CONTROL_CONNECTED base={self.base} "
+                                f"prefix=/api probe={path} pid={pid}"
+                            )
+                            csv(
+                                "HTTP_CONTROL_CONNECTED",
+                                detail=f"{self.base}/api probe={path} pid={pid}",
+                            )
+                            return True
+                        except Exception:
+                            pass
+            except Exception:
+                continue
+
+        self.base=self.password=self.prefix=None
+        self.mode=None
+        return False
+
+    def ensure(self):
+        if self.base and self.prefix is not None:
+            return True
+        now=time.time()
+        if now-self.last_discover<1:
+            return False
+        self.last_discover=now
+        ok=self.discover()
+        if not ok and now-self.last_wait_log>10:
+            self.last_wait_log=now
+            log("HTTP_CONTROL_WAIT no compatible OpenCode server discovered")
+        return ok
+
+    def get_status(self):
+        if not self.ensure():
+            return {}
+        q=""
+        if PROJECT:
+            q="?" + urllib.parse.urlencode({"directory":PROJECT})
+        try:
+            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+            obj=self.request("GET",path)
+            return obj if isinstance(obj,dict) else {}
+        except Exception:
+            self.base=self.prefix=None
+            self.mode=None
+            raise
+
+    def get_session(self,sid):
+        if not self.ensure():
+            return {}
+        qsid=urllib.parse.quote(sid)
+        q=""
+
+=== FAILURE WINDOW ===
+2:[2026-09-21T10:37:42+0200] HTTP_CONTROL_V1_WAIT base=http://127.0.0.1:57317 error=URLError
+3:[2026-09-21T10:37:42+0200] HTTP_CONTROL_WAIT no compatible OpenCode server discovered
+8:[2026-09-21T10:43:36+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:57317 mode=v1 probe=/session/status
+12:[2026-09-21T10:53:51+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:57318 mode=v1 probe=/session/status
+16:[2026-09-21T11:18:12+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:57319 mode=v1 probe=/session/status
+20:[2026-09-21T13:40:02+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58372 mode=v1 probe=/session/status
+27:[2026-09-21T13:56:57+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58373 mode=v1 probe=/session/status
+31:[2026-09-21T14:00:19+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58374 mode=v1 probe=/session/status
+34:[2026-09-21T14:49:51+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58377 mode=v1 probe=/session/status
+39:[2026-09-21T15:38:04+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58431 mode=v1 probe=/session/status
+48:[2026-09-21T15:40:08+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58431 mode=v1 probe=/session/status
+58:[2026-09-21T16:00:08+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58431 mode=v1 probe=/session/status
+78:[2026-09-21T16:22:43+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58432 mode=v1 probe=/session/status
+85:[2026-09-21T16:23:26+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58432 mode=v1 probe=/session/status
+91:[2026-09-21T16:52:10+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58432 mode=v1 probe=/session/status
+98:[2026-09-21T17:08:30+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58433 mode=v1 probe=/session/status
+104:[2026-09-21T17:56:06+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58434 mode=v1 probe=/session/status
+111:[2026-09-22T08:38:44+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58446 mode=v1 probe=/session/status
+114:[2026-09-22T08:38:44+0200] DETERMINISTIC_SHADOW state=3ade27c2849b0b99 phase=recursive-split actions=[{"agent":"task-splitter","deliverable":"D003-B","generation":1,"kind":"launch"}]
+117:[2026-09-22T23:06:15+0200] HTTP_CONTROL_CONNECTED base=http://127.0.0.1:58443 mode=v1 probe=/session/status
+120:[2026-09-22T23:06:15+0200] DETERMINISTIC_SHADOW state=ccb3c4ed37a34c24 phase=recursive-split actions=[{"agent":"task-splitter","deliverable":"D003-B","generation":1,"kind":"launch"}]
+121:[2026-09-22T23:06:15+0200] DETERMINISTIC_SHADOW state=ccb3c4ed37a34c24 phase=recursive-split actions=[{"agent":"task-splitter","deliverable":"D003-B","generation":1,"kind":"launch"}]
+123:[2026-09-22T23:16:46+0200] DETERMINISTIC_SHADOW state=512338791ab46906 phase=recursive-split actions=[{"kind":"wait"}]
+124:[2026-09-22T23:16:52+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+125:[2026-09-22T23:16:55+0200] DETERMINISTIC_SHADOW state=89662fde9c0a0eb5 phase=recursive-split actions=[{"agent":"task-splitter","deliverable":"D003-B","generation":1,"kind":"launch"}]
+126:[2026-09-22T23:37:52+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+127:[2026-09-22T23:51:30+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+128:[2026-09-23T00:09:49+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+129:[2026-09-23T00:52:16+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+130:[2026-09-23T00:57:50+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+131:[2026-09-23T01:17:26+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+132:[2026-09-23T01:35:44+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+133:[2026-09-23T01:44:26+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+134:[2026-09-23T02:13:01+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+135:[2026-09-23T03:14:54+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+136:[2026-09-23T05:49:54+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+137:[2026-09-23T05:53:25+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+138:[2026-09-23T06:44:47+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+139:[2026-09-23T06:57:44+0200] HTTP_POLL_ERROR FileNotFoundError(2, 'No such file or directory')
+
+=== PERSIST_SPLIT / VALIDATION ===
+1-#!/usr/bin/env python3
+2-import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
+3-from pathlib import Path
+4-from control_state import (phase_ready, ready_info as state_ready_info,
+5-                           snapshot as state_snapshot, attempt_state,
+6-                           load_attempts as state_load_attempts,
+7-                           AUTOMATIC_ATTEMPT_LIMIT,
+8-                           MAX_INFRASTRUCTURE_RETRY_GRANTS,
+9-                           MAX_UNMATERIALIZED_DISPATCH_REPLAYS,
+10-                           MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
+11-                           RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
+12-                           LEAF_READY_PROTOCOL, VERIFY_WAIT_PROTOCOL,
+13-                           split_depth, valid_deliverable_id)
+14-from leaf_contract import (
+15-    IMPLEMENTATION_ROLES, READ_ONLY_ROLES,
+16-    strict_owned_artifact_paths as shared_strict_owned_artifact_paths,
+17:    canonical_owned_artifacts as shared_canonical_owned_artifacts,
+18-    validate_leaf_contract, validate_verify_command,
+19-)
+20-from state_io import (
+21-    StateCorruptionError, load_json_object, atomic_write_json, atomic_write_text,
+22-    exclusive_file_lock,
+23-)
+24-from worker_sandbox import (
+25-    SandboxError as WorkerSandboxError,
+26-    cleanup_session as worker_sandbox_cleanup_session,
+27-    run_verify_bash as worker_sandbox_run_verify_bash,
+28-    commit_verify_outputs as worker_sandbox_commit_verify_outputs,
+29-    session_used_sandbox as worker_session_used_sandbox,
+30-    violation_path as worker_sandbox_violation_path,
+31-)
+32-# V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
+33-from control_query_views import materialize_control_query_views
+34-from deterministic_dispatch import select_actions as deterministic_select_actions
+35-from watchdog_telemetry import (
+--
+1090-    try:
+1091-        progress_text=progress_path.read_text(errors="replace")[:4000]
+1092-    except OSError:
+1093-        progress_text=""
+1094-    payload={
+1095-        "protocol":SPLIT_PROPOSAL_PROTOCOL,
+1096-        "parent_id":did,
+1097-        "depth":split_depth(did),
+1098-        "generation":generation,
+1099-        "parent_scope":leaf.get("name",""),
+1100-        "parent_contract":{
+1101-            # Batch 9B: the model must receive the detailed parent outcome
+1102-            # verbatim. New26 proved name/verify/done_when alone are not
+1103-            # sufficient: a splitter rewrote APPARENT=AIRLESS to APPVENT=AIRLESS
+1104-            # because the authoritative detailed outcome was absent.
+1105-            "outcome":leaf.get("outcome","") or leaf.get("name",""),
+1106-            "name":leaf.get("name",""),
+1107-            "role":leaf.get("role",""),
+1108:            "owned_artifacts":leaf.get("owned_artifacts",""),
+1109-            "verify_command":leaf.get("verify_command",""),
+1110-            "done_when":leaf.get("done_when",""),
+1111-            "acceptance_ids":list(leaf.get("acceptance_ids",[]) or []),
+1112-            "launch_deps":list(leaf.get("launch_deps",[]) or []),
+1113-            "contract_deps":list(leaf.get("contract_deps",[]) or []),
+1114-            "verify_deps":list(leaf.get("verify_deps",[]) or []),
+1115-        },
+1116:        "ownership":leaf.get("owned_artifacts",""),
+1117-        "verification":leaf.get("verify_command",""),
+1118-        "durable_progress":{
+1119-            "path":str(Path(".opencode-v2/work")/f"{did}.progress.md"),
+1120-            "contents":progress_text,
+1121-            "authority":"worker-non-authoritative-for-canonical-verify",
+1122-        },
+1123-        "supervisor_verify_evidence":split_verify_evidence,
+1124-        "evidence_precedence":(
+1125-            "supervisor_verify_evidence is authoritative for whether the exact "
+1126-            "canonical parent Verify ran, its exit code, stdout, and stderr. "
+1127-            "durable_progress is worker-authored and MUST NOT override it."
+1128-        ),
+1129-        "existing_artifacts":[item for item in parent_owned if (Path(PROJECT)/item).exists()],
+1130-        "artifact_inventory":_split_artifact_inventory(parent_owned),
+1131-        "ownership_items":parent_owned,
+1132-        "failed_attempts":compact,
+1133-        "decomposition_policy":{
+1134-            "progress_handoff_supported":True,
+1135-            "handoff_verify_sentinel":SPLIT_HANDOFF_VERIFY_SENTINEL,
+1136-            "verification_recovery_allowed":any(
+1137-                item.get("classification")=="genuine"
+1138-                and _split_failure_is_verification_related(item.get("reason"))
+1139-                for item in compact if isinstance(item,dict)
+1140-            ),
+1141-            "parent_verify_invalid_precedence":(
+1142-                "If supervisor_verify_evidence shows the parent verify_command itself "
+1143-                "is intrinsically invalid, contradictory, or non-verifying, return "
+1144-                "v2-split-parent-contract-invalid-v1. This takes precedence over "
+1145:                "verification_recovery_allowed and writer+tester recovery."
+1146-            ),
+1147-            "rule":(
+1148:                "Split must materially reduce executable work: partition owned "
+1149-                "artifacts, or use a progress-only probe handoff followed by the "
+1150:                "artifact writer. A writer+tester split that leaves the writer with "
+1151-                "all parent work is reserved for verification-related failures."
+1152-            ),
+1153-        },
+1154-    }
+1155-    atomic_write_json(path,payload)
+1156-    status=load_split_status(did)
+1157-    if status.get("state") not in {"splitter-active","split-retryable"}:
+1158-        save_split_status(did,"split-required",generation=generation)
+1159-    return True,"split-required"
+1160-
+1161-
+1162-def reconcile_required_splits():
+1163-    """Recover the durable failure->split edge after a supervisor/process crash."""
+1164-    if not PROJECT:
+1165-        return
+1166-    attempts=load_attempts()
+1167-    entries=attempts.get("deliverables") or {}
+1168-    for did,entry in entries.items():
+--
+1803-            "context above.\n\n"
+1804-        )
+1805-        if handoff_source:
+1806-            handoff_text=(
+1807-                "\n## Required predecessor handoff — supervisor enforced\n\n"
+1808-                f"Before doing project work, read `.opencode-v2/work/{handoff_source}.progress.md`. "
+1809-                "Treat its concrete findings/evidence as the durable result of the prior "
+1810-                "bounded probe. Consume that handoff and finish the artifact stage; do not "
+1811-                "repeat the predecessor's investigation unless direct validation disproves it.\n"
+1812-            )
+1813-    return (
+1814-        f"# {child_id} split-child scope\n\n"
+1815-        f"Parent: {parent}\n\n"
+1816-        f"{contract_text}"
+1817-        f"{handoff_text}\n"
+1818-        "## Bounded child decomposition\n\n"
+1819-        f"{decomposition_text}"
+1820-        f"Child scope: {scope_text}\n\n"
+1821:        f"Owned artifacts: {child['owned_artifacts']}\n\n"
+1822-        f"Child Verify command: `{child['verify_command']}`\n\n"
+1823-        f"Child Done when: {child['done_when']}\n"
+1824-    )
+1825-
+1826-
+1827-def apply_split_transaction(parent,txn):
+1828-    expected=list(txn["children"])
+1829-    child_defs=txn["child_defs"]
+1830-    manifest=load_manifest()
+1831-    leaves=manifest.setdefault("leaves",{})
+1832-    parent_leaf=leaves.get(parent)
+1833-    if not isinstance(parent_leaf,dict):
+1834-        raise StateCorruptionError(f"split parent {parent} disappeared")
+1835-    current=parent_leaf.get("split_children") or []
+1836-    if current not in ([],expected):
+1837-        raise StateCorruptionError(f"split parent {parent} has conflicting children {current}")
+1838-    for child_id in expected:
+1839-        child=child_defs[child_id]
+--
+1935-    manifest=load_manifest(); leaves=manifest.get("leaves") or {}; leaf=leaves.get(parent)
+1936-    expected=expected_children(parent)
+1937-    if not recursive_split_enabled() or not isinstance(leaf,dict) or not expected:
+1938-        raise ValueError("parent is not eligible for recursive split")
+1939-    if leaf_children(parent): raise ValueError("parent already split")
+1940-    if not isinstance(proposals,list) or len(proposals)!=2:
+1941-        raise ValueError("split requires exactly two proposals")
+1942-    parent_owned=set(owned_artifact_paths(leaf))
+1943-    if not parent_owned:
+1944-        raise ValueError("split parent has no validated owned artifacts")
+1945-    if request is None:
+1946-        request=load_json_object(split_request_path(parent),label=f"split request {parent}")
+1947-
+1948-    seen=set(); children=[]; meta=[]
+1949-    for index, proposal in enumerate(proposals):
+1950-        if not isinstance(proposal,dict):
+1951-            raise ValueError("child proposal must be an object")
+1952-        allowed={
+1953:            "scope","owned_artifacts","verify_command","role","depends_on_sibling",
+1954-            "done_when","reads_existing","creates_or_updates",
+1955-        }
+1956-        if set(proposal)-allowed or not all(
+1957-            isinstance(proposal.get(k),str) and proposal[k].strip()
+1958:            for k in ("scope","owned_artifacts","verify_command","role","done_when")
+1959-        ):
+1960-            raise ValueError("child proposal has missing or unsupported fields")
+1961-        if "reads_existing" not in proposal or "creates_or_updates" not in proposal:
+1962-            raise ValueError("child proposal requires reads_existing and creates_or_updates arrays")
+1963-        reads_existing=_canonical_split_path_list(proposal.get("reads_existing"),"reads_existing")
+1964-        creates_or_updates=_canonical_split_path_list(proposal.get("creates_or_updates"),"creates_or_updates")
+1965-        missing_reads=[rel for rel in reads_existing if not (Path(PROJECT)/rel).exists()]
+1966-        if missing_reads:
+1967-            raise ValueError("reads_existing path does not exist: "+", ".join(missing_reads))
+1968-
+1969:        owned_list,owned_error=_strict_owned_artifact_text(proposal["owned_artifacts"])
+1970-        if owned_error:
+1971-            raise ValueError(f"child ownership is not canonical: {owned_error}")
+1972-        owned=set(owned_list)
+1973-        role=proposal["role"].strip()
+1974-        sibling=proposal.get("depends_on_sibling", "")
+1975-        if index == 1 and sibling == expected[0]:
+1976-            sibling = "first"
+1977-        if sibling not in ("", "first") or (sibling == "first" and index != 1):
+1978-            raise ValueError("only second child may depend on first child")
+1979-
+1980-        handoff_only=(
+1981-            index==0
+1982-            and role=="probe-builder"
+1983:            and proposal["owned_artifacts"].strip()=="none"
+1984-        )
+1985-        if handoff_only:
+1986-            if proposal["verify_command"].strip()!=SPLIT_HANDOFF_VERIFY_SENTINEL:
+1987-                raise ValueError(
+1988-                    "progress-only probe must use exact Verify sentinel "
+1989-                    + SPLIT_HANDOFF_VERIFY_SENTINEL
+1990-                )
+1991-            if sibling:
+1992-                raise ValueError("progress-only probe must be first and independent")
+1993-            scope=proposal["scope"].strip()
+1994-            if len(scope)>MAX_SPLIT_HANDOFF_SCOPE_CHARS:
+1995-                raise ValueError(
+1996-                    "progress-only probe scope is too large: "
+1997-                    f"{len(scope)} chars > {MAX_SPLIT_HANDOFF_SCOPE_CHARS}"
+1998-                )
+1999-            if len(SPLIT_HANDOFF_STAGE_RE.findall(scope))>1:
+2000-                raise ValueError(
+2001-                    "progress-only probe scope is compound; isolate one bounded "
+--
+2005-            contract_errors=validate_leaf_contract(role, owned_list, proposal["verify_command"])
+2006-            if contract_errors:
+2007-                raise ValueError("; ".join(contract_errors))
+2008-
+2009-        read_only_role=role in READ_ONLY_SPLIT_ROLES
+2010-        if handoff_only or read_only_role:
+2011-            if creates_or_updates:
+2012-                raise ValueError("progress-only/read-only child must have empty creates_or_updates")
+2013-        else:
+2014-            if not creates_or_updates:
+2015-                raise ValueError("writing child requires non-empty creates_or_updates")
+2016-            outside=[rel for rel in creates_or_updates if not _path_inside_any(rel,owned)]
+2017-            if outside:
+2018-                raise ValueError("creates_or_updates path is outside child ownership: "+", ".join(outside))
+2019-
+2020-        if not handoff_only:
+2021-            if read_only_role and owned:
+2022-                raise ValueError(
+2023:                    "read-only split role must use owned_artifacts: none; "
+2024-                    "use implementer/test-builder when the child must create an artifact"
+2025-                )
+2026-            if not owned:
+2027-                if not read_only_role:
+2028-                    raise ValueError(
+2029-                        "only the first progress-only probe-builder or a read-only tester "
+2030:                        "may have owned_artifacts: none"
+2031-                    )
+2032:                if proposal["owned_artifacts"].strip() != "none":
+2033-                    raise ValueError("read-only tester must encode empty ownership as exact 'none'")
+2034-                if index != 1 or sibling != "first":
+2035-                    raise ValueError("read-only tester must be the second child and depend on the first")
+2036-            else:
+2037-                if not owned <= parent_owned or seen & owned:
+2038-                    raise ValueError("child ownership must be disjoint and inside parent ownership")
+2039-                seen |= owned
+2040-
+2041-        child=dict(leaf)
+2042-        inherited_outcome=leaf.get("outcome","") or leaf.get("name","")
+2043-        child_verify=(
+2044-            split_handoff_verify_command(expected[index])
+2045-            if handoff_only else proposal["verify_command"]
+2046-        )
+2047-        child_done=(
+2048-            "Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; "
+2049-            "no project artifact is modified."
+2050-            if handoff_only else proposal["done_when"]
+2051-        )
+2052-        child.update({
+2053-            "id":expected[index],
+2054-            "name":proposal["scope"],
+2055-            "outcome":proposal["scope"],
+2056-            "parent_outcome_context":inherited_outcome,
+2057:            "owned_artifacts":_canonical_owned_artifacts(owned_list),
+2058-            "owned_artifact_paths":owned_list,
+2059-            "verify_command":child_verify,
+2060-            "role":role,
+2061-            "done_when":child_done,
+2062-            "parent":parent,
+2063-            "split_depth":split_depth(expected[index]),
+2064-            "split_children":[],
+2065-            "split_handoff_only":handoff_only,
+2066-            "split_handoff_source":"",
+2067-            "split_reads_existing":reads_existing,
+2068-            "split_creates_or_updates":creates_or_updates,
+2069-        })
+2070-        child["launch_deps"]=list(leaf.get("launch_deps",[])) + ([expected[0]] if sibling=="first" else [])
+2071-        if handoff_only:
+2072-            # The probe does not claim acceptance coverage and should not wait on
+2073-            # final-product Verify dependencies. Parent collapse still enforces
+2074-            # the complete inherited contract after both children are READY.
+2075-            child["acceptance_ids"]=[]
+--
+2090-            raise ValueError("exactly the first child may be a progress-only handoff")
+2091-        second=meta[1]
+2092-        if second["role"] in READ_ONLY_SPLIT_ROLES or not second["owned"]:
+2093-            raise ValueError("progress handoff must be followed by a writing child")
+2094-        if second["sibling"]!="first":
+2095-            raise ValueError("writer after progress handoff must depend on first child")
+2096-        if second["owned"] != parent_owned:
+2097-            raise ValueError("writer after progress handoff must own all unfinished parent artifacts")
+2098-        children[1]["split_handoff_source"]=expected[0]
+2099-    elif read_only:
+2100-        # The only non-shrinking shape is writer -> tester. Keep it solely for
+2101-        # parent-Verify failures where independent verification can actually
+2102-        # repair the failed dimension. Runtime/ownership/progress failures must
+2103-        # decompose executable work instead of retrying the same writer.
+2104-        if read_only != [1] or meta[0]["owned"] != parent_owned or meta[1]["sibling"]!="first":
+2105-            raise ValueError("read-only tester split must be writer(all parent artifacts) -> tester")
+2106-        if not _split_request_verification_recovery_allowed(request):
+2107-            raise ValueError(
+2108:                "non-shrinking writer+tester split is only allowed after verification-related "
+2109-                "failures; use progress-only probe -> writer or partition parent artifacts"
+2110-            )
+2111-
+2112-        # Batch 15B: verification recovery must actually escape the failed
+2113-        # verification path. New31 D007 produced a corrected tester but left
+2114-        # child #1 with the exact failed parent Verify (occupied port 8123).
+2115-        # Because child #2 depends on child #1, the useful verifier could never
+2116-        # become reachable.
+2117-        parent_contract=request.get("parent_contract") if isinstance(request,dict) else {}
+2118-        parent_verify=(
+2119-            parent_contract.get("verify_command","")
+2120-            if isinstance(parent_contract,dict) else ""
+2121-        ) or leaf.get("verify_command","")
+2122-        failed_verify=_normalized_verify_for_recovery_compare(parent_verify)
+2123-        writer_verify=_normalized_verify_for_recovery_compare(children[0].get("verify_command",""))
+2124-        tester_verify=_normalized_verify_for_recovery_compare(children[1].get("verify_command",""))
+2125-        if not failed_verify:
+2126-            raise ValueError("verification-recovery split is missing the failed parent Verify command")
+--
+2128-            raise ValueError(
+2129-                "verification-recovery writer must not reuse the failed parent Verify command"
+2130-            )
+2131-        if tester_verify == failed_verify:
+2132-            raise ValueError(
+2133-                "verification-recovery tester must not reuse the failed parent Verify command"
+2134-            )
+2135-        if tester_verify == writer_verify:
+2136-            raise ValueError(
+2137-                "verification-recovery tester must independently verify with a command "
+2138-                "different from the writer Verify command"
+2139-            )
+2140-
+2141-    if seen != parent_owned:
+2142-        raise ValueError("child ownership must cover all unfinished parent ownership")
+2143-    return expected,children
+2144-
+2145-
+2146:def persist_split(parent, proposals):
+2147-    """Prepare once, then idempotently commit a recoverable split transaction."""
+2148-    with dispatch_lock:
+2149-        with attempt_lock():
+2150-            existing=load_split_transaction(parent)
+2151-            if existing:
+2152-                if existing.get("state")=="committed":
+2153-                    return list(existing.get("children") or [])
+2154-                return apply_split_transaction(parent,existing)
+2155-
+2156-            request=load_json_object(
+2157-                split_request_path(parent),label=f"split request {parent}"
+2158-            )
+2159-            expected,children=validate_split_proposal(parent,proposals,request=request)
+2160-            generation=int(request.get("generation") or 1)
+2161-            child_defs={child["id"]:child for child in children}
+2162-            transaction_id=split_transaction_id(parent,generation,child_defs)
+2163-            txn={
+2164-                "owner":"supervisor",
+--
+3689-                "owner":"supervisor",
+3690-                "count":count+1,
+3691-                "retired_session":sid,
+3692-                "reason":str(reason)[:1000],
+3693-                "counted_sessions":counted,
+3694-            },
+3695-        )
+3696-        return True
+3697-
+3698-def planner_retirement_reason(sid,elapsed,plan_path=None,paused=False):
+3699-    """One shared planner invariant for fresh and replacement sessions."""
+3700-    if planner_restart_count()>=MAX_PLANNER_RESTARTS and not plan_ready():
+3701-        return f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
+3702-    return planner_progress_reason(sid,elapsed,plan_path,paused=paused)
+3703-
+3704-def _strict_owned_artifact_text(raw):
+3705-    return shared_strict_owned_artifact_paths(raw)
+3706-
+3707:def _canonical_owned_artifacts(paths):
+3708:    return shared_canonical_owned_artifacts(paths)
+3709-
+3710-
+3711-def owned_artifact_paths(leaf):
+3712-    """Return guard-validated ownership; never infer paths from prose."""
+3713-    if not isinstance(leaf, dict):
+3714-        return []
+3715-    explicit=leaf.get("owned_artifact_paths")
+3716-    if isinstance(explicit, list):
+3717-        if not all(isinstance(path,str) for path in explicit):
+3718-            return []
+3719:        canonical=_canonical_owned_artifacts(explicit)
+3720-        checked,error=_strict_owned_artifact_text(canonical)
+3721-        return checked if not error else []
+3722:    checked,error=_strict_owned_artifact_text(leaf.get("owned_artifacts",""))
+3723-    return checked if not error else []
+3724-
+3725-
+3726-def verify_wait_path(did):
+3727-    return Path(PROJECT)/".opencode-v2"/"work"/f"{did}.verify-wait.json"
+3728-
+3729-
+3730-def missing_verify_dependencies(did):
+3731-    leaf=(load_manifest().get("leaves") or {}).get(did)
+3732-    if not isinstance(leaf,dict):
+3733-        return []
+3734-    deps=leaf.get("verify_deps") or []
+3735-    if not isinstance(deps,list):
+3736-        return []
+3737-    return [dep for dep in deps if not ready_info(dep)]
+3738-
+3739-
+3740-def persist_verify_wait(did,sid,missing):
+
+=== INGRESS REJECTION WINDOW ===
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:57+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:58+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+2026-09-23T07:19:59+02:00 AI-Beast python3[444226]: [ingress] 127.0.0.1 "POST /job HTTP/1.1" 400 -
+
+=== CURRENT SERVER PROBES ===
+01 200 {}
+02 200 {}
+03 200 {}
+04 200 {}
+05 200 {}
+06 200 {}
+07 200 {}
+08 200 {}
+09 200 {}
+10 200 {}
+11 200 {}
+12 200 {}
+13 200 {}
+14 200 {}
+15 200 {}
+16 200 {}
+17 200 {}
+18 200 {}
+19 200 {}
+20 200 {}
+JOB_000034_OK
+
+
+======================================================================
+FINISHED: 2026-09-23T05:20:12Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
