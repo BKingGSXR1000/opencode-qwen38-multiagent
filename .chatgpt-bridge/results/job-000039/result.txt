@@ -1,0 +1,337 @@
+======================================================================
+JOB: job-000039
+JOB_COMMIT: 87478ae1f4bef723e5715f0eda28d1154f3d73c9
+STARTED: 2026-09-23T05:52:45Z
+======================================================================
+
+SERVER_PID=34371
+=== FILE IDENTITY ===
+2026-09-22 15:37:14.402956763 +0200 28890 /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js
+2026-09-21 21:35:50.265858667 +0200 27962 /tmp/stage-a-opencode-config.S0tjv7/opencode/plugins/v2-bounded-subagent.js
+feb6f67a18e3ea9016d16d0edb4730e64ee6ce2d2a0c293865617b8147b7ea8e  /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js
+203f6ef7eab40f32f67972e5077f5f9b0ee133950001e66612ac7d7ca98919d4  /tmp/stage-a-opencode-config.S0tjv7/opencode/plugins/v2-bounded-subagent.js
+
+=== LIVE COMPLETION HOOK ===
+582-          background: result?.metadata?.background === true,
+583-        });
+584-      }
+585-
+586-      if (splitterParent) {
+587-        const session = String(
+588-          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+589-        );
+590-        const token = hookCallID(event);
+591-        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+592-        try {
+593-          supervisor(directory, [
+594:            "--complete-splitter", splitterParent,
+595-            "--prompt", session,
+596-            "--dispatch-token", token,
+597-            "--splitter-output-b64", encoded,
+598-          ]);
+599-        } catch {
+600-        }
+601-      }
+602-
+603-      let receipt;
+604-      if (transportProbe) {
+605-        const child = String(
+606-          result?.metadata?.sessionID || result?.metadata?.sessionId || "unknown"
+
+=== CANONICAL COMPLETION HOOK ===
+179-function splitParent(args) {
+180-  const prompt = typeof args?.prompt === "string" ? args.prompt : "";
+181-  return prompt.match(/^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?\n|\s*$)/)?.[1] || "";
+182-}
+183-
+184-function supervisor(directory, args, extraEnv = {}) {
+185-  return execFileSync("python3", [
+186-    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+187-    "--project", directory, ...args,
+188-  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+189-}
+190-
+191:function supervisorDetached(directory, args, extraEnv = {}) {
+192-  // A task completion hook runs on the v1 server's active request path.  The
+193-  // sole corrective splitter continuation must be dispatched only after that
+194-  // request returns, otherwise its status probe re-enters the same server and
+195-  // times out.  This preserves the same exact CLI payload and environment
+196-  // while releasing the hook synchronously.
+197-  const child = spawn("python3", [
+198-    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
+199-    "--project", directory, ...args,
+200-  ], {
+201-    detached: true,
+202-    stdio: "ignore",
+203-    env: { ...process.env, ...extraEnv },
+--
+599-          child: String(result?.metadata?.sessionID || result?.metadata?.sessionId || ""),
+600-          background: result?.metadata?.background === true,
+601-        });
+602-      }
+603-
+604-      if (splitterParent) {
+605-        const session = String(
+606-          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+607-        );
+608-        const token = hookCallID(event);
+609-        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+610-        try {
+611:          supervisorDetached(directory, [
+612:            "--complete-splitter", splitterParent,
+613-            "--prompt", session,
+614-            "--dispatch-token", token,
+615-            "--splitter-output-b64", encoded,
+616:            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
+617-          ]);
+618-        } catch {
+619-        }
+620-      }
+621-
+622-      let receipt;
+623-      if (transportProbe) {
+624-        const child = String(
+625-          result?.metadata?.sessionID || result?.metadata?.sessionId || "unknown"
+626-        );
+627-        receipt = [
+628-          "V2_NATIVE_TRANSPORT_PROBE_STARTED",
+
+=== RELEVANT DIFF ===
++++ /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/xdg/config/opencode/plugins/v2-bounded-subagent.js	2026-09-22 15:37:14.402956763 +0200
+@@ -1,5 +1,5 @@
+ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+-import { execFileSync } from "node:child_process";
++import { execFileSync, spawn } from "node:child_process";
+ import { join } from "node:path";
+ 
+ const HARD_MAX_CHILD_RESULT_CHARS = 2500;
+@@ -188,6 +188,23 @@
+   ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+ }
+ 
++function supervisorDetached(directory, args, extraEnv = {}) {
++  // A task completion hook runs on the v1 server's active request path.  The
++  // sole corrective splitter continuation must be dispatched only after that
++  // request returns, otherwise its status probe re-enters the same server and
++  // times out.  This preserves the same exact CLI payload and environment
++  // while releasing the hook synchronously.
++  const child = spawn("python3", [
++    "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py",
++    "--project", directory, ...args,
++  ], {
++    detached: true,
++    stdio: "ignore",
++    env: { ...process.env, ...extraEnv },
+--
+           "--agent", "task-splitter",
+           "--prompt", prompt,
+-          "--claim-splitter", hookCallID(event),
++          corrective ? "--claim-corrective-splitter" : "--claim-splitter", hookCallID(event),
+         ]);
+         return;
+       }
+@@ -590,11 +608,12 @@
+         const token = hookCallID(event);
+         const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+         try {
+-          supervisor(directory, [
++          supervisorDetached(directory, [
+             "--complete-splitter", splitterParent,
+             "--prompt", session,
+             "--dispatch-token", token,
+             "--splitter-output-b64", encoded,
++            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
+           ]);
+         } catch {
+         }
+
+=== OVERLAY CREATION PATH ===
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-163-            add_aliases(active_tool)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-164-            in_permission = False
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-165-            active_tool = ""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-166-        if in_permission and line.startswith("  ") and not line.startswith("    "):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-167-            add_aliases(active_tool)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-168-            active_tool = line.strip()[:-1] if line.rstrip().endswith(":") else ""
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-169-        output.append(line)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-170-    if in_permission:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-171-        add_aliases(active_tool)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-172-    return "".join(output)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-173-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-174-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:175:def create_overlay(project: Path, source_config_home: Path, overlay_root: Path | None = None) -> dict:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-176-    root = project_root(project)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-177-    worktree = opencode_worktree(root)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-178-    source = source_config_home.resolve(strict=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-179-    agents = source / "opencode" / "agents"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-180-    if not agents.is_dir():
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-181-        raise PathPermissionError(f"canonical agent config is missing: {agents}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:182:    target = overlay_root or Path(tempfile.mkdtemp(prefix="stage-a-opencode-config-"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-183-    if target.exists() and any(target.iterdir()):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:184:        raise PathPermissionError(f"overlay root is not empty: {target}")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-185-    target.mkdir(parents=True, exist_ok=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:186:    shutil.copytree(source, target, dirs_exist_ok=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-187-    rendered = []
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-188-    for agent in sorted((target / "opencode" / "agents").glob("*.md")):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-189-        original = agent.read_text(encoding="utf-8")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-190-        updated = render_agent_with_projection(original, root, worktree)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-191-        if updated != original:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-192-            agent.write_text(updated, encoding="utf-8")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-193-            rendered.append(agent.name)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-194-    marker = {
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:195:        "protocol": "v2-stage-a-exact-project-permission-overlay-v1",
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-196-        "canonical_config_home": str(source),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-197-        "project": str(root),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-198-        "worktree": str(worktree),
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-199-        "agents": rendered,
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-200-    }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:201:    (target / "opencode" / ".stage-a-permission-overlay.json").write_text(
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-202-        json.dumps(marker, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-203-    )
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:204:    validate_overlay(root, target, source)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-205-    return {"config_home": str(target), **marker}
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-206-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-207-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:208:def validate_overlay(project: Path, config_home: Path, canonical_config_home: Path) -> None:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:209:    marker_path = config_home / "opencode" / ".stage-a-permission-overlay.json"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-210-    try:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-211-        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-212-    except (OSError, json.JSONDecodeError) as exc:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:213:        raise PathPermissionError("exact-project permission overlay marker is invalid") from exc
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:214:    if marker.get("protocol") != "v2-stage-a-exact-project-permission-overlay-v1":
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:215:        raise PathPermissionError("permission overlay protocol mismatch")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-216-    if marker.get("project") != str(project_root(project)):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:217:        raise PathPermissionError("permission overlay project mismatch")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-218-    if marker.get("worktree") != str(opencode_worktree(project)):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:219:        raise PathPermissionError("permission overlay worktree mismatch")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-220-    if marker.get("canonical_config_home") != str(canonical_config_home.resolve()):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:221:        raise PathPermissionError("permission overlay canonical config mismatch")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-222-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-223-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-224-def selftest() -> None:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-225-    with tempfile.TemporaryDirectory() as td:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-226-        base = Path(td)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-227-        project = base / "project"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-228-        sibling = base / "project-sibling"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-229-        other = base / "other"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-230-        for path in (project, sibling, other):
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-231-            path.mkdir()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-232-        owned = ".opencode-v2/ACCEPTANCE.md"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-233-        rules = [("*", "deny"), (owned, "allow")]
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-247-        except PathPermissionError:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-248-            pass
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-249-        else:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-250-            raise AssertionError("symlink escape was accepted")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-251-        # Non-Git projects use / as the v1.18.31 worktree; aliases therefore
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-252-        # have no leading slash and retain no /PROJECT/... representation.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-253-        assert opencode_worktree(project) == Path("/")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-254-        assert effective_permission_pattern(project, Path("/"), owned) == str(project / owned).lstrip("/")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-255-        config = base / "config" / "opencode" / "agents"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-256-        config.mkdir(parents=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-257-        agent = "---\npermission:\n  edit:\n    \"*\": deny\n    \".opencode-v2/ACCEPTANCE.md\": allow\n---\n"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-258-        (config / "acceptance-planner.md").write_text(agent, encoding="utf-8")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:259:        overlay = Path(base / "overlay")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:260:        receipt = create_overlay(project, base / "config", overlay)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:261:        validate_overlay(project, overlay, base / "config")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:262:        rendered = (overlay / "opencode" / "agents" / "acceptance-planner.md").read_text()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-263-        assert str(project / owned).lstrip("/") in rendered
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-264-        assert str(project / owned) not in rendered and str(sibling / owned) not in rendered
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-265-        assert receipt["project"] == str(project.resolve())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-266-        assert receipt["worktree"] == "/"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-267-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-268-        # A project which is its Git worktree needs no duplicate projection.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-269-        git_project = base / "git-project"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-270-        git_project.mkdir()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-271-        subprocess.run(["git", "init", "-q", str(git_project)], check=True)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-272-        assert opencode_worktree(git_project) == git_project.resolve()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-273-        assert effective_permission_pattern(git_project, git_project, owned) == owned
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-274-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-275-        # A nested project projects only its owned path below the enclosing Git root.
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-276-        nested = git_project / "nested"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-277-        nested.mkdir()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-278-        assert opencode_worktree(nested) == git_project.resolve()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-279-        assert effective_permission_pattern(nested, git_project, owned) == f"nested/{owned}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-280-    print("stage-a path permission selftest: OK")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-281-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-282-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-283-def main() -> int:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:284:    parser = argparse.ArgumentParser(description="Create an exact-project OpenCode permission overlay.")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-285-    parser.add_argument("--project", type=Path)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-286-    parser.add_argument("--config-home", type=Path)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:287:    parser.add_argument("--overlay-root", type=Path)
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-288-    parser.add_argument("--selftest", action="store_true")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-289-    ns = parser.parse_args()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-290-    if ns.selftest:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-291-        selftest()
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-292-        return 0
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-293-    if ns.project is None or ns.config_home is None:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-294-        parser.error("--project and --config-home are required unless --selftest is used")
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py:295:    print(json.dumps(create_overlay(ns.project, ns.config_home, ns.overlay_root), sort_keys=True))
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-296-    return 0
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-297-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-298-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-299-if __name__ == "__main__":
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-300-    try:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-301-        raise SystemExit(main())
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-302-    except PathPermissionError as exc:
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/stage_a_path_permissions.py-303-        raise SystemExit(f"ERROR: {exc}")
+--
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-2-set -Eeuo pipefail
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-3-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-4-ROOT="/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-5-BIN="$(cat "$ROOT/runtime/opencode-v1.18.31.path")"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-6-PROJECT="${1:?usage: $0 /absolute/project/path [port]}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-7-PORT="${2:-57042}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-8-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-9-[[ -d "$PROJECT" ]] || { echo "ERROR: project does not exist: $PROJECT" >&2; exit 1; }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-10-[[ -x "$BIN" ]] || { echo "ERROR: OpenCode v1.18.31 binary missing: $BIN" >&2; exit 1; }
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-11-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-12-CANONICAL_CONFIG_HOME="$ROOT/xdg/config"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-13-OVERLAY_CONFIG_HOME="$(mktemp -d /tmp/stage-a-opencode-config.XXXXXX)"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh:14:cleanup_overlay(){
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-15-  rm -rf -- "$OVERLAY_CONFIG_HOME"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-16-}
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh:17:trap cleanup_overlay EXIT
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-18-python3 "$ROOT/scripts/stage_a_path_permissions.py" \
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-19-  --project "$PROJECT" --config-home "$CANONICAL_CONFIG_HOME" \
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh:20:  --overlay-root "$OVERLAY_CONFIG_HOME" >/dev/null
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh:21:export XDG_CONFIG_HOME="$OVERLAY_CONFIG_HOME"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-22-export XDG_DATA_HOME="$ROOT/xdg/data-v11831-a2"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-23-export XDG_CACHE_HOME="$ROOT/xdg/cache-v11831-a2"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-24-export XDG_STATE_HOME="$ROOT/xdg/state-v11831-a2"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-25-export V2_ROOT="$ROOT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-26-export V2_OPENCODE_DB="$XDG_DATA_HOME/opencode/opencode.db"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-27-export V2_OPENCODE_BASE_URL="http://127.0.0.1:$PORT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-28-export V2_OPENCODE_SESSION_TABLE="session"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-29-export OPENCODE_DISABLE_PROJECT_CONFIG=true
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-30-export OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-31-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-32-: "${VLLM_API_KEY:?VLLM_API_KEY must be exported before starting A2 v1.18.31}"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-33-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-34-mkdir -p "$XDG_DATA_HOME" "$XDG_CACHE_HOME" "$XDG_STATE_HOME"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-35-
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-36-echo "============================================================"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-37-echo " OpenCode V2 A2 / v1.18.31 integration server"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-38-echo "============================================================"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-39-echo "Root    : $ROOT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-40-echo "Project : $PROJECT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-41-echo "Port    : $PORT"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh:42:echo "Config  : $XDG_CONFIG_HOME/opencode/opencode.jsonc"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-43-echo
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-44-echo "Background subagents: enabled"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-45-echo "Technical root model : v2noop/root-noop"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-46-echo "Semantic models      : syv/qwen38-*"
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-47-echo
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-48-"$BIN" serve --hostname 127.0.0.1 --port "$PORT" &
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-49-SERVER_PID=$!
+/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/run-a2-v11831-server.sh-50-wait "$SERVER_PID"
+
+JOB_000039_OK
+
+
+======================================================================
+FINISHED: 2026-09-23T05:52:45Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
