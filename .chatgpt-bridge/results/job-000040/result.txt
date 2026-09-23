@@ -1,0 +1,74 @@
+======================================================================
+JOB: job-000040
+JOB_COMMIT: 3a497fa1039acc88883e6d3521ece565e7f57472
+STARTED: 2026-09-23T05:54:29Z
+======================================================================
+
+=== RECOVER VLLM KEY ===
+VLLM_API_KEY recovered
+
+=== STOP OLD 58443 SERVER ===
+OLDPID=34371
+
+=== START FRESH 58443 SERVER ===
+WRAPPER_PID=943351
+NEWPID=943374
+CFG=/tmp/stage-a-opencode-config.bhYjxW
+
+=== VERIFY LIVE PLUGIN ===
+CANON_SHA=feb6f67a18e3ea9016d16d0edb4730e64ee6ce2d2a0c293865617b8147b7ea8e
+LIVE_SHA=feb6f67a18e3ea9016d16d0edb4730e64ee6ce2d2a0c293865617b8147b7ea8e
+612-            "--complete-splitter", splitterParent,
+613-            "--prompt", session,
+614-            "--dispatch-token", token,
+615-            "--splitter-output-b64", encoded,
+616:            "--opencode-base-url", String(process.env.V2_OPENCODE_BASE_URL || ""),
+617-          ]);
+618-        } catch {
+619-        }
+620-      }
+187-    "--project", directory, ...args,
+188-  ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...extraEnv } });
+189-}
+190-
+191:function supervisorDetached(directory, args, extraEnv = {}) {
+192-  // A task completion hook runs on the v1 server's active request path.  The
+193-  // sole corrective splitter continuation must be dispatched only after that
+194-  // request returns, otherwise its status probe re-enters the same server and
+195-  // times out.  This preserves the same exact CLI payload and environment
+--
+607-        );
+608-        const token = hookCallID(event);
+609-        const encoded = Buffer.from(rawResult, "utf8").toString("base64");
+610-        try {
+611:          supervisorDetached(directory, [
+612-            "--complete-splitter", splitterParent,
+613-            "--prompt", session,
+614-            "--dispatch-token", token,
+615-            "--splitter-output-b64", encoded,
+
+=== SERVER STATUS ===
+{}
+============================================================
+ OpenCode V2 A2 / v1.18.31 integration server
+============================================================
+Root    : /home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831
+Project : /home/bking/AI/a2-canaries/20260922-230614-d003b-live/project
+Port    : 58443
+Config  : /tmp/stage-a-opencode-config.bhYjxW/opencode/opencode.jsonc
+
+Background subagents: enabled
+Technical root model : v2noop/root-noop
+Semantic models      : syv/qwen38-*
+
+Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.
+opencode server listening on http://127.0.0.1:58443
+JOB_000040_OK
+
+
+======================================================================
+FINISHED: 2026-09-23T05:54:31Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
