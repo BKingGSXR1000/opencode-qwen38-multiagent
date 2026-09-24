@@ -206,10 +206,12 @@ For child #1 emit exactly:
 Its scope must be ONE SMALL bounded stage such as one API-contract probe, one
 acquisition/format discovery, one reproducible failure diagnosis, or one small
 set of concrete values the final writer needs. It must NOT attempt the final
-parent artifact. Keep the scope <=1200 characters and do not encode multiple
-numbered/ordered stages such as `(1) ... (2) ...`. A query matrix across many
-targets/times is not one probe merely because it uses one API. The supervisor
-deterministically rejects oversized/compound progress-handoff scopes.
+parent artifact. Keep the scope <=1200 characters and make it one unnumbered stage. Do not use
+`(1)/(2)`, `(a)/(b)`, or sequencing words such as `first`, `second`, `then`,
+or `followed by`; these mark compound handoffs. A query matrix across targets/times is not one probe. If the parent has
+disjoint owned outputs that can each carry a bounded result, prefer direct
+artifact partition over a diagnostic handoff. The supervisor rejects compound
+or oversized progress-handoff scopes.
 
 Because child IDs are supervisor-derived, NEVER put a literal
 `.opencode-v2/work/<anything>.progress.md` path in either proposal's `scope` or
