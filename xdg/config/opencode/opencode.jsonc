@@ -289,7 +289,7 @@
           },
           "limit": {
             "context": 49152,
-            "output": 1536
+            "output": 7168
           },
           "options": {
             "v2_max_tokens": 7168,

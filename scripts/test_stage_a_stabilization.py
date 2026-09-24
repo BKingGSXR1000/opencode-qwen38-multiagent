@@ -155,14 +155,17 @@ class TerminalSemanticChildTests(unittest.TestCase):
 
 
 class TaskSplitterOutputCapTests(unittest.TestCase):
-    def test_task_splitter_has_a_dedicated_nonthinking_profile_with_unchanged_caps(self):
+    def test_task_splitter_keeps_its_small_json_cap_while_planner_can_emit_one_plan_write(self):
         config=json.loads((Path(__file__).parents[1] / "xdg/config/opencode/opencode.jsonc").read_text())
         models=config["provider"]["syv"]["models"]
         planner=models["qwen38-implementation-planner-48k"]
         splitter=models["qwen38-task-splitter-nothink"]
         self.assertEqual(splitter["id"],planner["id"])
-        self.assertEqual(splitter["limit"],planner["limit"])
-        self.assertEqual(splitter["options"]["v2_max_tokens"],planner["options"]["v2_max_tokens"])
+        self.assertEqual(splitter["limit"]["context"],planner["limit"]["context"])
+        self.assertEqual(planner["limit"]["output"],planner["options"]["v2_max_tokens"])
+        self.assertEqual(planner["limit"]["output"],7168)
+        self.assertEqual(splitter["limit"]["output"],1536)
+        self.assertEqual(splitter["options"]["v2_max_tokens"],7168)
         self.assertEqual(
             splitter["options"]["chat_template_kwargs"],
             {"enable_thinking":False,"preserve_thinking":False},
