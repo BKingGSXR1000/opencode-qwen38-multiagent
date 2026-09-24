@@ -13,6 +13,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ap=argparse.ArgumentParser(description=__doc__)
 ap.add_argument("--listen",type=int,default=18034)
 ap.add_argument("--target",default="http://127.0.0.1:18033")
+ap.add_argument(
+    "--greedy-after-fault",action="store_true",
+    help="make forwarded chat completions deterministic after the injected fault",
+)
 ns=ap.parse_args()
 lock=threading.Lock()
 faults_left=1
@@ -86,13 +90,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global faults_left
         body=self._read_body()
+        is_chat=self.path.split("?",1)[0].endswith("/chat/completions")
         inject=False
-        if self.path.split("?",1)[0].endswith("/chat/completions"):
+        if is_chat:
             with lock:
                 if faults_left:
                     faults_left-=1
                     inject=True
         if not inject:
+            if is_chat and ns.greedy_after_fault:
+                request=json.loads(body)
+                request["temperature"]=0
+                request["top_p"]=1
+                request["seed"]=0
+                body=json.dumps(request,separators=(",",":")).encode()
+                print("CANARY_FORWARD_GREEDY",flush=True)
             self._forward(body)
             return
         payload=sse_fault()

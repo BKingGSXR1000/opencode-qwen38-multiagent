@@ -15,11 +15,24 @@ SERVER_PID=""
 SUPERVISOR_PID=""
 NOOP_PID=""
 
+stop_pid(){
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  kill "$pid" 2>/dev/null || return 0
+  for _ in {1..20}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep .1
+  done
+  kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 cleanup(){
-  [[ -n "$SUPERVISOR_PID" ]] && kill "$SUPERVISOR_PID" 2>/dev/null || true
-  [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
-  [[ -n "$FAULT_PID" ]] && kill "$FAULT_PID" 2>/dev/null || true
-  [[ -n "$NOOP_PID" ]] && kill "$NOOP_PID" 2>/dev/null || true
+  set +e
+  stop_pid "$SUPERVISOR_PID"
+  stop_pid "$SERVER_PID"
+  stop_pid "$FAULT_PID"
+  stop_pid "$NOOP_PID"
 }
 trap cleanup EXIT INT TERM
 
@@ -48,7 +61,7 @@ printf '%s\n'   'Deterministic malformed-primary D003-B corrective splitter cana
 
 python3 "$ROOT/scripts/create-d003-splitter-canary.py"   --project "$PROJECT" --task-file "$TASK" --d003-b-equivalent
 
-python3 "$ROOT/scripts/d003-splitter-fault-proxy.py"   --listen "$FAULT_PORT" --target http://127.0.0.1:18033   >"$BASE/fault-proxy.log" 2>&1 &
+python3 "$ROOT/scripts/d003-splitter-fault-proxy.py"   --listen "$FAULT_PORT" --target http://127.0.0.1:18033 --greedy-after-fault   >"$BASE/fault-proxy.log" 2>&1 &
 FAULT_PID=$!
 if ! curl -fsS --max-time 2 http://127.0.0.1:57182/v1/models >/dev/null 2>&1; then
   "$ROOT/scripts/run-a2-v11831-noop.sh" >"$BASE/noop.log" 2>&1 &
