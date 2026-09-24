@@ -9,7 +9,16 @@ PORT="${2:-57042}"
 [[ -d "$PROJECT" ]] || { echo "ERROR: project does not exist: $PROJECT" >&2; exit 1; }
 [[ -x "$BIN" ]] || { echo "ERROR: OpenCode v1.18.31 binary missing: $BIN" >&2; exit 1; }
 
-export XDG_CONFIG_HOME="$ROOT/xdg/config"
+CANONICAL_CONFIG_HOME="$ROOT/xdg/config"
+OVERLAY_CONFIG_HOME="$(mktemp -d /tmp/stage-a-opencode-config.XXXXXX)"
+cleanup_overlay(){
+  rm -rf -- "$OVERLAY_CONFIG_HOME"
+}
+trap cleanup_overlay EXIT
+python3 "$ROOT/scripts/stage_a_path_permissions.py" \
+  --project "$PROJECT" --config-home "$CANONICAL_CONFIG_HOME" \
+  --overlay-root "$OVERLAY_CONFIG_HOME" >/dev/null
+export XDG_CONFIG_HOME="$OVERLAY_CONFIG_HOME"
 export XDG_DATA_HOME="$ROOT/xdg/data-v11831-a2"
 export XDG_CACHE_HOME="$ROOT/xdg/cache-v11831-a2"
 export XDG_STATE_HOME="$ROOT/xdg/state-v11831-a2"
@@ -36,4 +45,6 @@ echo "Background subagents: enabled"
 echo "Technical root model : v2noop/root-noop"
 echo "Semantic models      : syv/qwen38-*"
 echo
-exec "$BIN" serve --hostname 127.0.0.1 --port "$PORT"
+"$BIN" serve --hostname 127.0.0.1 --port "$PORT" &
+SERVER_PID=$!
+wait "$SERVER_PID"

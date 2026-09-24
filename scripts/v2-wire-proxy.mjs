@@ -52,6 +52,7 @@ function meta(j) {
     messages: Array.isArray(j.messages) ? j.messages.length : null,
     tools: Array.isArray(j.tools) ? j.tools.length : null,
     stream: j.stream ?? null,
+    response_format: j.response_format ?? null,
     v2_max_tokens: j.v2_max_tokens ?? null,
   };
 }
@@ -138,6 +139,19 @@ function detectPurpose(j, explicitPurpose = "") {
   ) ? "compaction" : "normal";
 }
 
+function enforceTaskSplitterJson(j) {
+  const text = messageText(Array.isArray(j.messages) ? j.messages : []);
+  if (!text.includes("SPLIT_PARENT:")) return false;
+
+  // Stage-A task-splitter responses are machine-consumed contracts. vLLM's
+  // json_object mode constrains the visible assistant content to one JSON
+  // object while leaving the supervisor responsible for schema/semantic
+  // validation. This prevents harmless model preambles from invalidating an
+  // otherwise valid split without weakening the strict supervisor parser.
+  j.response_format = { type: "json_object" };
+  return true;
+}
+
 function enforceGenerationCap(j, policy, purpose) {
   const roleCap = positiveInt(j.v2_max_tokens);
   delete j.v2_max_tokens;
@@ -203,6 +217,9 @@ function runSelfTest() {
   const normal = {
     messages: [{ role: "user", content: "Read control-status.json and continue.\n## Goal\n## Progress\n## Relevant Files" }],
   };
+  const splitter = {
+    messages: [{ role: "user", content: "SPLIT_PARENT: D003-B\nCANONICAL_SPLIT_REQUEST_JSON_BEGIN\n{}\nCANONICAL_SPLIT_REQUEST_JSON_END" }],
+  };
   // New34 production regression: the compaction Started row was durable but
   // the immediately-following provider request was classified as normal and
   // inherited v2_max_tokens=2048. The prompt can arrive under provider-specific
@@ -246,6 +263,12 @@ function runSelfTest() {
   if (detectPurpose(update) !== "compaction") throw new Error("update compaction prompt not detected");
   if (detectPurpose(legacy) !== "compaction") throw new Error("legacy compaction prompt not detected");
   if (detectPurpose(normal) !== "normal") throw new Error("normal request misclassified as compaction");
+  if (!enforceTaskSplitterJson(splitter)) throw new Error("splitter request was not recognized");
+  if (JSON.stringify(splitter.response_format) !== JSON.stringify({ type: "json_object" })) {
+    throw new Error("splitter request did not receive json_object response format");
+  }
+  if (enforceTaskSplitterJson(normal)) throw new Error("normal request misclassified as splitter");
+  if (normal.response_format !== undefined) throw new Error("normal request response format was modified");
   if (detectPurpose(nestedCompaction) !== "compaction") throw new Error("nested compaction request not detected");
   if (detectPurpose(liveV2Compaction) !== "compaction") throw new Error("OpenCode V2 compaction prompt not detected");
   if (detectPurpose(opaqueMarkedCompaction, "compaction") !== "compaction") throw new Error("source-marked compaction not detected");
@@ -372,6 +395,7 @@ const server = http.createServer((req, res) => {
         const explicitPurpose = String(req.headers["x-v2-request-purpose"] || "");
         const purpose = detectPurpose(j, explicitPurpose);
         const generation = enforceGenerationCap(j, policy, purpose);
+        const taskSplitterJson = enforceTaskSplitterJson(j);
 
         const after = meta(j);
 
@@ -379,6 +403,7 @@ const server = http.createServer((req, res) => {
           kind: "request",
           policy,
           purpose,
+          task_splitter_json: taskSplitterJson,
           purpose_source: explicitPurpose.toLowerCase() === "compaction" ? "source-header" : "prompt-fallback",
           generation,
           before,

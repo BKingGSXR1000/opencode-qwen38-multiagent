@@ -30,13 +30,15 @@ TASK_FILE="$(cd -- "$(dirname -- "$TASK_FILE")" && pwd -P)/$(basename -- "$TASK_
 [[ -x "$ROOT/scripts/bootstrap-stage-a-project.py" ]] || { echo "ERROR: bootstrap utility missing" >&2; exit 1; }
 [[ -x "$ROOT/scripts/create-stage-a-root.py" ]] || { echo "ERROR: root utility missing" >&2; exit 1; }
 [[ -x "$ROOT/scripts/drive-stage-a-run.py" ]] || { echo "ERROR: driver utility missing" >&2; exit 1; }
+[[ -x "$ROOT/scripts/stage_a_preflight.py" ]] || { echo "ERROR: consolidated preflight utility missing" >&2; exit 1; }
 
 CONFIG="$ROOT/xdg/config/opencode/opencode.jsonc"
 grep -Fq '"default_agent": "transport-root"' "$CONFIG" || { echo "ERROR: canonical transport-root config missing" >&2; exit 1; }
 grep -Fq '"model": "v2noop/root-noop"' "$CONFIG" || { echo "ERROR: canonical root model config missing" >&2; exit 1; }
 
+python3 "$ROOT/scripts/stage_a_preflight.py" \
+  --project "$PROJECT" --task-file "$TASK_FILE" --base-url "$BASE_URL"
 if "$PREFLIGHT"; then
-  python3 "$ROOT/scripts/bootstrap-stage-a-project.py" --project "$PROJECT" --task-file "$TASK_FILE" --dry-run
   echo "STAGE_A_PREFLIGHT: PASS"
   exit 0
 fi
@@ -49,16 +51,18 @@ http_status(){
   curl -sS -o /dev/null -w '%{http_code}' -G "$1" --data-urlencode "directory=$PROJECT" 2>/dev/null || true
 }
 
-if [[ "$(http_status "$BASE_URL/session/status")" != "200" ]]; then
-  if ! curl -fsS "http://127.0.0.1:57182/v1/models" >/dev/null 2>&1; then
-    "$ROOT/scripts/run-a2-v11831-noop.sh" >"$ROOT/logs/stage-a-noop.log" 2>&1 &
-  fi
-  "$ROOT/scripts/run-a2-v11831-server.sh" "$PROJECT" "$PORT" >"$ROOT/logs/stage-a-server-$PORT.log" 2>&1 &
-  for _ in {1..120}; do
-    [[ "$(http_status "$BASE_URL/session/status")" == "200" ]] && break
-    sleep 0.25
-  done
+[[ "$(http_status "$BASE_URL/session/status")" != "200" ]] || {
+  echo "ERROR: an existing OpenCode server cannot prove this project's exact permission overlay; use a fresh port" >&2
+  exit 1
+}
+if ! curl -fsS "http://127.0.0.1:57182/v1/models" >/dev/null 2>&1; then
+  "$ROOT/scripts/run-a2-v11831-noop.sh" >"$ROOT/logs/stage-a-noop.log" 2>&1 &
 fi
+"$ROOT/scripts/run-a2-v11831-server.sh" "$PROJECT" "$PORT" >"$ROOT/logs/stage-a-server-$PORT.log" 2>&1 &
+for _ in {1..120}; do
+  [[ "$(http_status "$BASE_URL/session/status")" == "200" ]] && break
+  sleep 0.25
+done
 [[ "$(http_status "$BASE_URL/session/status")" == "200" ]] || {
   echo "ERROR: OpenCode server did not become ready at $BASE_URL" >&2
   exit 1
@@ -74,4 +78,10 @@ for _ in {1..120}; do
 done
 [[ -s "$PROJECT/.opencode-v2/query/deterministic-shadow.json" ]] || { echo "ERROR: supervisor did not materialize deterministic shadow" >&2; exit 1; }
 
-exec python3 "$ROOT/scripts/drive-stage-a-run.py" --project "$PROJECT" --base-url "$BASE_URL" --root-session "$ROOT_SESSION" --max-ticks "$MAX_TICKS"
+PREFLIGHT_PROOF="$(mktemp /tmp/stage-a-preflight-proof.XXXXXX)"
+python3 "$ROOT/scripts/stage_a_preflight.py" \
+  --project "$PROJECT" --task-file "$TASK_FILE" --base-url "$BASE_URL" \
+  --root-session "$ROOT_SESSION" --write-proof "$PREFLIGHT_PROOF"
+
+exec python3 "$ROOT/scripts/drive-stage-a-run.py" --project "$PROJECT" --base-url "$BASE_URL" \
+  --root-session "$ROOT_SESSION" --preflight-proof "$PREFLIGHT_PROOF" --max-ticks "$MAX_TICKS"

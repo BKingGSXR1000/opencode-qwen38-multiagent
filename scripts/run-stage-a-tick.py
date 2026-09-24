@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import stage_a_controller as controller
+import stage_a_preflight as preflight
 
 
 class TickError(RuntimeError):
@@ -97,16 +98,18 @@ def main() -> int:
     parser.add_argument("--project", type=Path)
     parser.add_argument("--base-url", default="")
     parser.add_argument("--root-session", default="")
+    parser.add_argument("--preflight-proof", type=Path)
     parser.add_argument("--selftest", action="store_true")
     ns = parser.parse_args()
     if ns.selftest:
         selftest()
         return 0
-    if ns.project is None or not ns.base_url:
-        parser.error("--project and --base-url are required unless --selftest is used")
+    if ns.project is None or not ns.base_url or not ns.root_session or ns.preflight_proof is None:
+        parser.error("--project, --base-url, --root-session, and --preflight-proof are required unless --selftest is used")
     try:
+        preflight.verify_proof(ns.preflight_proof, ns.project.resolve(), ns.base_url, ns.root_session)
         receipt = execute_one(ns.project.resolve(), ns.base_url, ns.root_session)
-    except controller.ControllerError as exc:
+    except (controller.ControllerError, preflight.PreflightError) as exc:
         raise TickError(str(exc)) from exc
     print(json.dumps(receipt, sort_keys=True, indent=2))
     return 0

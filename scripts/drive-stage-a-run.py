@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import stage_a_controller as controller
+import stage_a_preflight as preflight
 
 
 _tick_spec = importlib.util.spec_from_file_location(
@@ -42,7 +43,8 @@ def terminal(actions: list[object]) -> int | None:
     return None
 
 
-def drive(project: Path, base_url: str, root_session: str, poll: float, max_ticks: int) -> int:
+def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: float, max_ticks: int) -> int:
+    preflight.verify_proof(proof, project, base_url, root_session)
     dispatched = 0
     last_event = ""
     while max_ticks == 0 or dispatched < max_ticks:
@@ -89,6 +91,7 @@ def main() -> int:
     parser.add_argument("--project", type=Path)
     parser.add_argument("--base-url", default="")
     parser.add_argument("--root-session", default="")
+    parser.add_argument("--preflight-proof", type=Path)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--max-ticks", type=int, default=0)
     parser.add_argument("--selftest", action="store_true")
@@ -96,11 +99,11 @@ def main() -> int:
     if ns.selftest:
         selftest()
         return 0
-    if ns.project is None or not ns.base_url:
-        parser.error("--project and --base-url are required unless --selftest is used")
+    if ns.project is None or not ns.base_url or not ns.root_session or ns.preflight_proof is None:
+        parser.error("--project, --base-url, --root-session, and --preflight-proof are required unless --selftest is used")
     if ns.poll <= 0 or ns.max_ticks < 0:
         parser.error("--poll must be > 0 and --max-ticks must be >= 0")
-    return drive(ns.project.resolve(), ns.base_url, ns.root_session, ns.poll, ns.max_ticks)
+    return drive(ns.project.resolve(), ns.base_url, ns.root_session, ns.preflight_proof, ns.poll, ns.max_ticks)
 
 
 if __name__ == "__main__":
