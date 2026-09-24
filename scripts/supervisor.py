@@ -878,6 +878,8 @@ def save_split_status(did, state, **detail):
         # A corrective turn is a bounded continuation of one already-claimed
         # splitter session.  Keep its audit fields through every terminal
         # transition; they are evidence, not a new recovery budget.
+        "completion_pending_session","completion_pending_token",
+        "completion_pending_deadline_epoch",
         "corrective_turn_count","corrective_session","corrective_dispatch_token",
         "corrective_first_output_sha256","corrective_archive",
         "corrective_context_sha256","corrective_dispatch_state",
@@ -2518,15 +2520,61 @@ def corrective_splitter_prompt(parent,request,primary_output,reason):
     )
 
 
+# Keep the corrective launch a fresh native task-splitter child of the same
+# technical root, but deliberately omit SubtaskPart.command.  A truthy
+# command makes OpenCode resume the v2noop parent after task completion.
+def quiesce_transport_root_for_corrective(
+    root, settle_seconds=0.05, poll_seconds=0.05, timeout_seconds=2.0
+):
+    """Stop OpenCode's automatic parent resume before posting the corrective SubtaskPart.
+
+    A completed TaskTool immediately resumes its parent assistant. The
+    transport-root has no semantic work to do, and a corrective prompt posted
+    while that automatic resume is active is persisted but not executed.
+    Sample twice to cover the small completion/resume race; if the root is
+    active, interrupt only that current turn and wait until the session leaves
+    /session/status. Do not use abort_session(): this is transport quiescing,
+    not retirement of the durable technical root.
+    """
+    try:
+        status=http.get_status()
+        if root not in status:
+            if settle_seconds>0:
+                time.sleep(settle_seconds)
+            status=http.get_status()
+        if root not in status:
+            return True,"root-idle"
+
+        if not http.interrupt(root):
+            return False,"root-interrupt-failed"
+
+        deadline=time.monotonic()+max(0.0,float(timeout_seconds))
+        while True:
+            if poll_seconds>0:
+                time.sleep(poll_seconds)
+            status=http.get_status()
+            if root not in status:
+                return True,"root-interrupted"
+            if time.monotonic()>=deadline:
+                return False,"root-interrupt-timeout"
+    except Exception as exc:
+        return False,f"root-quiesce-error:{exc!r}"
+
+
 def dispatch_splitter_corrective_turn(root,prompt):
     if not http.ensure(): return False,"http-not-connected"
     if http.mode!="v1": return False,"splitter-corrective-requires-v1-runtime"
+
+    ok,detail=quiesce_transport_root_for_corrective(root)
+    if not ok:
+        return False,detail
+
     try:
         query=urllib.parse.urlencode({"directory":PROJECT})
         http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
             payload={"agent":"transport-root","model":{"providerID":"v2noop","modelID":"root-noop"},
-                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter","command":"stage-a-controller"}]},timeout=12)
-        return True,"accepted"
+                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter"}]},timeout=12)
+        return True,f"accepted-after-{detail}"
     except Exception as exc:
         return False,repr(exc)
 
@@ -2848,14 +2896,45 @@ def recover_pending_splitter_completion(parent,status,now=None):
     if token and active_token and token!=active_token:
         return False,"stale-pending-token"
 
-    payload=parse_splitter_final_json(last_assistant_text_db(session))
+    text=last_assistant_text_db(session)
+    payload=parse_splitter_final_json(text)
     if isinstance(payload,dict):
         atomic_write_json(split_proposal_path(parent),payload)
+        save_split_status(
+            parent,"splitter-active",
+            claim_count=int(status.get("claim_count") or 0),
+            dispatch_token=active_token or token,
+            lease_until_epoch=status.get("lease_until_epoch",0),
+            completion_pending_session="",
+            completion_pending_token="",
+            completion_pending_deadline_epoch=0,
+        )
         log(
             f"SPLIT_PROPOSAL_RECOVERED_AFTER_HOOK parent={parent} "
             f"session={session} token={token or active_token}"
         )
         return True,"proposal-recovered"
+
+    # The hook may expose a TaskTool wrapper before the child's actual final
+    # assistant text is durable.  Only classify the response once the durable
+    # child-session text exists.
+    if text.strip():
+        save_split_status(
+            parent,"splitter-active",
+            claim_count=int(status.get("claim_count") or 0),
+            dispatch_token=active_token or token,
+            lease_until_epoch=status.get("lease_until_epoch",0),
+            completion_pending_session="",
+            completion_pending_token="",
+            completion_pending_deadline_epoch=0,
+        )
+        return begin_splitter_corrective_turn(
+            parent,
+            session,
+            token or active_token,
+            "response did not contain the required bare JSON object",
+            text,
+        )
 
     now=time.time() if now is None else float(now)
     try:
@@ -2954,13 +3033,37 @@ def complete_splitter(parent, session="", dispatch_token="", output_text=""):
                     session=session,validation=False,
                 )
                 return False,state
+
             if corrective:
-                _,state=record_splitter_failure(parent,"corrective splitter response did not contain required bare JSON",session=session,validation=True)
-                return False,state
-            return begin_splitter_corrective_turn(
-                parent,session,dispatch_token,
-                "response did not contain the required bare JSON object",output_text,
+                # OpenCode v1.18.31 may persist the child's final assistant
+                # text only AFTER execute.after returns.  The corrective
+                # session is already durably bound above, so leave the state
+                # pending and let recover_splitter_corrective_output() read
+                # the final session text on the normal reconciliation tick.
+                log(
+                    f"SPLITTER_CORRECTIVE_COMPLETION_PENDING parent={parent} "
+                    f"session={session} token={dispatch_token}"
+                )
+                return False,"corrective-output-pending"
+
+            # Same persistence race for the primary splitter.  Do not mistake
+            # the TaskTool wrapper from execute.after for the child's final
+            # model answer.  Give SQLite the established 15-second splitter
+            # persistence grace and classify the durable child text afterward.
+            save_split_status(
+                parent,"splitter-active",
+                claim_count=int(status.get("claim_count") or 0),
+                dispatch_token=dispatch_token,
+                lease_until_epoch=status.get("lease_until_epoch",0),
+                completion_pending_session=session,
+                completion_pending_token=dispatch_token,
+                completion_pending_deadline_epoch=time.time()+15,
             )
+            log(
+                f"SPLITTER_COMPLETION_PENDING_AFTER_HOOK parent={parent} "
+                f"session={session} token={dispatch_token}"
+            )
+            return False,"completion-pending"
 
         atomic_write_json(split_proposal_path(parent),payload)
         log(

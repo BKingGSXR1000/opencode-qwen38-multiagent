@@ -586,6 +586,14 @@ def canonical_implementation_prompt(project: Path, agent: str, did: str) -> str:
     return prompt
 
 
+# IMPORTANT: every Stage-A SubtaskPart injected into the technical root must
+# omit the optional `command` field.  In pinned OpenCode v1.18.31 a truthy
+# SubtaskPart.command causes handleSubtask() to append a synthetic parent
+# message ("Summarize the task tool output above and continue with your task.")
+# after the child completes.  The Stage-A root is transport-only
+# (v2noop/root-noop), so parent continuation is never part of the protocol.
+# Omitting command makes the native child completion terminal for that root
+# turn and keeps the root available for the next deterministic SubtaskPart.
 def build_implementation_subtask(action: dict, prompt: str) -> dict:
     agent = str(action.get("agent") or "")
     did = str(action.get("deliverable") or "")
@@ -598,7 +606,6 @@ def build_implementation_subtask(action: dict, prompt: str) -> dict:
         "prompt": prompt,
         "description": f"Execute {did}",
         "agent": agent,
-        "command": "stage-a-controller",
     }
 
 
@@ -636,7 +643,6 @@ def build_task_splitter_subtask(action: dict, split_request: dict) -> dict:
         ),
         "description": f"Split {did}",
         "agent": "task-splitter",
-        "command": "stage-a-controller",
     }
 
 
@@ -650,7 +656,6 @@ def build_planner_subtask(action: dict) -> dict:
         "prompt": PLANNER_PROMPTS[mode],
         "description": f"{mode.title()} implementation plan",
         "agent": "implementation-planner",
-        "command": "stage-a-controller",
     }
 
 
@@ -665,7 +670,6 @@ def build_semantic_subtask(action: dict) -> dict:
         "prompt": prompt,
         "description": f"{canonical['agent']} {canonical['mode']}",
         "agent": canonical["agent"],
-        "command": "stage-a-controller",
     }
 
 
@@ -1523,7 +1527,6 @@ def selftest() -> None:
         "prompt": "DELIVERABLE: D042\ncanonical",
         "description": "Execute D042",
         "agent": "probe-builder",
-        "command": "stage-a-controller",
     }
     if payload != expected_payload:
         raise ControllerError(
@@ -1542,7 +1545,7 @@ def selftest() -> None:
             "{\"depth\":0,\"generation\":3,\"parent_id\":\"D042\"}\n"
             "CANONICAL_SPLIT_REQUEST_JSON_END"
         ),
-        "description": "Split D042", "agent": "task-splitter", "command": "stage-a-controller",
+        "description": "Split D042", "agent": "task-splitter",
     }:
         raise ControllerError(f"task-splitter payload mismatch actual={split_payload!r}")
     if canonical_execution_action(split_action).get("generation") != 3:
@@ -1568,9 +1571,7 @@ def selftest() -> None:
     if canonical_execution_action(semantic_action) != semantic_action:
         raise ControllerError("semantic execution action did not retain fresh mode")
     semantic_payload = build_semantic_subtask(semantic_action)
-    if semantic_payload["agent"] != "acceptance-planner" or semantic_payload[
-        "command"
-    ] != "stage-a-controller":
+    if semantic_payload["agent"] != "acceptance-planner" or "command" in semantic_payload:
         raise ControllerError("semantic subtask payload mismatch")
     final_tests_action = {
         "kind": "run_final_tests", "command": ".opencode-v2/bin/run-checks",
