@@ -466,15 +466,30 @@ def compare_supervisor_shadow(project: Path, result: dict) -> tuple[bool, str]:
     return True, "exact-match"
 
 
-def one_pass(project: Path, require_shadow: bool) -> dict:
-    result = evaluate(project)
-    if require_shadow:
+def one_pass(
+    project: Path,
+    require_shadow: bool,
+    shadow_attempts: int = 8,
+    shadow_poll_seconds: float = 0.05,
+) -> dict:
+    attempts=max(1,int(shadow_attempts)) if require_shadow else 1
+    last_detail=""
+    for attempt in range(attempts):
+        # Re-evaluate on every retry. The supervisor publishes decision.json and
+        # deterministic-shadow.json as separate atomic replacements, so a
+        # reader may briefly observe two adjacent coherent generations.
+        result = evaluate(project)
+        if not require_shadow:
+            return result
         ok, detail = compare_supervisor_shadow(project, result)
         result["shadow_match"] = ok
         result["shadow_detail"] = detail
-        if not ok:
-            raise ControllerError(detail)
-    return result
+        if ok:
+            return result
+        last_detail=detail
+        if attempt < attempts-1 and shadow_poll_seconds>0:
+            time.sleep(shadow_poll_seconds)
+    raise ControllerError(last_detail or "supervisor shadow mismatch")
 
 
 def http_json(method: str, url: str, payload: dict | None = None, timeout: float = 5.0):

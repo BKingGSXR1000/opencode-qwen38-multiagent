@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import control_state
@@ -152,6 +153,32 @@ class TerminalSemanticChildTests(unittest.TestCase):
         controller.session_is_active = lambda project, base_url, sid: False
         receipt = controller.execute_first_semantic(self.project, "http://127.0.0.1:1", self.result, self.root)
         self.assertTrue(receipt["replay_suppressed"])
+
+
+class ControllerShadowCoherenceTests(unittest.TestCase):
+    def test_transient_shadow_mismatch_reloads_decision_until_exact_match(self):
+        first={"state_version":"v1","resume_phase":"implementation-plan","actions":[{"kind":"launch","mode":"continue"}]}
+        second={"state_version":"v2","resume_phase":"implementation-plan","actions":[{"kind":"launch","mode":"repair"}]}
+        with mock.patch.object(controller,"evaluate",side_effect=[first,second]) as evaluate, \
+             mock.patch.object(controller,"compare_supervisor_shadow",side_effect=[
+                 (False,"action-mismatch transient"),
+                 (True,"exact-match"),
+             ]) as compare, \
+             mock.patch.object(controller.time,"sleep") as sleep:
+            result=controller.one_pass(Path("/tmp/project"),True,shadow_attempts=2,shadow_poll_seconds=0.01)
+        self.assertEqual(result["state_version"],"v2")
+        self.assertTrue(result["shadow_match"])
+        self.assertEqual(evaluate.call_count,2)
+        self.assertEqual(compare.call_count,2)
+        sleep.assert_called_once_with(0.01)
+
+    def test_persistent_shadow_mismatch_still_fails_closed(self):
+        result={"state_version":"v1","resume_phase":"implementation-plan","actions":[{"kind":"launch","mode":"continue"}]}
+        with mock.patch.object(controller,"evaluate",return_value=result), \
+             mock.patch.object(controller,"compare_supervisor_shadow",return_value=(False,"action-mismatch persistent")), \
+             mock.patch.object(controller.time,"sleep"):
+            with self.assertRaisesRegex(controller.ControllerError,"action-mismatch persistent"):
+                controller.one_pass(Path("/tmp/project"),True,shadow_attempts=2,shadow_poll_seconds=0.01)
 
 
 class TaskSplitterOutputCapTests(unittest.TestCase):
