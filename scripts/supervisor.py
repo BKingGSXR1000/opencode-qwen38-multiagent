@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,urllib.error,urllib.parse,urllib.request
+import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
@@ -7666,6 +7666,15 @@ def maybe_launch_lessons(active_sids,child_active):
     else:
         log(f"LESSONS_EXTERNAL_START_FAILED root_session={root} attempt={lessons_launch_attempts} detail={detail}")
 
+
+def persist_live_status(payload):
+    """Atomically publish the shared live-status snapshot across supervisors."""
+    atomic_write_text(
+        LIVE_STATUS,
+        json.dumps(payload,separators=(",",":")),
+    )
+
+
 def api_poll_loop():
     while True:
         try:
@@ -7910,10 +7919,7 @@ def api_poll_loop():
                 "backend":backend_snapshot,
                 "sessions":list(rows.values()),
             }
-            tmp=LIVE_STATUS.with_suffix(".tmp")
-            tmp.parent.mkdir(parents=True,exist_ok=True)
-            tmp.write_text(json.dumps(payload,separators=(",",":")))
-            os.replace(tmp,LIVE_STATUS)
+            persist_live_status(payload)
 
             if root_context_candidate and not child_active:
                 sid,context_input=root_context_candidate
@@ -7929,7 +7935,12 @@ def api_poll_loop():
             merge_lesson_candidates()
 
         except Exception as e:
-            log(f"HTTP_POLL_ERROR {e!r}")
+            trace=" | ".join(
+                line.strip()
+                for line in traceback.format_exc(limit=8).splitlines()
+                if line.strip()
+            )
+            log(f"HTTP_POLL_ERROR {e!r} trace={trace[:4000]}")
 
         time.sleep(POLL)
 
