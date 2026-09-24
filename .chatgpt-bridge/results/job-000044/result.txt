@@ -1,0 +1,282 @@
+======================================================================
+JOB: job-000044
+JOB_COMMIT: c0199504d7f7ddba527d2bf10e18ce5fb4d3cab1
+STARTED: 2026-09-24T14:03:54Z
+======================================================================
+
+=== NOW ===
+2026-09-24T16:03:54+02:00
+=== GIT ===
+23cce479d25f1a1b90dbf2a141b6525be78c5264
+ M scripts/drive-stage-a-run.py
+ M scripts/run-a2-v11831-server.sh
+ M scripts/run-stage-a-tick.py
+ M scripts/stage_a_controller.py
+ M scripts/start-stage-a-run.sh
+ M scripts/supervisor.py
+?? scripts/test_transport_root_no_continuation.py
+=== PROCESSES ===
+=== SUPERVISOR HTTP METHODS ===
+189:    url=base+'/session/status'+(('?'+query) if query else '')
+2526:def dispatch_splitter_corrective_turn(root,prompt):
+2531:        http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
+4037:def ensure_execution_baseline(did,attempt):
+5943:    def discover(self):
+5958:                obj=self.request("GET","/session/status"+q,timeout=2)
+5960:                    raise RuntimeError("v1 /session/status did not return an object")
+5961:                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+5962:                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+6010:                        status=self.request("GET","/session/status"+query,timeout=2)
+6012:                            raise RuntimeError("v1 /session/status did not return an object")
+6015:                            f"probe=/session/status discovered-pid={pid}"
+6019:                            detail=f"{self.base} mode=v1 probe=/session/status pid={pid}",
+6108:    def ensure(self):
+6121:    def get_status(self):
+6128:            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+6248:                self.request("POST",f"/session/{qsid}/abort"+q,payload=None,timeout=4)
+6254:            (f"/session/{qsid}/abort",{}),
+6331:                "POST",f"/session/{urllib.parse.quote(sid)}/prompt_async?{query}",
+6452:def abort_session(sid,reason,agent=""):
+6546:def ensure_event_watch(sid):
+6826:def ensure_original_task(sid):
+=== CORRECTIVE DISPATCH AREA ===
+2526:def dispatch_splitter_corrective_turn(root,prompt):
+2576:    ok,detail=dispatch_splitter_corrective_turn(root,context)
+            root=str(item.get("root_session") or "")
+            if root: return root
+    return ""
+
+
+def corrective_splitter_prompt(parent,request,primary_output,reason):
+    """Direct context for the only corrective native child of one claim."""
+    return (
+        f"SPLIT_PARENT: {parent}\nSPLITTER_CORRECTIVE_ORDINAL: 1\n"
+        "CANONICAL_SPLIT_REQUEST_JSON_BEGIN\n"
+        +json.dumps(request,sort_keys=True,separators=(",",":"))+
+        "\nCANONICAL_SPLIT_REQUEST_JSON_END\n"
+        "PRIMARY_SPLITTER_RESPONSE_BEGIN\n"+primary_output+
+        "\nPRIMARY_SPLITTER_RESPONSE_END\n"
+        "DETERMINISTIC_VALIDATION_FAILURE_BEGIN\n"+reason+
+        "\nDETERMINISTIC_VALIDATION_FAILURE_END\n"
+        "This is the single correction opportunity for the existing logical splitter claim. "
+        "The response above was rejected for the exact deterministic reason shown. "
+        "Emit only one valid bare JSON object conforming to the splitter schema."
+    )
+
+
+# Keep the corrective launch a fresh native task-splitter child of the same
+# technical root, but deliberately omit SubtaskPart.command.  A truthy
+# command makes OpenCode resume the v2noop parent after task completion.
+def dispatch_splitter_corrective_turn(root,prompt):
+    if not http.ensure(): return False,"http-not-connected"
+    if http.mode!="v1": return False,"splitter-corrective-requires-v1-runtime"
+    try:
+        query=urllib.parse.urlencode({"directory":PROJECT})
+        http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
+            payload={"agent":"transport-root","model":{"providerID":"v2noop","modelID":"root-noop"},
+                     "parts":[{"type":"subtask","prompt":prompt,"description":"Correct bounded split", "agent":"task-splitter"}]},timeout=12)
+        return True,"accepted"
+    except Exception as exc:
+        return False,repr(exc)
+
+
+def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=""):
+    """Persist and dispatch the sole corrective *native child* of one claim."""
+    status=load_split_status(did)
+    if int(status.get("corrective_turn_count") or 0) >= 1:
+        return False,"splitter-corrective-turn-already-consumed"
+    if not session or not dispatch_token:
+        return False,"splitter-corrective-turn-missing-session-or-token"
+    claim_count=int(status.get("claim_count") or 0)
+    archived=_archive_corrective_split_proposal(did,claim_count)
+    request=load_json_object(split_request_path(did),label=f"split request {did}")
+    root=_primary_splitter_execution_root(did)
+    if not root: return False,"splitter-corrective-root-missing"
+    primary_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.splitter-primary-response-{claim_count}.txt"
+    atomic_write_text(primary_path,raw_output)
+    context=corrective_splitter_prompt(did,request,raw_output,reason)
+    context_sha=hashlib.sha256(context.encode()).hexdigest()
+    first_sha=_splitter_response_fingerprint(raw_output)
+    # Mark dispatch attempted before POST.  A transport ambiguity must never
+    # cause a second corrective POST or silently create a third model turn.
+    save_split_status(
+        did,"splitter-corrective-awaiting-output",
+        claim_count=claim_count,
+        dispatch_token=dispatch_token,
+        lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+        corrective_turn_count=1,
+        corrective_session="",
+        corrective_dispatch_token="",
+        corrective_first_output_sha256=first_sha,
+        corrective_archive=archived,
+        corrective_context_sha256=context_sha,
+        corrective_execution_id=hashlib.sha256(json.dumps({"parent":did,"claim":claim_count,"root":root,"primary":session,"reason":hashlib.sha256(reason.encode()).hexdigest()},sort_keys=True).encode()).hexdigest(),
+        corrective_root_session=root,
+        corrective_reason_sha256=hashlib.sha256(reason.encode()).hexdigest(),
+        corrective_primary_response=str(primary_path.relative_to(Path(PROJECT))),
+        corrective_dispatch_state="intent-persisted",
+        reason=f"invalid splitter response; one bounded corrective turn: {reason}"[:1000],
+    )
+    ok,detail=dispatch_splitter_corrective_turn(root,context)
+    if ok:
+        save_split_status(
+            did,"splitter-corrective-awaiting-output",
+            claim_count=claim_count,
+            dispatch_token=dispatch_token,
+            lease_until_epoch=time.time()+SPLITTER_LEASE_SECONDS,
+            corrective_dispatch_state="post-accepted",
+        )
+        log(
+            f"SPLITTER_CORRECTIVE_CHILD_POST_ACCEPTED parent={did} root={root} "
+            f"claim={claim_count}"
+        )
+        return True,"splitter-corrective-turn-pending"
+    _,state=record_splitter_failure(
+        did,f"splitter corrective turn dispatch failed: {detail}",
+        session=session,validation=False,
+    )
+    log(
+        f"SPLITTER_CORRECTIVE_TURN_DISPATCH_FAILED parent={did} "
+        f"session={session} state={state} detail={detail}"
+    )
+    return False,state
+
+
+def rearm_splits_after_parent_contract_repair():
+    # Recreate a split edge only after the repaired parent plan is finalized.
+    # The stale request embeds the old invalid Verify command, so it must stay
+    # suppressed until the repaired plan has again passed finalization.
+    if not PROJECT or not plan_ready():
+        return []
+
+    manifest=load_manifest()
+    leaves=manifest.get("leaves") if isinstance(manifest.get("leaves"),dict) else {}
+    rearmed=[]
+    changed=False
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entries=data.get("deliverables") if isinstance(data.get("deliverables"),dict) else {}
+            for did,entry in entries.items():
+                if not isinstance(entry,dict):
+                    continue
+                pending=entry.get("split_rearm_after_contract_repair")
+                if not isinstance(pending,dict):
+                    continue
+
+                leaf=leaves.get(did)
+                if not isinstance(leaf,dict):
+                    raise StateCorruptionError(
+                        f"{did} repaired parent is missing from finalized manifest"
+                    )
+
+                expected_key=str(pending.get("structured_key") or "")
+                actual_key=_structured_plan_symbolic_key(did)
+                if not expected_key or actual_key!=expected_key:
+                    raise StateCorruptionError(
+                        f"{did} structured key changed across parent contract repair "
+                        f"expected={expected_key!r} actual={actual_key!r}"
+                    )
+
+                if ready_info(did) or leaf_children(did):
+                    entry.pop("split_rearm_after_contract_repair",None)
+                    changed=True
+                    continue
+
+                history=entry.get("failure_history",[])
+                reclassified_attempts=[]
+                if isinstance(history,list):
+                    for item in history:
+                        if not isinstance(item,dict) or not (
+                            item.get("classification")=="bad-plan"
+                            and item.get("reclassified_by")=="runtime-parent-contract-repair"
+                        ):
+                            continue
+                        try:
+                            attempt=int(item.get("attempt") or 0)
+                        except (TypeError,ValueError):
+                            continue
+                        if attempt>0 and attempt not in reclassified_attempts:
+                            reclassified_attempts.append(attempt)
+                genuine=sum(
+                    1 for item in history
+                    if isinstance(item,dict)
+                    and item.get("classification")=="genuine"
+                ) if isinstance(history,list) else 0
+
+                handoff_only=bool(leaf.get("split_handoff_only"))
+                if (
+                    recursive_split_enabled()
+=== ABORT REFERENCES REPO ===
+scripts/runaway-guard.sh:27:abort_session(){
+scripts/runaway-guard.sh:31:  out="$("$REAL_BIN" api POST "/session/$sid/abort" 2>&1)"; rc=$?
+scripts/runaway-guard.sh:93:        result="$(abort_session "$sid" || true)"
+scripts/test_control_plane.py:156:        old_abort = supervisor.abort_session
+scripts/test_control_plane.py:162:            supervisor.abort_session = lambda sid, reason, agent="": aborts.append((sid, reason, agent))
+scripts/test_control_plane.py:169:            supervisor.abort_session = old_abort
+scripts/test_control_plane.py:537:        self.old_abort = supervisor.abort_session
+scripts/test_control_plane.py:542:        supervisor.abort_session = lambda sid, reason, agent="": self.aborts.append((sid, reason, agent))
+scripts/test_control_plane.py:547:        supervisor.abort_session = self.old_abort
+scripts/stage_a_controller.py:543:    status, data = http_json("GET", workspace_url(base_url, "/session/status", project))
+scripts/stage_a_controller.py:699:    status, body = http_json("GET", workspace_url(base_url, "/session/status", project))
+scripts/supervisor.py.pre-standalone-hotfix-20260908-163812:79:def abort_session(sid,reason):
+scripts/supervisor.py.pre-standalone-hotfix-20260908-163812:86:        f"{url}/session/{urllib.parse.quote(sid)}/abort",
+scripts/supervisor.py.pre-standalone-hotfix-20260908-163812:232:            if abort_session(sid,reason):
+scripts/supervisor.py.pre-standalone-hotfix-20260908-163812:260:                    abort_session(sid,f"child_compaction count={comps}; retire child")
+scripts/supervisor.py.pre-standalone-hotfix-20260908-163812:278:                        abort_session(sid,f"unauthorized_task_id_reuse users={users} aborts={abort_count.get(sid,0)}")
+scripts/test_state_machine_invariants.py:317:        old_abort=supervisor.abort_session
+scripts/test_state_machine_invariants.py:320:        supervisor.abort_session=lambda *_args,**_kwargs:False
+scripts/test_state_machine_invariants.py:330:            supervisor.abort_session=old_abort
+scripts/test_state_machine_invariants.py:347:                self.assertTrue(supervisor.abort_session("s1","watchdog","implementer"))
+scripts/test_state_machine_invariants.py:349:                    (Path(td)/".opencode-v2/work/abort-intents.json").read_text()
+scripts/start-stage-a-run.sh:54:[[ "$(http_status "$BASE_URL/session/status")" != "200" ]] || {
+scripts/start-stage-a-run.sh:63:  [[ "$(http_status "$BASE_URL/session/status")" == "200" ]] && break
+scripts/start-stage-a-run.sh:66:[[ "$(http_status "$BASE_URL/session/status")" == "200" ]] || {
+scripts/supervisor.py.pre-interrupt-endpoint-20260908-164436:100:def abort_session(sid,reason):
+scripts/supervisor.py.pre-interrupt-endpoint-20260908-164436:107:        f"{url}/session/{urllib.parse.quote(sid)}/abort",
+scripts/supervisor.py.pre-interrupt-endpoint-20260908-164436:253:            if abort_session(sid,reason):
+scripts/supervisor.py.pre-interrupt-endpoint-20260908-164436:281:                    abort_session(sid,f"child_compaction count={comps}; retire child")
+scripts/supervisor.py.pre-interrupt-endpoint-20260908-164436:299:                        abort_session(sid,f"unauthorized_task_id_reuse users={users} aborts={abort_count.get(sid,0)}")
+scripts/supervisor.py:189:    url=base+'/session/status'+(('?'+query) if query else '')
+scripts/supervisor.py:5958:                obj=self.request("GET","/session/status"+q,timeout=2)
+scripts/supervisor.py:5960:                    raise RuntimeError("v1 /session/status did not return an object")
+scripts/supervisor.py:5961:                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+scripts/supervisor.py:5962:                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+scripts/supervisor.py:6010:                        status=self.request("GET","/session/status"+query,timeout=2)
+scripts/supervisor.py:6012:                            raise RuntimeError("v1 /session/status did not return an object")
+scripts/supervisor.py:6015:                            f"probe=/session/status discovered-pid={pid}"
+scripts/supervisor.py:6019:                            detail=f"{self.base} mode=v1 probe=/session/status pid={pid}",
+scripts/supervisor.py:6128:            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+scripts/supervisor.py:6248:                self.request("POST",f"/session/{qsid}/abort"+q,payload=None,timeout=4)
+scripts/supervisor.py:6254:            (f"/session/{qsid}/abort",{}),
+scripts/supervisor.py:6452:def abort_session(sid,reason,agent=""):
+scripts/supervisor.py:6717:        if abort_session(sid,f"dispatch_protocol_violation {violation}",agent):
+scripts/supervisor.py:6728:        if abort_session(sid,f"dispatch_guard {reason} deliverable={did} count={n}",agent):
+scripts/supervisor.py:7657:                        abort_session(
+scripts/supervisor.py:7675:                        abort_session(
+scripts/supervisor.py:7714:                    abort_session(sid,probe_reason,agent)
+scripts/supervisor.py:7768:                        abort_session(sid,reason,agent)
+scripts/supervisor.py:7791:                        abort_session(sid,progress_reason,agent)
+scripts/supervisor.py:7815:                        if abort_session(
+scripts/supervisor.py:7824:                    abort_session(sid,f"runaway {fallback_reason}",agent)
+scripts/supervisor.py:7877:                abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
+scripts/supervisor.py:8295:        if not abort_session(
+=== LIVE PORTS ===
+--- 58441 ---
+curl: (7) Failed to connect to 127.0.0.1 port 58441 after 0 ms: Couldn't connect to server
+
+--- 58442 ---
+curl: (7) Failed to connect to 127.0.0.1 port 58442 after 0 ms: Couldn't connect to server
+
+--- 58443 ---
+curl: (7) Failed to connect to 127.0.0.1 port 58443 after 0 ms: Couldn't connect to server
+
+
+
+======================================================================
+FINISHED: 2026-09-24T14:03:54Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
