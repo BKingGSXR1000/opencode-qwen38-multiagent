@@ -1,0 +1,179 @@
+======================================================================
+JOB: job-000049
+JOB_COMMIT: 5ff8e19a7f78e4abb2345522cea2cdd01ad6d5be
+STARTED: 2026-09-24T14:19:27Z
+======================================================================
+
+=== PRE ===
+2026-09-24T16:19:27+02:00
+23cce479d25f1a1b90dbf2a141b6525be78c5264
+ M scripts/drive-stage-a-run.py
+ M scripts/run-a2-v11831-server.sh
+ M scripts/run-stage-a-tick.py
+ M scripts/stage_a_controller.py
+ M scripts/start-stage-a-run.sh
+ M scripts/supervisor.py
+?? scripts/test_transport_root_no_continuation.py
+=== TEST CONTEXT BEFORE ===
+        planner = controller.build_planner_subtask(
+            {"kind": "launch", "agent": "implementation-planner", "mode": "fresh"}
+        )
+        self.assert_transport_subtask(planner, "implementation-planner")
+
+        (semantic_agent, semantic_mode) = next(iter(controller.SEMANTIC_PROMPTS))
+        semantic = controller.build_semantic_subtask(
+            {"kind": "launch", "agent": semantic_agent, "mode": semantic_mode}
+        )
+        self.assert_transport_subtask(semantic, semantic_agent)
+
+    def test_corrective_splitter_dispatch_omits_command(self):
+        calls = []
+
+        def fake_request(method, url, payload=None, timeout=None):
+            calls.append((method, url, payload, timeout))
+            return None
+
+        with (
+            mock.patch.object(supervisor, "PROJECT", "/tmp/stage-a-transport-root-test"),
+            mock.patch.object(supervisor.http, "ensure", return_value=True),
+            mock.patch.object(supervisor.http, "request", side_effect=fake_request),
+            mock.patch.object(supervisor.http, "mode", "v1"),
+        ):
+            ok, detail = supervisor.dispatch_splitter_corrective_turn(
+                "ses_root", "SPLIT_PARENT: D001\nSPLITTER_CORRECTIVE_ORDINAL: 1"
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "accepted-after-root-idle")
+        self.assertEqual(len(calls), 1)
+        method, url, payload, timeout = calls[0]
+        self.assertEqual(method, "POST")
+        self.assertIn("/session/ses_root/prompt_async?", url)
+        self.assertEqual(timeout, 12)
+        self.assertEqual(payload["agent"], "transport-root")
+        self.assertEqual(
+            payload["model"], {"providerID": "v2noop", "modelID": "root-noop"}
+        )
+        self.assertEqual(len(payload["parts"]), 1)
+        self.assert_transport_subtask(payload["parts"][0], "task-splitter")
+        self.assertIn(
+            "SPLITTER_CORRECTIVE_ORDINAL: 1", payload["parts"][0]["prompt"]
+        )
+
+
+
+
+import unittest
+import supervisor
+
+
+class CorrectiveRootQuiesceTests(unittest.TestCase):
+    def setUp(self):
+        self.old_project=supervisor.PROJECT
+        self.old_get_status=supervisor.http.get_status
+=== TEST CONTEXT AFTER ===
+        planner = controller.build_planner_subtask(
+            {"kind": "launch", "agent": "implementation-planner", "mode": "fresh"}
+        )
+        self.assert_transport_subtask(planner, "implementation-planner")
+
+        (semantic_agent, semantic_mode) = next(iter(controller.SEMANTIC_PROMPTS))
+        semantic = controller.build_semantic_subtask(
+            {"kind": "launch", "agent": semantic_agent, "mode": semantic_mode}
+        )
+        self.assert_transport_subtask(semantic, semantic_agent)
+
+    def test_corrective_splitter_dispatch_omits_command(self):
+        calls = []
+
+        def fake_request(method, url, payload=None, timeout=None):
+            calls.append((method, url, payload, timeout))
+            return None
+
+        with (
+            mock.patch.object(supervisor, "PROJECT", "/tmp/stage-a-transport-root-test"),
+            mock.patch.object(supervisor.http, "ensure", return_value=True),
+            mock.patch.object(supervisor.http, "request", side_effect=fake_request),
+            mock.patch.object(supervisor.http, "mode", "v1"),
+        ):
+            ok, detail = supervisor.dispatch_splitter_corrective_turn(
+                "ses_root", "SPLIT_PARENT: D001\nSPLITTER_CORRECTIVE_ORDINAL: 1"
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(detail, "accepted-after-root-idle")
+        post_calls=[call for call in calls if call[0] == "POST"]
+        self.assertEqual(len(post_calls), 1)
+        method, url, payload, timeout = post_calls[0]
+        self.assertEqual(method, "POST")
+        self.assertIn("/session/ses_root/prompt_async?", url)
+        self.assertEqual(timeout, 12)
+        self.assertEqual(payload["agent"], "transport-root")
+        self.assertEqual(
+            payload["model"], {"providerID": "v2noop", "modelID": "root-noop"}
+        )
+        self.assertEqual(len(payload["parts"]), 1)
+        self.assert_transport_subtask(payload["parts"][0], "task-splitter")
+        self.assertIn(
+            "SPLITTER_CORRECTIVE_ORDINAL: 1", payload["parts"][0]["prompt"]
+        )
+
+
+
+
+import unittest
+import supervisor
+
+
+class CorrectiveRootQuiesceTests(unittest.TestCase):
+    def setUp(self):
+        self.old_project=supervisor.PROJECT
+        self.old_get_status=supervisor.http.get_status
+        self.old_interrupt=supervisor.http.interrupt
+        supervisor.PROJECT="/tmp/test-project"
+
+    def tearDown(self):
+=== TESTS ===
+test_busy_root_is_interrupted_then_observed_idle (__main__.CorrectiveRootQuiesceTests.test_busy_root_is_interrupted_then_observed_idle) ... ok
+test_idle_root_uses_guard_sample_without_interrupt (__main__.CorrectiveRootQuiesceTests.test_idle_root_uses_guard_sample_without_interrupt) ... ok
+test_interrupt_failure_blocks_corrective_post (__main__.CorrectiveRootQuiesceTests.test_interrupt_failure_blocks_corrective_post) ... ok
+test_all_controller_subtask_builders_omit_command (__main__.TransportRootNoContinuationTests.test_all_controller_subtask_builders_omit_command) ... ok
+test_corrective_splitter_dispatch_omits_command (__main__.TransportRootNoContinuationTests.test_corrective_splitter_dispatch_omits_command) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.051s
+
+OK
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.019s
+
+OK
+=== INTENDED DIFF CHECK ===
+ scripts/stage_a_controller.py |  19 +++----
+ scripts/supervisor.py         | 119 +++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 121 insertions(+), 17 deletions(-)
+=== COMMIT ===
+ scripts/stage_a_controller.py                  |  19 +--
+ scripts/supervisor.py                          | 119 ++++++++++++++++--
+ scripts/test_transport_root_no_continuation.py | 160 +++++++++++++++++++++++++
+ 3 files changed, 281 insertions(+), 17 deletions(-)
+[a2-v11831-integration accf4d6] Quiesce transport root before splitter correction
+ 3 files changed, 281 insertions(+), 17 deletions(-)
+ create mode 100755 scripts/test_transport_root_no_continuation.py
+To https://github.com/BKingGSXR1000/opencode-qwen38-multiagent.git
+   23cce47..accf4d6  HEAD -> a2-v11831-integration
+=== POST ===
+accf4d65ff555f75e5bd10863dc8fb3424f524f3
+ M scripts/drive-stage-a-run.py
+ M scripts/run-a2-v11831-server.sh
+ M scripts/run-stage-a-tick.py
+ M scripts/start-stage-a-run.sh
+
+
+======================================================================
+FINISHED: 2026-09-24T14:19:29Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
