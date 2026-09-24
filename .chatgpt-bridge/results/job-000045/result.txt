@@ -1,0 +1,523 @@
+======================================================================
+JOB: job-000045
+JOB_COMMIT: d1c5d914e8d3c3b4b8759b65afbd74ad52ffafa8
+STARTED: 2026-09-24T14:05:12Z
+======================================================================
+
+=== NOW ===
+2026-09-24T16:05:12+02:00
+=== HEAD ===
+23cce479d25f1a1b90dbf2a141b6525be78c5264
+=== HTTP STATUS/ABORT IMPLEMENTATION ===
+                            log(
+                                f"HTTP_CONTROL_CONNECTED base={self.base} "
+                                f"prefix=/api probe={path} pid={pid}"
+                            )
+                            csv(
+                                "HTTP_CONTROL_CONNECTED",
+                                detail=f"{self.base}/api probe={path} pid={pid}",
+                            )
+                            return True
+                        except Exception:
+                            pass
+            except Exception:
+                continue
+
+        self.base=self.password=self.prefix=None
+        self.mode=None
+        return False
+
+    def ensure(self):
+        if self.base and self.prefix is not None:
+            return True
+        now=time.time()
+        if now-self.last_discover<1:
+            return False
+        self.last_discover=now
+        ok=self.discover()
+        if not ok and now-self.last_wait_log>10:
+            self.last_wait_log=now
+            log("HTTP_CONTROL_WAIT no compatible OpenCode server discovered")
+        return ok
+
+    def get_status(self):
+        if not self.ensure():
+            return {}
+        q=""
+        if PROJECT:
+            q="?" + urllib.parse.urlencode({"directory":PROJECT})
+        try:
+            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+            obj=self.request("GET",path)
+            return obj if isinstance(obj,dict) else {}
+        except Exception:
+            self.base=self.prefix=None
+            self.mode=None
+            raise
+
+    def get_session(self,sid):
+        if not self.ensure():
+            return {}
+        qsid=urllib.parse.quote(sid)
+        q=""
+        if PROJECT:
+            q="?" + urllib.parse.urlencode({"directory":PROJECT})
+        paths=((f"/session/{qsid}"+q,) if self.mode=="v1" else (f"/api/session/{qsid}",f"/session/{qsid}"))
+        for path in paths:
+            try:
+                obj=self.request("GET",path)
+                return obj if isinstance(obj,dict) else {}
+            except Exception:
+                pass
+        return {}
+
+    def get_messages(self,sid):
+        if not self.ensure():
+            return []
+        qsid=urllib.parse.quote(sid)
+        if self.mode=="v1":
+            q={"limit":"64"}
+            if PROJECT:
+                q["directory"]=PROJECT
+            paths=(f"/session/{qsid}/message?" + urllib.parse.urlencode(q),)
+        else:
+            paths=(
+                f"/api/session/{qsid}/message",
+                f"/api/session/{qsid}/message?limit=32",
+                f"/session/{qsid}/message",
+                f"/session/{qsid}/message?limit=32",
+            )
+        for path in paths:
+            try:
+                obj=self.request("GET",path,timeout=4)
+                if isinstance(obj,list):
+                    return obj
+                if isinstance(obj,dict):
+                    for key in ("messages","items","data"):
+                        value=obj.get(key)
+                        if isinstance(value,list):
+                            return value
+                        if isinstance(value,dict):
+                            for subkey in ("messages","items","data"):
+                                if isinstance(value.get(subkey),list):
+                                    return value[subkey]
+            except Exception:
+                pass
+        return []
+
+    def stream_session_events(self,sid,on_event,stop):
+        if not self.ensure():
+            return
+        if self.mode=="v1":
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            req=urllib.request.Request(
+                self.base+"/event"+q,
+                method="GET",
+                headers={**self.headers(),"Accept":"text/event-stream"},
+            )
+            with urllib.request.urlopen(req,timeout=30) as response:
+                for raw in response:
+                    if stop.is_set():
+                        return
+                    line=raw.decode("utf-8","replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        payload=json.loads(line[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(payload,dict):
+                        continue
+                    props=payload.get("properties")
+                    if not isinstance(props,dict):
+                        continue
+                    event_sid=(props.get("sessionID") or props.get("sessionId") or props.get("session_id"))
+                    if event_sid!=sid:
+                        continue
+                    on_event({"type":payload.get("type"),"data":props})
+            return
+
+        qsid=urllib.parse.quote(sid)
+        req=urllib.request.Request(
+            self.base+f"/api/session/{qsid}/event",
+            method="GET",headers={**self.headers(),"Accept":"text/event-stream"},
+        )
+        with urllib.request.urlopen(req,timeout=30) as response:
+            for raw in response:
+                if stop.is_set():
+                    return
+                line=raw.decode("utf-8","replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    event=json.loads(line[5:].strip())
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event,dict):
+                    on_event(event)
+
+    def interrupt(self,sid):
+        if not self.ensure():
+            return False
+        qsid=urllib.parse.quote(sid)
+        if self.mode=="v1":
+            q=""
+            if PROJECT:
+                q="?" + urllib.parse.urlencode({"directory":PROJECT})
+            try:
+                self.request("POST",f"/session/{qsid}/abort"+q,payload=None,timeout=4)
+                return True
+            except Exception:
+                return False
+        for path,payload in (
+            (f"/api/session/{qsid}/interrupt",None),
+            (f"/session/{qsid}/abort",{}),
+        ):
+            try:
+                self.request("POST",path,payload=payload,timeout=4)
+                return True
+            except Exception:
+                pass
+        return False
+
+    def start_agent_session(self,agent,text):
+        """Create and steer a v2 session using the installed beta's SDK schema."""
+        if not self.ensure():
+            return False,"http-not-connected"
+        if self.mode=="v1":
+            # Direct v1 semantic creation bypasses transport-root TaskTool.
+            return False,"stage-a-controller-owned"
+        try:
+            created=self.request(
+                "POST","/api/session",
+                payload={"agent":agent,"location":{"directory":PROJECT}},
+                timeout=8,
+            )
+=== ABORT_SESSION WRAPPER ===
+def resolve_abort_intent(sid,outcome):
+    if not PROJECT or not sid:
+        return
+    with abort_intent_lock:
+        data=load_abort_intents()
+        entry=(data.get("sessions") or {}).get(sid)
+        if not isinstance(entry,dict):
+            return
+        if entry.get("state") in {"resolved","failed"}:
+            return
+        entry.update({
+            "state":"resolved",
+            "outcome":outcome,
+            "resolved_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        })
+        save_abort_intents(data)
+
+def abort_session(sid,reason,agent=""):
+    # Persist intent *before* the external side effect.  If the process dies
+    # after the interrupt but before confirmation, restart reconciliation can
+    # recover the reason when the session DB shows a terminal aborted message.
+    set_abort_intent(sid,reason,agent,"requested")
+    ok=http.interrupt(sid)
+    if ok:
+        set_abort_intent(sid,reason,agent,"confirmed")
+        supervisor_abort_reasons[sid]=reason
+    else:
+        set_abort_intent(sid,reason,agent,"failed")
+    kind="INTERRUPT" if ok else "INTERRUPT_FAILED"; log(f"{kind} session={sid} agent={agent} reason={reason}"); csv(kind,sid,agent,reason); return ok
+
+def watchdog_age(sid,key,can_watch,progress_marker=None,now=None):
+    """Seconds since the last observable model/tool progress, not message age."""
+    now=time.monotonic() if now is None else now
+    st=watch.setdefault(
+        sid,
+        {"key":key,"start":None,"aborted_key":None,"progress_marker":None},
+    )
+    if st["key"]!=key:
+        st["key"]=key
+        st["start"]=None
+        st["aborted_key"]=None
+        st["progress_marker"]=None
+    if not can_watch:
+        st["start"]=None
+        st["progress_marker"]=progress_marker
+        return 0,st
+    if st["start"] is None:
+        st["start"]=now
+        st["progress_marker"]=progress_marker
+    elif progress_marker is not None and progress_marker!=st.get("progress_marker"):
+        st["progress_marker"]=progress_marker
+=== ABORT UNIT TESTS ===
+            supervisor.abort_session=old_abort
+            supervisor.session_task.pop(sid,None)
+            supervisor.compaction_seen.pop(sid,None)
+
+
+class AbortIntentTests(unittest.TestCase):
+    def test_abort_intent_persisted_before_and_after_interrupt(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_project=supervisor.PROJECT
+            old_interrupt=supervisor.http.interrupt
+            old_log=supervisor.log
+            old_csv=supervisor.csv
+            supervisor.PROJECT=td
+            supervisor.http.interrupt=lambda _sid:True
+            supervisor.log=lambda *_a,**_k:None
+            supervisor.csv=lambda *_a,**_k:None
+            try:
+                self.assertTrue(supervisor.abort_session("s1","watchdog","implementer"))
+                data=json.loads(
+                    (Path(td)/".opencode-v2/work/abort-intents.json").read_text()
+                )
+                self.assertEqual(data["sessions"]["s1"]["state"],"confirmed")
+                self.assertEqual(data["sessions"]["s1"]["reason"],"watchdog")
+            finally:
+                supervisor.PROJECT=old_project
+                supervisor.http.interrupt=old_interrupt
+                supervisor.log=old_log
+                supervisor.csv=old_csv
+                supervisor.supervisor_abort_reasons.pop("s1",None)
+
+    def test_requested_intent_recovers_if_db_observes_abort(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_project=supervisor.PROJECT
+            old_terminal=supervisor.session_terminal_aborted
+            supervisor.PROJECT=td
+            try:
+=== CONTROL-PLANE ABORT TESTS ===
+        }
+        ledger_path.write_text(json.dumps(original))
+        self.assertEqual(supervisor.claim_attempt("old-session", "D005"), ("invalid", 4))
+        self.assertNotIn("old-session", supervisor.session_task)
+        self.assertEqual(json.loads(ledger_path.read_text()), original)
+
+    def test_existing_count_four_is_blocked_by_dispatch(self):
+        ledger_path = Path(self.tmp.name) / ".opencode-v2/work/attempts.json"
+        ledger_path.parent.mkdir(parents=True)
+        ledger_path.write_text(json.dumps({
+            "owner": "supervisor",
+            "deliverables": {"D005": {"count": 4, "sessions": ["old-session"]}},
+        }))
+        old_plan_ready = supervisor.plan_ready
+        old_load_manifest = supervisor.load_manifest
+        old_ready_info = supervisor.ready_info
+        old_abort = supervisor.abort_session
+        aborts = []
+        try:
+            supervisor.plan_ready = lambda: True
+            supervisor.load_manifest = lambda: {"leaves": {"D005": {"role": "implementer", "launch_deps": []}}}
+            supervisor.ready_info = lambda did: {}
+            supervisor.abort_session = lambda sid, reason, agent="": aborts.append((sid, reason, agent))
+            supervisor.dispatch_seen.clear()
+            supervisor.enforce_assignment("old-session", "implementer", supervisor.implementation_prompt("D005"))
+        finally:
+            supervisor.plan_ready = old_plan_ready
+            supervisor.load_manifest = old_load_manifest
+            supervisor.ready_info = old_ready_info
+            supervisor.abort_session = old_abort
+            supervisor.dispatch_seen.clear()
+        self.assertEqual(len(aborts), 1)
+        self.assertIn("attempt_ledger_invalid", aborts[0][1])
+
+    def _manifest(self, leaves=None):
+        root = Path(self.tmp.name) / ".opencode-v2"
+        root.mkdir(exist_ok=True)
+        leaves = leaves or {
+            "D004": {"role": "implementer", "launch_deps": [], "owned_artifacts": "d004.txt", "verify_command": "test -f d004.txt"},
+            "D008": {"role": "test-builder", "launch_deps": [], "owned_artifacts": "d008.txt", "verify_command": "test -f d008.txt"},
+        }
+        )
+        Path(self.tmp.name, "artifact.txt").unlink()
+        self.assertEqual(
+            supervisor.record_compaction_infrastructure_failure("compact-fail", "D008"),
+            (True, "granted"),
+        )
+        self.assertEqual(
+            supervisor.record_compaction_infrastructure_failure("other", "D008"),
+            (False, "session-not-in-ledger"),
+        )
+
+
+class DispatchPromptProtocolTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_root = supervisor.ROOT
+        self.old_project = supervisor.PROJECT
+        self.old_abort = supervisor.abort_session
+        supervisor.ROOT = Path(self.tmp.name)
+        supervisor.PROJECT = self.tmp.name
+        supervisor.dispatch_seen.clear()
+        self.aborts = []
+        supervisor.abort_session = lambda sid, reason, agent="": self.aborts.append((sid, reason, agent))
+
+    def tearDown(self):
+        supervisor.ROOT = self.old_root
+        supervisor.PROJECT = self.old_project
+        supervisor.abort_session = self.old_abort
+        supervisor.dispatch_seen.clear()
+        self.tmp.cleanup()
+
+    def test_short_exact_prompt_is_valid(self):
+        prompt = supervisor.implementation_prompt("D005")
+        self.assertEqual(supervisor.implementation_prompt_violation(prompt), "")
+        self.assertEqual(supervisor.parse_deliverable(prompt), "D005")
+
+    def test_actual_beta_single_newline_subagent_wrapper_is_valid(self):
+        wrapped = "You are a subagent spawned by another session.\n" + supervisor.implementation_prompt("D005")
+        self.assertEqual(supervisor.implementation_prompt_violation(wrapped), "")
+
+    def test_gametest2x_raw_beta_placeholder_and_success_shapes_normalize_identically(self):
+=== STAGE CONTROLLER STATUS HELPERS ===
+            raise ControllerError("root session tracker has no session")
+
+    status, info = http_json(
+        "GET",
+        workspace_url(base_url, f"/session/{urllib.parse.quote(sid)}", project),
+    )
+    if status != 200 or not isinstance(info, dict):
+        raise ControllerError(f"root session lookup failed status={status}")
+    agent = str(info.get("agent") or "")
+    parent = info.get("parentID")
+    directory = str(info.get("directory") or "")
+    if agent != "transport-root":
+        raise ControllerError(f"root session agent is {agent!r}, expected 'transport-root'")
+    if parent:
+        raise ControllerError(f"root session {sid} unexpectedly has parentID={parent}")
+    if Path(directory).resolve() != project.resolve():
+        raise ControllerError(
+            f"root session directory mismatch: {directory!r} != {str(project)!r}"
+        )
+    return sid
+
+
+def ensure_root_idle(project: Path, base_url: str, sid: str) -> None:
+    status, data = http_json("GET", workspace_url(base_url, "/session/status", project))
+    if status != 200 or not isinstance(data, dict):
+        raise ControllerError(f"session status lookup failed status={status}")
+    current = data.get(sid)
+    if current is None:
+        return
+    if isinstance(current, dict):
+        kind = str(current.get("type") or current.get("status") or "")
+    else:
+        kind = str(current)
+    raise ControllerError(
+        f"transport root is not idle: session={sid} status={kind or current!r}"
+    )
+
+
+def canonical_implementation_prompt(project: Path, agent: str, did: str) -> str:
+    supervisor = Path(__file__).with_name("supervisor.py")
+    cmd = [
+        sys.executable,
+        str(supervisor),
+        "--project",
+        str(project),
+        "--agent",
+        if not isinstance(child, dict):
+            continue
+        sid = str(child.get("id") or "")
+        if (
+            sid and sid not in baseline
+            and str(child.get("parentID") or "") == root
+            and str(child.get("agent") or "") == "implementation-planner"
+        ):
+            return {"kind": "native-planner-child", "sessions": [sid]}
+    return None
+
+
+def semantic_reconcile_evidence(intent: dict, children: list[dict]) -> dict | None:
+    for sid in native_child_ids(intent, children):
+        return {"kind": "native-semantic-child", "sessions": [sid]}
+    return None
+
+
+def session_is_active(project: Path, base_url: str, sid: str) -> bool:
+    status, body = http_json("GET", workspace_url(base_url, "/session/status", project))
+    if status != 200 or not isinstance(body, dict):
+        raise ControllerError(f"session status lookup failed status={status}")
+    return sid in body
+
+
+def semantic_child_may_still_transition(
+    project: Path, base_url: str, intent: dict, evidence: dict
+) -> bool:
+    sessions = evidence.get("sessions") if isinstance(evidence, dict) else []
+    sid = str(sessions[0]) if isinstance(sessions, list) and sessions else ""
+    if sid and session_is_active(project, base_url, sid):
+        return True
+    created = intent.get("created_at_ms")
+    try:
+        age = time.time() - (int(created) / 1000.0)
+    except (TypeError, ValueError):
+=== PROMPT_ASYNC / ABORT REFERENCES ===
+scripts/stage_a_controller.py:428:        "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:543:    status, data = http_json("GET", workspace_url(base_url, "/session/status", project))
+scripts/stage_a_controller.py:699:    status, body = http_json("GET", workspace_url(base_url, "/session/status", project))
+scripts/stage_a_controller.py:808:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:819:            base_url, f"/session/{urllib.parse.quote(root)}/prompt_async", project
+scripts/stage_a_controller.py:834:                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+scripts/stage_a_controller.py:844:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:927:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:938:            base_url, f"/session/{urllib.parse.quote(root)}/prompt_async", project
+scripts/stage_a_controller.py:953:                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+scripts/stage_a_controller.py:963:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:1208:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:1223:            f"/session/{urllib.parse.quote(root)}/prompt_async",
+scripts/stage_a_controller.py:1240:                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+scripts/stage_a_controller.py:1251:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:1334:            "transport": "prompt_async+SubtaskPart",
+scripts/stage_a_controller.py:1349:            f"/session/{urllib.parse.quote(root)}/prompt_async",
+scripts/stage_a_controller.py:1366:                f"prompt_async returned unexpected HTTP {status}: {body!r}; "
+scripts/stage_a_controller.py:1377:            "transport": "prompt_async+SubtaskPart",
+scripts/supervisor.py:189:    url=base+'/session/status'+(('?'+query) if query else '')
+scripts/supervisor.py:2531:        http.request("POST",f"/session/{urllib.parse.quote(root)}/prompt_async?{query}",
+scripts/supervisor.py:5958:                obj=self.request("GET","/session/status"+q,timeout=2)
+scripts/supervisor.py:5960:                    raise RuntimeError("v1 /session/status did not return an object")
+scripts/supervisor.py:5961:                log(f"HTTP_CONTROL_CONNECTED base={self.base} mode=v1 probe=/session/status")
+scripts/supervisor.py:5962:                csv("HTTP_CONTROL_CONNECTED",detail=f"{self.base} mode=v1 probe=/session/status")
+scripts/supervisor.py:6010:                        status=self.request("GET","/session/status"+query,timeout=2)
+scripts/supervisor.py:6012:                            raise RuntimeError("v1 /session/status did not return an object")
+scripts/supervisor.py:6015:                            f"probe=/session/status discovered-pid={pid}"
+scripts/supervisor.py:6019:                            detail=f"{self.base} mode=v1 probe=/session/status pid={pid}",
+scripts/supervisor.py:6128:            path=("/session/status"+q) if self.mode=="v1" else ("/api/session/active"+q)
+scripts/supervisor.py:6248:                self.request("POST",f"/session/{qsid}/abort"+q,payload=None,timeout=4)
+scripts/supervisor.py:6254:            (f"/session/{qsid}/abort",{}),
+scripts/supervisor.py:6331:                "POST",f"/session/{urllib.parse.quote(sid)}/prompt_async?{query}",
+scripts/supervisor.py:6452:def abort_session(sid,reason,agent=""):
+scripts/supervisor.py:6717:        if abort_session(sid,f"dispatch_protocol_violation {violation}",agent):
+scripts/supervisor.py:6728:        if abort_session(sid,f"dispatch_guard {reason} deliverable={did} count={n}",agent):
+scripts/supervisor.py:7657:                        abort_session(
+scripts/supervisor.py:7675:                        abort_session(
+scripts/supervisor.py:7714:                    abort_session(sid,probe_reason,agent)
+scripts/supervisor.py:7768:                        abort_session(sid,reason,agent)
+scripts/supervisor.py:7791:                        abort_session(sid,progress_reason,agent)
+scripts/supervisor.py:7815:                        if abort_session(
+scripts/supervisor.py:7824:                    abort_session(sid,f"runaway {fallback_reason}",agent)
+scripts/supervisor.py:7877:                abort_session(sid,f"root_context_rollover input={context_input} ceiling={ROOT_CONTEXT_INPUT_CEILING}","orchestrator")
+scripts/supervisor.py:8295:        if not abort_session(
+scripts/test_control_plane.py:156:        old_abort = supervisor.abort_session
+scripts/test_control_plane.py:162:            supervisor.abort_session = lambda sid, reason, agent="": aborts.append((sid, reason, agent))
+scripts/test_control_plane.py:169:            supervisor.abort_session = old_abort
+scripts/test_control_plane.py:537:        self.old_abort = supervisor.abort_session
+scripts/test_control_plane.py:542:        supervisor.abort_session = lambda sid, reason, agent="": self.aborts.append((sid, reason, agent))
+scripts/test_control_plane.py:547:        supervisor.abort_session = self.old_abort
+scripts/test_state_machine_invariants.py:317:        old_abort=supervisor.abort_session
+scripts/test_state_machine_invariants.py:320:        supervisor.abort_session=lambda *_args,**_kwargs:False
+scripts/test_state_machine_invariants.py:330:            supervisor.abort_session=old_abort
+scripts/test_state_machine_invariants.py:347:                self.assertTrue(supervisor.abort_session("s1","watchdog","implementer"))
+scripts/test_transport_root_no_continuation.py:78:        self.assertIn("/session/ses_root/prompt_async?", url)
+scripts/runaway-guard.sh:27:abort_session(){
+scripts/runaway-guard.sh:31:  out="$("$REAL_BIN" api POST "/session/$sid/abort" 2>&1)"; rc=$?
+scripts/runaway-guard.sh:93:        result="$(abort_session "$sid" || true)"
+scripts/start-stage-a-run.sh:54:[[ "$(http_status "$BASE_URL/session/status")" != "200" ]] || {
+scripts/start-stage-a-run.sh:63:  [[ "$(http_status "$BASE_URL/session/status")" == "200" ]] && break
+scripts/start-stage-a-run.sh:66:[[ "$(http_status "$BASE_URL/session/status")" == "200" ]] || {
+
+
+======================================================================
+FINISHED: 2026-09-24T14:05:12Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
