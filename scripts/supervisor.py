@@ -74,7 +74,7 @@ SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL="v2-split-parent-contract-invalid-v1"
 VERIFY_EVIDENCE_PROTOCOL="v2-supervisor-verify-evidence-v1"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
-MAX_CONCURRENT_IMPLEMENTATION_WORKERS=5
+MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 MAX_SPLITTER_ATTEMPTS=2
 MAX_SPLITTER_OUTPUT_LIMIT_RECOVERIES=1
 MAX_SPLITTER_PROFILE_RECOVERIES=1
@@ -5482,7 +5482,7 @@ def validate_dispatch(agent,text,runtime=False):
     if ready_info(did): return did,"already_complete"
     return did,""
 
-# V2.6.9 FIVE-SLOT IMPLEMENTATION SCHEDULER BEGIN
+# V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER BEGIN
 def v1_active_session_ids_from_env(strict=False):
     raw=os.environ.get("V2_OPENCODE_ACTIVE_SESSION_IDS_JSON")
     if raw is None:
@@ -5576,7 +5576,7 @@ def available_implementation_slots(data=None, strict=False):
     active=len(active_implementation_sessions(strict=strict))
     reserved=reserved_dispatch_slot_count(data)
     return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved)
-# V2.6.9 FIVE-SLOT IMPLEMENTATION SCHEDULER END
+# V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER END
 
 def preclaim_attempt(agent,text,dispatch_token):
     """Atomically observe scheduler capacity and reserve one canonical attempt."""

@@ -5,9 +5,27 @@ from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
 import control_state,leaf_contract,stage_a_controller,supervisor,state_io,worker_sandbox,watchdog_telemetry
 
-def ready_text(did,attempt=1,owner="supervisor",protocol=None):
+def ready_text(did,attempt=1,owner="supervisor",protocol=None,verify_command=""):
     protocol=protocol or control_state.LEAF_READY_PROTOCOL
-    return f"status=complete\ndeliverable={did}\nattempt={attempt}\nverified=true\nowner={owner}\nprotocol={protocol}\n"
+    text=f"status=complete\ndeliverable={did}\nattempt={attempt}\nverified=true\nowner={owner}\nprotocol={protocol}\n"
+    if verify_command:
+        text+=f"verify_sha256={hashlib.sha256(verify_command.encode()).hexdigest()}\n"
+    return text
+
+def mark_phase_ready(project,artifact,marker):
+    ctrl=Path(project)/".opencode-v2"
+    path=ctrl/artifact
+    if not path.exists():
+        path.write_text(f"test {artifact}\n")
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    ready_name=artifact.removesuffix(".md")+".ready"
+    (ctrl/ready_name).write_text(
+        "status=complete\n"
+        f"protocol={control_state.PHASE_READY_PROTOCOL}\n"
+        f"artifact={artifact}\nmarker={marker}\n"
+        f"validated={control_state.PHASE_READY_VALIDATOR}\n"
+        f"artifact_sha256={digest}\n"
+    )
 
 class SharedLeafContractTests(unittest.TestCase):
     def test_role_semantics_fail_closed(self):
@@ -148,17 +166,17 @@ class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
 class ReadyTrustBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.project=Path(self.tmp.name); self.work=self.project/".opencode-v2/work"; self.work.mkdir(parents=True)
-        (self.project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves":{"D001":{"launch_deps":[]}}}))
+        (self.project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves":{"D001":{"launch_deps":[],"verify_command":"test -f a.txt"}}}))
         (self.work/"attempts.json").write_text(json.dumps({"owner":"supervisor","deliverables":{"D001":{"count":1,"sessions":["s1"],"automatic_limit":3}}}))
     def tearDown(self): self.tmp.cleanup()
     def test_ready_requires_provenance_and_current_attempt(self):
         p=self.work/"D001.ready"; p.write_text("status=complete\ndeliverable=D001\nattempt=1\nverified=true\n"); self.assertFalse(control_state.ready_info(self.project,"D001"))
-        p.write_text(ready_text("D001")); self.assertTrue(control_state.ready_info(self.project,"D001"))
-        p.write_text(ready_text("D001",2)); self.assertFalse(control_state.ready_info(self.project,"D001"))
-        p.write_text(ready_text("D001",protocol="wrong")); self.assertFalse(control_state.ready_info(self.project,"D001"))
-        p.write_text(ready_text("D001",owner="model")); self.assertFalse(control_state.ready_info(self.project,"D001"))
+        p.write_text(ready_text("D001",verify_command="test -f a.txt")); self.assertTrue(control_state.ready_info(self.project,"D001"))
+        p.write_text(ready_text("D001",2,verify_command="test -f a.txt")); self.assertFalse(control_state.ready_info(self.project,"D001"))
+        p.write_text(ready_text("D001",protocol="wrong",verify_command="test -f a.txt")); self.assertFalse(control_state.ready_info(self.project,"D001"))
+        p.write_text(ready_text("D001",owner="model",verify_command="test -f a.txt")); self.assertFalse(control_state.ready_info(self.project,"D001"))
     def test_non_supervisor_ledger_owner_rejected(self):
-        (self.work/"D001.ready").write_text(ready_text("D001")); data=json.loads((self.work/"attempts.json").read_text()); data["owner"]="model"; (self.work/"attempts.json").write_text(json.dumps(data)); self.assertFalse(control_state.ready_info(self.project,"D001"))
+        (self.work/"D001.ready").write_text(ready_text("D001",verify_command="test -f a.txt")); data=json.loads((self.work/"attempts.json").read_text()); data["owner"]="model"; (self.work/"attempts.json").write_text(json.dumps(data)); self.assertFalse(control_state.ready_info(self.project,"D001"))
 
 class SplitValidatorTests(unittest.TestCase):
     def setUp(self):
@@ -167,13 +185,21 @@ class SplitValidatorTests(unittest.TestCase):
         (ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,"leaves":{"D001":parent}}))
     def tearDown(self): supervisor.PROJECT=self.old; self.tmp.cleanup()
     def proposals(self):
-        return [{"scope":"write all","owned_artifacts":"`a.txt`, `b.txt`","verify_command":"test -f a.txt","role":"implementer","depends_on_sibling":"","done_when":"files exist"},{"scope":"verify","owned_artifacts":"none","verify_command":"test -f b.txt","role":"tester","depends_on_sibling":"first","done_when":"verified"}]
+        return [
+            {"scope":"write all","owned_artifacts":"`a.txt`, `b.txt`","verify_command":"test -f a.txt","role":"implementer","depends_on_sibling":"","done_when":"files exist","reads_existing":[],"creates_or_updates":["a.txt","b.txt"]},
+            {"scope":"verify","owned_artifacts":"none","verify_command":"test -f b.txt","role":"tester","depends_on_sibling":"first","done_when":"verified","reads_existing":[],"creates_or_updates":[]},
+        ]
+    def request(self):
+        return {
+            "failed_attempts":[{"classification":"genuine","reason":"verify-failed-1"}],
+            "parent_contract":{"verify_command":"test -f a.txt -a -f b.txt"},
+        }
     def test_shared_rules_apply_to_split(self):
-        supervisor.validate_split_proposal("D001",self.proposals())
+        supervisor.validate_split_proposal("D001",self.proposals(),request=self.request())
         bad=self.proposals(); bad[0]["verify_command"]="true"
-        with self.assertRaisesRegex(ValueError,"non-verifying"): supervisor.validate_split_proposal("D001",bad)
+        with self.assertRaisesRegex(ValueError,"non-verifying"): supervisor.validate_split_proposal("D001",bad,request=self.request())
         bad=self.proposals(); bad[0]["role"]="potato"
-        with self.assertRaisesRegex(ValueError,"unknown implementation Role"): supervisor.validate_split_proposal("D001",bad)
+        with self.assertRaisesRegex(ValueError,"unknown implementation Role"): supervisor.validate_split_proposal("D001",bad,request=self.request())
 
 class LegacyCompletionTests(unittest.TestCase):
     def test_leaf_complete_refuses(self):
@@ -190,7 +216,8 @@ class BootstrapTrustTests(unittest.TestCase):
             self.assertTrue((project/".opencode-v2/bin/control-status").exists())
             self.assertFalse((project/".opencode-v2/bin/leaf-complete").exists())
             contract=(project/".opencode-v2/CONTROL_CONTRACT.md").read_text()
-            self.assertIn("supervisor re-runs the exact leaf Verify command",contract)
+            normalized=" ".join(contract.split())
+            self.assertIn("supervisor re-runs the exact leaf Verify command",normalized)
             self.assertNotIn("Complete a verified leaf with",contract)
 
     def test_state_writer_cannot_write_arbitrary_control_state(self):
@@ -270,7 +297,7 @@ class CrashConsistencyTests(unittest.TestCase):
         supervisor.dispatch_seen.discard(sid)
         old_validate=supervisor.validate_dispatch
         old_claim=supervisor.claim_attempt
-        supervisor.validate_dispatch=lambda agent,text: ("D001","")
+        supervisor.validate_dispatch=lambda agent,text,runtime=False: ("D001","")
         def fail_claim(sid,did):
             raise RuntimeError("fault after validation before claim")
         supervisor.claim_attempt=fail_claim
@@ -313,10 +340,10 @@ class CrashConsistencyTests(unittest.TestCase):
         supervisor.compaction_seen.pop(sid,None)
         supervisor.session_task[sid]=("D001",1)
         old_ready=supervisor.ready_info
-        old_failure=supervisor.compaction_failure
+        old_latest=supervisor.latest_compaction_state
         old_abort=supervisor.abort_session
         supervisor.ready_info=lambda _did:{}
-        supervisor.compaction_failure=lambda _sid:""
+        supervisor.latest_compaction_state=lambda _sid:{"seq":1,"status":"completed","error_type":""}
         supervisor.abort_session=lambda *_args,**_kwargs:False
         try:
             with self.assertRaises(RuntimeError):
@@ -326,7 +353,7 @@ class CrashConsistencyTests(unittest.TestCase):
             self.assertEqual(supervisor.compaction_seen.get(sid,0),0)
         finally:
             supervisor.ready_info=old_ready
-            supervisor.compaction_failure=old_failure
+            supervisor.latest_compaction_state=old_latest
             supervisor.abort_session=old_abort
             supervisor.session_task.pop(sid,None)
             supervisor.compaction_seen.pop(sid,None)
@@ -401,6 +428,7 @@ class VerificationSemanticsTests(unittest.TestCase):
             },
         }
         self._write_manifest()
+        mark_phase_ready(self.project,"IMPLEMENTATION_PLAN.md","IMPLEMENTATION_PLAN_COMPLETE")
         self.ledger={
             "owner":"supervisor",
             "deliverables":{
@@ -417,13 +445,16 @@ class VerificationSemanticsTests(unittest.TestCase):
         self.tmp.cleanup()
     def _write_manifest(self):
         (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9",
+            "project":str(self.project),
             "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
             "leaves":self.leaves,
         }))
     def _write_ledger(self):
         (self.work/"attempts.json").write_text(json.dumps(self.ledger))
     def _ready(self,did,attempt=1):
-        (self.work/f"{did}.ready").write_text(ready_text(did,attempt))
+        command=self.leaves[did]["verify_command"]
+        (self.work/f"{did}.ready").write_text(ready_text(did,attempt,verify_command=command))
 
     def test_contract_dep_is_hard_dispatch_barrier_until_ready(self):
         self.leaves["D001"]["contract_deps"]=["D002"]
@@ -786,7 +817,11 @@ class SplitStateMachineTests(unittest.TestCase):
         self.addCleanup(setattr,supervisor,"last_assistant_text_db",old_last)
         self.assertEqual(supervisor.complete_splitter(
             "D001","splitter-session","claim-1","Maximum steps reached",
-        ),(True,"splitter-corrective-turn-pending"))
+        ),(False,"completion-pending"))
+        self.assertEqual(sent,[])
+        supervisor.last_assistant_text_db=lambda session: "Maximum steps reached"
+        supervisor.reconcile_split_proposals()
+        self.assertEqual(len(sent),1)
         self.assertIn("required bare JSON",sent[0][1])
         supervisor.save_split_status("D001","splitter-corrective-awaiting-output",
             claim_count=1,corrective_session="corrective-session",
@@ -1212,7 +1247,13 @@ class CanonicalUnmaterializedDispatchProjectionTests(unittest.TestCase):
                 "role":"implementer","done_when":"a","acceptance_ids":["A001"],
                 "parallel":"none","split_children":[],
             }
-            (project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({"leaves":{"D001":leaf}}))
+            (project/".opencode-v2/IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+                "protocol":"V2.6.9",
+                "project":str(project),
+                "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+                "leaves":{"D001":leaf},
+            }))
+            mark_phase_ready(project,"IMPLEMENTATION_PLAN.md","IMPLEMENTATION_PLAN_COMPLETE")
             (work/"attempts.json").write_text(json.dumps({
                 "owner":"supervisor","deliverables":{
                     "D001":{
