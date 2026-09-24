@@ -88,10 +88,19 @@ def initial_d003_split_proposal(verify):
             "reads_existing":["bootstrap.txt"],"creates_or_updates":[],
         },
         {
-            "scope":"Create the frozen Galilean-moon probe records",
+            "scope":(
+                "Create two separable outputs: four frozen Galilean-moon record JSON files "
+                "under fixtures/vectors/moons/, and .opencode-v2/probes/ephemeris_moons.json "
+                "with a commands map of at least four entries."
+            ),
             "owned_artifacts":"`.opencode-v2/probes/ephemeris_moons.json`, `fixtures/vectors/moons/`",
             "verify_command":verify,"role":"implementer","depends_on_sibling":"first",
-            "done_when":"The owned probe and records satisfy the exact parent Verify.",
+            "done_when":(
+                "The probe JSON has a commands map with at least four entries; "
+                "fixtures/vectors/moons/ contains at least four .json files; every record "
+                "is at least 200 characters, contains neither 404 nor error text, contains "
+                "$$SOE or an X = vector marker, and the exact parent Verify passes."
+            ),
             "reads_existing":["bootstrap.txt"],
             "creates_or_updates":[".opencode-v2/probes/ephemeris_moons.json","fixtures/vectors/moons"],
         },
