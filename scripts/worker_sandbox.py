@@ -39,6 +39,7 @@ EPHEMERAL_DIRS = (
 EPHEMERAL_FILES = (".coverage",)
 SANDBOX_ROOT = Path.home() / ".local/share/v2-worker-sandbox"
 VERIFY_STAGE_ROOT = SANDBOX_ROOT / "verify-stage"
+VALIDATOR_TMP_ROOT = Path(tempfile.gettempdir()) / f"v2-worker-validator-{os.getuid()}"
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # V2.6.9 BATCH9A CONCURRENT-SHADOW-GUARD
 # V2.6.16 RESOLVER-SNAPSHOT-WITH-HOST-IPC-ISOLATION
@@ -1069,6 +1070,29 @@ def _copy_validator_browser_evidence(project: Path, shadow: Path, started_epoch:
         rel=item.get("screenshot") if isinstance(item,dict) else None
         if rel: copy_shot(rel)
 
+def validator_session_root(session: str) -> Path:
+    """Return a private host-writable root for nested validator snapshots.
+
+    Acceptance-validator tool calls can run with the user's home mounted
+    read-only. The trusted wrapper therefore prepares its disposable snapshot
+    under the host temporary directory, before entering the inner bubblewrap.
+    """
+    root = VALIDATOR_TMP_ROOT
+    if root.exists() and (root.is_symlink() or not root.is_dir()):
+        raise SandboxError(f"validator temp root is unsafe: {root}")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stat = root.stat()
+    if stat.st_uid != os.getuid():
+        raise SandboxError(f"validator temp root is not owned by uid {os.getuid()}: {root}")
+    os.chmod(root, 0o700)
+    base = root / _safe_session_token(session)
+    if base.exists() and (base.is_symlink() or not base.is_dir()):
+        raise SandboxError(f"validator session root is unsafe: {base}")
+    base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(base, 0o700)
+    return base
+
+
 def run_validator_bash(project: Path, session: str, command: str, timeout=240):
     """Run acceptance-validator shell in a disposable project snapshot.
 
@@ -1077,8 +1101,7 @@ def run_validator_bash(project: Path, session: str, command: str, timeout=240):
     """
     if not shutil.which("bwrap"):
         raise SandboxError("bubblewrap (bwrap) is required for acceptance-validator shell isolation")
-    base=SANDBOX_ROOT/"validator"/_safe_session_token(session)
-    base.mkdir(parents=True,exist_ok=True)
+    base=validator_session_root(session)
     run_dir=Path(tempfile.mkdtemp(prefix="cmd-",dir=base))
     lower_alias=run_dir/"lower"; lower_alias.mkdir()
     lower_root=str(lower_alias.resolve()); shadow=run_dir/"project"
@@ -1217,6 +1240,9 @@ def cleanup_session(session: str):
         path=SANDBOX_ROOT/area/token
         if path.exists():
             shutil.rmtree(path,ignore_errors=True)
+    validator_tmp = VALIDATOR_TMP_ROOT / token
+    if validator_tmp.exists() and not validator_tmp.is_symlink():
+        shutil.rmtree(validator_tmp, ignore_errors=True)
     _runtime_state_path(session).unlink(missing_ok=True)
     stage=_verify_stage_dir(session)
     if stage.exists(): shutil.rmtree(stage,ignore_errors=True)
@@ -1531,6 +1557,17 @@ def selftest(require_bwrap=False):
             )
             assert checked.returncode==0, checked.returncode
             assert mutations==[], mutations
+
+            validator_root=validator_session_root("ses_validator_test")
+            assert validator_root.parent==VALIDATOR_TMP_ROOT, validator_root
+            assert str(validator_root).startswith(tempfile.gettempdir()+os.sep), validator_root
+            rc=run_validator_bash(
+                project,"ses_validator_test",
+                "test -r src/owned.txt && test -r .opencode-v2/IMPLEMENTATION_PLAN.guard.json"
+            )
+            assert rc==0, f"validator temp-root integration failed rc={rc}"
+            cleanup_session("ses_validator_test")
+            assert not validator_root.exists(), validator_root
 
             cleanup_session("ses_test")
             assert not session_used_sandbox("ses_test")
