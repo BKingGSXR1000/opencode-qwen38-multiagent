@@ -3898,6 +3898,170 @@ class AtomicSchedulerReservationTests(unittest.TestCase):
 
 
 
+class ProgressHandoffBatchGuardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        (self.project/".opencode-v2/work").mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        self.did="D001"
+        self.sid="s1"
+        self.progress=self.project/".opencode-v2/work/D001.progress.md"
+        self.progress.write_text(
+            "HANDOFF_READY: false\n\n"
+            "Findings:\nknown fact\n\n"
+            "Evidence:\nmeasured evidence\n\n"
+            "Next step:\nread bounded inputs\n"
+        )
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def _records(self,*ids):
+        return [
+            {"id":mid,"data":{"role":"assistant"}}
+            for mid in ids
+        ]
+
+    def test_parallel_sibling_reads_share_one_open_discovery_response(self):
+        progress=str(self.progress)
+        parts={
+            "m-progress":[{
+                "type":"tool","tool":"write",
+                "state":{
+                    "status":"completed",
+                    "input":{"filePath":progress},
+                },
+            }],
+            "m-discovery":[
+                {
+                    "type":"tool","tool":"read",
+                    "state":{
+                        "status":"completed",
+                        "input":{"filePath":str(self.project/"a.txt")},
+                    },
+                },
+                {
+                    "type":"tool","tool":"read",
+                    "state":{
+                        "status":"pending",
+                        "input":{"filePath":str(self.project/"b.txt")},
+                    },
+                },
+            ],
+        }
+        with mock.patch.object(
+            supervisor,"v1_runtime_enabled",return_value=True
+        ), mock.patch.object(
+            supervisor,"_v1_message_records",
+            return_value=self._records("m-progress","m-discovery"),
+        ), mock.patch.object(
+            supervisor,"_v1_message_parts",
+            side_effect=lambda mid:parts[mid],
+        ):
+            self.assertTrue(
+                supervisor._v1_progress_discovery_batch_open(
+                    self.sid,self.did
+                )
+            )
+
+    def test_later_assistant_response_requires_checkpoint(self):
+        progress=str(self.progress)
+        parts={
+            "m-progress":[{
+                "type":"tool","tool":"write",
+                "state":{
+                    "status":"completed",
+                    "input":{"filePath":progress},
+                },
+            }],
+            "m-discovery":[{
+                "type":"tool","tool":"read",
+                "state":{
+                    "status":"completed",
+                    "input":{"filePath":str(self.project/"a.txt")},
+                },
+            }],
+            "m-later":[{
+                "type":"tool","tool":"read",
+                "state":{
+                    "status":"pending",
+                    "input":{"filePath":str(self.project/"b.txt")},
+                },
+            }],
+        }
+        with mock.patch.object(
+            supervisor,"v1_runtime_enabled",return_value=True
+        ), mock.patch.object(
+            supervisor,"_v1_message_records",
+            return_value=self._records(
+                "m-progress","m-discovery","m-later"
+            ),
+        ), mock.patch.object(
+            supervisor,"_v1_message_parts",
+            side_effect=lambda mid:parts[mid],
+        ):
+            self.assertFalse(
+                supervisor._v1_progress_discovery_batch_open(
+                    self.sid,self.did
+                )
+            )
+
+    def test_progress_gate_allows_same_open_discovery_response_only(self):
+        progress=str(self.progress)
+        history=[
+            ("write",{"filePath":progress}),
+            ("read",{"filePath":str(self.project/"a.txt")}),
+        ]
+        leaf={
+            "id":"D001",
+            "split_handoff_only":True,
+            "owned_artifact_paths":[],
+        }
+        common=[
+            mock.patch.object(
+                supervisor,"_session_agent_db",return_value="probe-builder"
+            ),
+            mock.patch.object(
+                supervisor,"first_user_text_db",
+                return_value="DELIVERABLE: D001\n"
+            ),
+            mock.patch.object(
+                supervisor,"load_manifest",
+                return_value={"leaves":{"D001":leaf}}
+            ),
+            mock.patch.object(
+                supervisor,"session_completed_tool_inputs",
+                return_value=history
+            ),
+        ]
+        for patcher in common:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with mock.patch.object(
+            supervisor,"_v1_progress_discovery_batch_open",return_value=True
+        ):
+            self.assertEqual(
+                supervisor.progress_handoff_tool_state(
+                    self.sid,"read",
+                    {"filePath":str(self.project/"b.txt")},
+                ),
+                ("allow","same-discovery-response"),
+            )
+        with mock.patch.object(
+            supervisor,"_v1_progress_discovery_batch_open",return_value=False
+        ):
+            self.assertEqual(
+                supervisor.progress_handoff_tool_state(
+                    self.sid,"read",
+                    {"filePath":str(self.project/"b.txt")},
+                ),
+                ("deny","PROGRESS_CHECKPOINT_REQUIRED"),
+            )
+
+
 class ProgressAwareWatchdogTests(unittest.TestCase):
     def setUp(self):
         supervisor.watch.clear()

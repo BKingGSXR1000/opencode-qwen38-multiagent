@@ -7671,6 +7671,80 @@ def _tool_targets_exact_project_path(tool,args,target):
     return False
 
 
+def _v1_progress_discovery_batch_open(sid,did):
+    """Allow sibling tools in the same open assistant discovery response.
+
+    The progress contract is one discovery *response* after each checkpoint,
+    not one individual tool call. OpenCode can emit several parallel tool
+    parts in one assistant message; once the first completes, later siblings
+    must remain allowed until that message closes. A subsequent assistant
+    message still requires a fresh checkpoint.
+    """
+    if not v1_runtime_enabled():
+        return False
+    try:
+        records=[
+            rec for rec in _v1_message_records(sid)
+            if rec.get("data",{}).get("role")=="assistant"
+        ]
+    except Exception:
+        return False
+
+    batches=[]
+    last_progress=-1
+    terminal={"completed","error"}
+    for index,rec in enumerate(records):
+        try:
+            parts=_v1_message_parts(rec["id"])
+        except Exception:
+            parts=[]
+        completed_nonprogress=False
+        open_tool=False
+        completed_progress=False
+        for part in parts:
+            if part.get("type")!="tool":
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            status=str(state.get("status") or "").lower()
+            raw=state.get("input")
+            if isinstance(raw,dict):
+                inp=raw
+            elif isinstance(raw,str):
+                try:
+                    inp=json.loads(raw)
+                except Exception:
+                    inp={}
+            else:
+                inp={}
+            name=str(part.get("tool") or "")
+            is_progress=_tool_targets_exact_progress_file(did,name,inp)
+            if status in terminal:
+                if is_progress:
+                    completed_progress=True
+                else:
+                    completed_nonprogress=True
+            else:
+                open_tool=True
+        if completed_progress:
+            last_progress=index
+        batches.append({
+            "completed_nonprogress":completed_nonprogress,
+            "open_tool":open_tool,
+        })
+
+    if last_progress<0 or not batches:
+        return False
+    after=[
+        index for index in range(last_progress+1,len(batches))
+        if batches[index]["completed_nonprogress"]
+    ]
+    latest=len(batches)-1
+    return (
+        after==[latest]
+        and batches[latest]["open_tool"]
+    )
+
+
 def progress_handoff_tool_state(sid,tool,args):
     agent=_session_agent_db(sid)
     if agent!="probe-builder":
@@ -7727,6 +7801,8 @@ def progress_handoff_tool_state(sid,tool,args):
     ]
     if not noncheckpoint_after:
         return "allow","one-discovery-after-checkpoint"
+    if _v1_progress_discovery_batch_open(sid,did):
+        return "allow","same-discovery-response"
     return "deny","PROGRESS_CHECKPOINT_REQUIRED"
 
 
