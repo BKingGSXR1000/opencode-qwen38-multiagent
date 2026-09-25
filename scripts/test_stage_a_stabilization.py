@@ -370,6 +370,43 @@ class SemanticInfrastructureRetryTests(unittest.TestCase):
                     "should not be accepted",
                 )
 
+    def test_semantic_infrastructure_retry_remains_bounded_after_generation_three(self):
+        execution_id = controller.execution_action_id(
+            "state-a", self.root, self.action, 3
+        )
+        controller.save_execution_ledger(self.project, {
+            "owner": "stage-a-controller",
+            "protocol": controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions": {
+                execution_id: {
+                    "execution_id": execution_id,
+                    "state_version": "state-a",
+                    "root_session": self.root,
+                    "action": self.action,
+                    "semantic_generation": 3,
+                    "created_at_ms": int((time.time() - 30) * 1000),
+                    "baseline_child_ids": [],
+                }
+            },
+        })
+        child = {
+            "id": "ses-validator-generation-three",
+            "parentID": self.root,
+            "agent": "acceptance-validator",
+        }
+        with mock.patch.object(controller, "evaluate", return_value=self.result), \
+             mock.patch.object(controller, "child_snapshot", return_value=[child]), \
+             mock.patch.object(controller, "semantic_child_may_still_transition", return_value=False):
+            with self.assertRaisesRegex(
+                controller.ControllerError, "retry limit reached"
+            ):
+                controller.authorize_semantic_infrastructure_retry(
+                    self.project,
+                    "http://127.0.0.1:1",
+                    execution_id,
+                    "generation four remains forbidden",
+                )
+
 
 class DecisionStateVersionTests(unittest.TestCase):
     def base_snapshot(self):

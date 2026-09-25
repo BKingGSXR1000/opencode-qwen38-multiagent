@@ -20,7 +20,7 @@ from deterministic_dispatch import select_actions
 
 POLL_DEFAULT = 0.5
 SEMANTIC_TERMINAL_GRACE_SECONDS = 10.0
-MAX_SEMANTIC_INFRASTRUCTURE_RETRIES = 2
+MAX_SEMANTIC_INFRASTRUCTURE_RETRIES = 3
 SEMANTIC_RETRY_PROTOCOL = "v2-semantic-infrastructure-retry-v1"
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
