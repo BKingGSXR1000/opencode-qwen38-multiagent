@@ -25,6 +25,9 @@ class DriverError(RuntimeError):
     pass
 
 
+BLOCKED_STABILITY_OBSERVATIONS = 3
+
+
 def transient_controller_race(exc: BaseException) -> bool:
     message = str(exc)
     return any(
@@ -55,10 +58,24 @@ def terminal(actions: list[object]) -> int | None:
     return None
 
 
+def blocked_observation_key(receipt: dict) -> tuple[str, str] | None:
+    if receipt.get("outcome") != "no-dispatch":
+        return None
+    actions = receipt.get("actions") if isinstance(receipt.get("actions"), list) else []
+    if terminal(actions) != 2:
+        return None
+    return (
+        str(receipt.get("state_version") or ""),
+        json.dumps(actions, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: float, max_ticks: int) -> int:
     preflight.verify_proof(proof, project, base_url, root_session)
     dispatched = 0
     last_event = ""
+    blocked_key: tuple[str, str] | None = None
+    blocked_streak = 0
     while max_ticks == 0 or dispatched < max_ticks:
         try:
             receipt = tick.execute_one(project, base_url, root_session)
@@ -78,10 +95,24 @@ def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: fl
             last_event = rendered
         if event["event"] == "dispatched":
             dispatched += 1
+            blocked_key = None
+            blocked_streak = 0
         if receipt.get("outcome") == "no-dispatch":
             result = terminal(receipt.get("actions") or [])
-            if result is not None:
-                return result
+            if result == 0:
+                return 0
+            if result == 2:
+                current_key = blocked_observation_key(receipt)
+                if current_key == blocked_key:
+                    blocked_streak += 1
+                else:
+                    blocked_key = current_key
+                    blocked_streak = 1
+                if blocked_streak >= BLOCKED_STABILITY_OBSERVATIONS:
+                    return 2
+            else:
+                blocked_key = None
+                blocked_streak = 0
         time.sleep(poll)
     return 0
 
@@ -95,6 +126,22 @@ def selftest() -> None:
         raise DriverError("terminal state classification mismatch")
     if terminal([{"kind": "wait"}]) is not None:
         raise DriverError("wait was classified terminal")
+    blocked_receipt = {
+        "outcome": "no-dispatch",
+        "state_version": "state-a",
+        "actions": [{"kind": "blocked", "reason": "attempt_limit_reached"}],
+    }
+    if blocked_observation_key(blocked_receipt) != (
+        "state-a",
+        '[{"kind":"blocked","reason":"attempt_limit_reached"}]',
+    ):
+        raise DriverError("blocked observation key mismatch")
+    if blocked_observation_key({
+        "outcome": "no-dispatch",
+        "state_version": "state-a",
+        "actions": [{"kind": "wait"}],
+    }) is not None:
+        raise DriverError("wait produced a blocked observation key")
     for message in (
         "transport root is not idle",
         "state changed before dispatch: selected=a current=b",
