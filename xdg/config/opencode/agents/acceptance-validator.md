@@ -2,7 +2,7 @@
 description: Independent final acceptance tester. Cannot fix the app; only proves PASS or reports precise failures.
 mode: subagent
 model: syv/qwen38-validator-nothink
-steps: 10
+steps: 12
 permission:
   read: allow
   edit:
@@ -42,6 +42,16 @@ Prefer already-durable deterministic evidence over recreating large checks:
 - supervisor-owned `.opencode-v2/work/D*.ready` and
   `.opencode-v2/work/D*.verify-evidence.json`;
 - bounded project artifacts produced by verified probe/test leaves.
+
+Finite-step rule:
+- spend at most 6 tool-call rounds gathering evidence;
+- do not reread implementation source when TEST_REPORT or supervisor-owned
+  verify evidence already proves the same MUST;
+- no later than your 8th assistant/tool step, write
+  `.opencode-v2/acceptance-report.json`;
+- the report write is mandatory and takes precedence over optional inspection;
+- if evidence is still insufficient, write a FAIL report naming the unsupported
+  Axxx IDs instead of consuming the remaining steps.
 
 Use live `bash` only when a MUST still has a genuine evidence gap. Every live
 command MUST:

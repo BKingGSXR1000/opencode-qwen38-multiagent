@@ -15,6 +15,7 @@ from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
+CONTROL_POLICY_EPOCH = "v2-control-policy-20260925-validator-budget-v1"
 MAX_DECISION_CHARS = 6000
 MAX_PROGRESS_CHARS = 4000
 DID_RE = re.compile(r"^D\d{3}(?:-[AB](?:[12])?)?$")
@@ -313,6 +314,7 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
     # rendered snapshot can alias two different scheduler decisions.
     base = {
         "protocol": QUERY_PROTOCOL,
+        "control_policy_epoch": CONTROL_POLICY_EPOCH,
         "state_version": "",
         "source_bytes": source_bytes,
         "state_error": bool(snapshot.get("state_error")),

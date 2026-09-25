@@ -452,6 +452,26 @@ class DecisionStateVersionTests(unittest.TestCase):
             self.assertEqual(second["decision.json"]["plan"]["next_action"],"continue")
             self.assertNotEqual(first["decision.json"]["state_version"],second["decision.json"]["state_version"])
 
+    def test_control_policy_epoch_changes_state_version_with_same_project_state(self):
+        snapshot=self.base_snapshot()
+        rendered=json.dumps(snapshot,sort_keys=True)
+        with mock.patch.object(control_query_views,"CONTROL_POLICY_EPOCH","epoch-a"):
+            first,_=control_query_views.build_query_views(snapshot,{},rendered)
+        with mock.patch.object(control_query_views,"CONTROL_POLICY_EPOCH","epoch-b"):
+            second,_=control_query_views.build_query_views(snapshot,{},rendered)
+        self.assertEqual(first["decision.json"]["control_policy_epoch"],"epoch-a")
+        self.assertEqual(second["decision.json"]["control_policy_epoch"],"epoch-b")
+        self.assertNotEqual(first["decision.json"]["state_version"],second["decision.json"]["state_version"])
+
+
+class AcceptanceValidatorBudgetTests(unittest.TestCase):
+    def test_validator_reserves_budget_for_mandatory_report_write(self):
+        role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
+        self.assertIn("steps: 12",role)
+        self.assertIn("spend at most 6 tool-call rounds gathering evidence",role)
+        self.assertIn("no later than your 8th assistant/tool step",role)
+        self.assertIn("the report write is mandatory",role)
+
 
 class ControllerShadowCoherenceTests(unittest.TestCase):
     def test_transient_shadow_mismatch_reloads_decision_until_exact_match(self):
