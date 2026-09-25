@@ -282,8 +282,14 @@ or `systemctl` remediation.
 
 - It must fail closed.
 - Every `verify_command` must be exactly one physical line with no embedded
-  newline. Keep shell/Python checks compact; do not format a command as
-  multiline source text.
+  newline.
+- Never embed a multiline Python/JavaScript/shell program inside `-c`, a
+  heredoc, command substitution, or an escaped multiline string. For an owned
+  Python source leaf, prefer a simple one-line command such as
+  `python3 -m py_compile path/to/file.py`. If meaningful verification needs a
+  multi-statement program, put that program in a bounded owned test/helper
+  artifact and make `verify_command` invoke that artifact with one simple
+  one-line command.
 - Never use `true`, `:`, cosmetic echo, or `|| true`.
 - Numeric bounds/enums/units must come from ACCEPTANCE, reference foundation,
   a documented format, or a preceding probe contract.

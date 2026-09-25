@@ -38,6 +38,9 @@ class PlannerContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn("exactly one physical line", role)
         self.assertIn("no embedded\n  newline", role)
+        self.assertIn("Never embed a multiline Python/JavaScript/shell program", role)
+        self.assertIn("python3 -m py_compile", role)
+        self.assertIn("bounded owned test/helper", role)
 
 
 class ExactProjectPathPermissionTests(unittest.TestCase):
