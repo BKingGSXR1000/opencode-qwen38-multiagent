@@ -942,6 +942,105 @@ class SplitStateMachineTests(unittest.TestCase):
             )
         again.assert_not_called()
 
+    def test_stale_split_contract_retires_projection_but_preserves_history(self):
+        child_a=dict(self.parent)
+        child_a.update({
+            "id":"D001-A","parent":"D001","split_children":[],
+            "owned_artifacts":"none","owned_artifact_paths":[],
+            "role":"probe-builder","verify_command":"true",
+        })
+        child_b=dict(self.parent)
+        child_b.update({
+            "id":"D001-B","parent":"D001","split_children":[],
+            "owned_artifacts":"`a.txt`","owned_artifact_paths":["a.txt"],
+            "role":"implementer","verify_command":"test -f a.txt",
+        })
+        raw=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        raw["leaves"]["D001"]["split_children"]=["D001-A","D001-B"]
+        raw["leaves"]["D001"]["split_depth"]=0
+        raw["leaves"]["D001-A"]=child_a
+        raw["leaves"]["D001-B"]=child_b
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(raw))
+
+        txn={
+            "owner":"supervisor","protocol":supervisor.SPLIT_TRANSACTION_PROTOCOL,
+            "state":"committed","parent_id":"D001","generation":1,
+            "children":["D001-A","D001-B"],
+            "child_defs":{"D001-A":child_a,"D001-B":child_b},
+            "transaction_id":"old-transaction",
+            "prepared_at":"2026-09-20T00:00:00Z",
+            "committed_at":"2026-09-20T00:01:00Z",
+        }
+        (self.work/"D001.split-transaction.json").write_text(json.dumps(txn))
+        supervisor.save_split_status(
+            "D001","parent-finalize-failed",
+            generation=1,children=["D001-A","D001-B"],
+            transaction_id="old-transaction",
+            parent_finalize_failures=3,
+            parent_finalize_last_result="durable-progress-incomplete",
+            reason="durable-progress-incomplete",
+        )
+        supervisor.save_split_leaf_overlay({
+            "owner":"supervisor","protocol":"v2-split-leaf-overlay-v1",
+            "parents":{"D001":{
+                "children":["D001-A","D001-B"],
+                "child_defs":{"D001-A":child_a,"D001-B":child_b},
+                "transaction_id":"old-transaction",
+                "timestamp":"2026-09-20T00:00:00Z",
+            }},
+        })
+
+        attempts=supervisor.load_attempts()
+        before_entry=json.loads(json.dumps(attempts["deliverables"]["D001"]))
+        current_sha=hashlib.sha256(
+            self.parent["verify_command"].encode()
+        ).hexdigest()
+        entry=attempts["deliverables"]["D001"]
+        entry["plan_contract_revisions"]=[{
+            "attempt":2,
+            "source":"supervisor-plan-contract-revision",
+            "previous_verify_sha256":"old",
+            "current_verify_sha256":current_sha,
+            "timestamp":"2026-09-21T00:00:00Z",
+        }]
+        entry["split_required"]={
+            "generation":1,
+            "reason":"genuine-failure-threshold",
+            "timestamp":"2026-09-20T00:00:00Z",
+        }
+        supervisor.save_attempts(attempts)
+
+        with mock.patch.object(
+            supervisor,"ready_info",
+            side_effect=lambda did: {"status":"complete"} if did in {"D001-A","D001-B"} else {},
+        ):
+            ok,detail=supervisor.recover_stale_split_parent_contract("D001")
+        self.assertEqual((ok,detail),(True,"contract-replacement-ready"))
+
+        after=supervisor.load_attempts()["deliverables"]["D001"]
+        self.assertEqual(after["count"],before_entry["count"])
+        self.assertEqual(after["sessions"],before_entry["sessions"])
+        self.assertEqual(after["failure_history"],before_entry["failure_history"])
+        self.assertNotIn("split_required",after)
+        recovery=after["stale_split_contract_recoveries"][-1]
+        self.assertEqual(recovery["state"],"committed")
+        self.assertEqual(recovery["transaction_id"],"old-transaction")
+        self.assertEqual(recovery["missing_current_ownership"],["b.txt"])
+        self.assertTrue((self.project/recovery["archive"]).is_file())
+
+        guard=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        self.assertEqual(guard["leaves"]["D001"]["split_children"],[])
+        self.assertNotIn("D001-A",guard["leaves"])
+        self.assertNotIn("D001-B",guard["leaves"])
+        overlay=supervisor.load_split_leaf_overlay()
+        self.assertNotIn("D001",overlay["parents"])
+        self.assertFalse((self.work/"D001.split-status.json").exists())
+        self.assertFalse((self.work/"D001.split-transaction.json").exists())
+        state=control_state.attempt_state(after)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["allowed_attempts"],3)
+        self.assertEqual(state["plan_contract_retry_grants"],1)
+
     def test_valid_failed_parent_rejects_model_prerequisite_repair(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         payload={

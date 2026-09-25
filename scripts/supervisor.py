@@ -2814,6 +2814,186 @@ def recover_historical_splitter_corrective_turn(parent):
     return ok,detail
 
 
+def recover_stale_split_parent_contract(parent):
+    """Retire an old split projection after a proven parent contract revision.
+
+    Historical attempts, child evidence, and the archived transaction remain
+    immutable.  This transition only removes the stale *active* split overlay
+    so the existing plan-contract replacement credit can run the current parent
+    contract once.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+    project=Path(PROJECT)
+    guard_path=project/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
+
+    with splitter_state_lock(parent):
+        with dispatch_lock:
+            with attempt_lock():
+                status=load_split_status(parent)
+                if status.get("state")!="parent-finalize-failed":
+                    return False,"stale-split-recovery-requires-parent-finalize-failed"
+
+                txn=load_split_transaction(parent)
+                if (
+                    txn.get("state")!="committed"
+                    or txn.get("parent_id")!=parent
+                    or not isinstance(txn.get("child_defs"),dict)
+                    or not isinstance(txn.get("children"),list)
+                ):
+                    return False,"stale-split-transaction-not-committed"
+                children=list(txn["children"])
+                if not children or any(not ready_info(child) for child in children):
+                    return False,"stale-split-children-not-ready"
+
+                raw_manifest=load_json_object(
+                    guard_path,label="implementation manifest"
+                )
+                leaves=raw_manifest.get("leaves")
+                if not isinstance(leaves,dict):
+                    return False,"stale-split-manifest-invalid"
+                parent_leaf=leaves.get(parent)
+                if not isinstance(parent_leaf,dict):
+                    return False,"stale-split-parent-missing"
+                if list(parent_leaf.get("split_children") or [])!=children:
+                    return False,"stale-split-active-children-mismatch"
+
+                current_owned=set(owned_artifact_paths(parent_leaf))
+                prior_owned=set()
+                child_defs=txn["child_defs"]
+                for child in children:
+                    child_def=child_defs.get(child)
+                    if not isinstance(child_def,dict):
+                        return False,"stale-split-child-definition-missing"
+                    prior_owned.update(owned_artifact_paths(child_def))
+                    live_child=leaves.get(child)
+                    if not isinstance(live_child,dict) or live_child!=child_def:
+                        return False,"stale-split-live-child-drift"
+                missing=sorted(current_owned-prior_owned)
+                if not missing:
+                    return False,"stale-split-current-ownership-already-covered"
+
+                attempts=load_attempts()
+                entry=(attempts.get("deliverables") or {}).get(parent)
+                if not isinstance(entry,dict):
+                    return False,"stale-split-parent-attempt-ledger-missing"
+                state=attempt_state(entry)
+                if not state.get("valid"):
+                    return False,"stale-split-parent-attempt-ledger-invalid"
+                try:
+                    count=int(entry.get("count") or 0)
+                except (TypeError,ValueError):
+                    return False,"stale-split-parent-attempt-count-invalid"
+                current_verify=str(parent_leaf.get("verify_command") or "")
+                current_sha=hashlib.sha256(current_verify.encode()).hexdigest()
+                revisions=entry.get("plan_contract_revisions") or []
+                matching=[
+                    row for row in revisions
+                    if isinstance(row,dict)
+                    and row.get("source")=="supervisor-plan-contract-revision"
+                    and row.get("current_verify_sha256")==current_sha
+                ]
+                if len(matching)!=1:
+                    return False,"stale-split-current-plan-revision-not-unique"
+                if (
+                    int(state.get("plan_contract_retry_grants") or 0)<1
+                    or int(state.get("allowed_attempts") or 0)<=count
+                ):
+                    return False,"stale-split-no-contract-replacement-credit"
+                marker=entry.get("split_required")
+                if not isinstance(marker,dict):
+                    return False,"stale-split-required-marker-missing"
+                if int(marker.get("generation") or 0)!=int(txn.get("generation") or 0):
+                    return False,"stale-split-generation-mismatch"
+
+                overlay=load_split_leaf_overlay()
+                parents=overlay.get("parents")
+                overlay_entry=parents.get(parent) if isinstance(parents,dict) else None
+                if (
+                    not isinstance(overlay_entry,dict)
+                    or overlay_entry.get("transaction_id")!=txn.get("transaction_id")
+                    or overlay_entry.get("child_defs")!=child_defs
+                ):
+                    return False,"stale-split-overlay-mismatch"
+
+                history=entry.setdefault("stale_split_contract_recoveries",[])
+                if not isinstance(history,list):
+                    return False,"stale-split-recovery-history-invalid"
+                existing=next((
+                    row for row in history
+                    if isinstance(row,dict)
+                    and row.get("transaction_id")==txn.get("transaction_id")
+                    and row.get("current_verify_sha256")==current_sha
+                ),None)
+                if isinstance(existing,dict) and existing.get("state")=="committed":
+                    return False,"stale-split-contract-already-recovered"
+                if existing is None:
+                    archive=_archive_split_state_for_contract_repair(parent)
+                    if archive is None:
+                        return False,"stale-split-archive-missing"
+                    existing={
+                        "protocol":"v2-stale-split-contract-recovery-v1",
+                        "state":"prepared",
+                        "transaction_id":txn.get("transaction_id"),
+                        "generation":int(txn.get("generation") or 0),
+                        "children":children,
+                        "missing_current_ownership":missing,
+                        "prior_owned_artifacts":sorted(prior_owned),
+                        "current_owned_artifacts":sorted(current_owned),
+                        "current_verify_sha256":current_sha,
+                        "archive":str(archive.relative_to(project)),
+                        "prepared_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                    }
+                    history.append(existing)
+                entry.pop("split_required",None)
+                save_attempts(attempts)
+
+                parents.pop(parent,None)
+                overlay["parents"]=parents
+                save_split_leaf_overlay(overlay)
+                for child in children:
+                    leaves.pop(child,None)
+                parent_leaf["split_children"]=[]
+                parent_leaf.pop("split_depth",None)
+                raw_manifest["leaves"]=leaves
+                atomic_write_json(guard_path,raw_manifest)
+
+                _clear_split_request_state_for_contract_repair(parent)
+
+                # Commit the transition only after both active projections are
+                # gone.  The immutable archive and old child/attempt files stay.
+                attempts=load_attempts()
+                entry=(attempts.get("deliverables") or {}).get(parent)
+                rows=entry.get("stale_split_contract_recoveries") if isinstance(entry,dict) else None
+                target=next((
+                    row for row in rows or []
+                    if isinstance(row,dict)
+                    and row.get("transaction_id")==txn.get("transaction_id")
+                    and row.get("current_verify_sha256")==current_sha
+                ),None)
+                if not isinstance(target,dict):
+                    raise StateCorruptionError(
+                        f"{parent} stale split recovery record disappeared"
+                    )
+                target["state"]="committed"
+                target["committed_at"]=time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                )
+                save_attempts(attempts)
+
+    log(
+        f"STALE_SPLIT_CONTRACT_RETIRED parent={parent} "
+        f"transaction={txn.get('transaction_id')} "
+        f"missing={','.join(missing)}"
+    )
+    csv(
+        "STALE_SPLIT_CONTRACT_RETIRED","", "supervisor",
+        f"{parent} transaction={txn.get('transaction_id')} "
+        f"missing={','.join(missing)}",
+    )
+    return True,"contract-replacement-ready"
+
+
 def rearm_splits_after_parent_contract_repair():
     # Recreate a split edge only after the repaired parent plan is finalized.
     # The stale request embeds the old invalid Verify command, so it must stay
@@ -8618,7 +8798,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -8852,6 +9032,27 @@ def main():
         print(
             f"SPLIT_HISTORICAL_CORRECTIVE_RECOVERY_ALLOW "
             f"parent={args.recover_historical_splitter_corrective} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_stale_split_parent_contract:
+        if unknown or not args.project:
+            raise SystemExit(
+                "stale split parent contract recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_stale_split_parent_contract(
+            args.recover_stale_split_parent_contract
+        )
+        if not ok:
+            raise SystemExit(
+                f"STALE_SPLIT_CONTRACT_RECOVERY_DENY "
+                f"parent={args.recover_stale_split_parent_contract} "
+                f"reason={detail}"
+            )
+        print(
+            f"STALE_SPLIT_CONTRACT_RECOVERY_ALLOW "
+            f"parent={args.recover_stale_split_parent_contract} "
             f"reason={detail}"
         )
         return
