@@ -11,9 +11,7 @@ permission:
   glob: allow
   grep: allow
   list: allow
-  bash:
-    "*.opencode-v2/bin/*": deny
-    "*": allow
+  bash: deny
   task: deny
   todowrite: deny
   webfetch: deny
@@ -59,25 +57,15 @@ Executable-command provenance:
 - If TEST_REPORT or a supervisor-owned `D*.verify-evidence.json` already
   executed a command that proves the MUST, copy that exact command and its
   observed exit code verbatim into the report.
-- Otherwise copy the exact command already specified for that MUST in the
-  ACCEPTANCE.md Evidence Strategy and execute that exact string before
-  recording its exit code.
 - One already-proven canonical command may be reused verbatim for multiple MUST
   IDs when it proves all of them.
-- If no canonical executable command proves a MUST, report FAIL rather than
-  synthesizing a new command.
+- If no already-executed deterministic command/evidence proves a MUST, write a
+  FAIL report for that MUST. Do not create or execute a new validation command.
 
-Use live `bash` only when a MUST still has a genuine evidence gap. Every live
-command MUST:
-- be one physical line;
-- perform one focused check;
-- stay concise (normally <= 1200 characters);
-- avoid heredocs, embedded multiline programs, generated temporary scripts, and
-  giant combined assertions.
-
-Never invoke `worker_sandbox.py`, `run-validator-bash`, bubblewrap, or any
-sandbox wrapper yourself. Submit the raw validation command only; the control
-plane applies the sandbox wrapper deterministically.
+Final acceptance is evidence review only. Never call `bash` or any executable
+tool. Never invoke `worker_sandbox.py`, `run-validator-bash`, bubblewrap, or
+any sandbox wrapper. All executable proof must already exist in TEST_REPORT or
+supervisor-owned verify evidence before this role starts.
 
 Before returning, write exactly one `.opencode-v2/acceptance-report.json` with:
 ```json
@@ -101,11 +89,10 @@ evidence omit `required_executable`, `command`, and `exit_code`. Set top-level
 `result` to `FAIL` if any MUST fails. Do not write any other control file.
 The plugin runs a deterministic finalizer after your exact PASS token; your token
 alone can never create final acceptance.
-For every required executable validation, record the exact command and exit code
-in `.opencode-v2/acceptance-report.json`. A non-zero required check is a FAIL.
-You may correct an objectively contract-contradictory check and rerun it, but
-must obtain exit code 0 before reporting PASS; never rationalize a failed result
-away after the fact.
+For every required executable validation, record the exact already-executed
+command and observed exit code in `.opencode-v2/acceptance-report.json`. A
+non-zero required check is a FAIL. Never rerun, replace, or repair executable
+evidence during final acceptance; report the durable result as-is.
 
 TEST REPORT HARD GATE:
 `.opencode-v2/TEST_REPORT.json` must exist and contain:

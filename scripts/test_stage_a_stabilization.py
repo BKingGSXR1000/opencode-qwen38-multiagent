@@ -523,6 +523,14 @@ class AcceptanceValidatorBudgetTests(unittest.TestCase):
         self.assertIn("copy that exact command and its",role)
         self.assertIn("One already-proven canonical command may be reused verbatim",role)
 
+    def test_validator_is_read_only_except_for_the_acceptance_report(self):
+        role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
+        self.assertIn("bash: deny",role)
+        self.assertIn("Final acceptance is evidence review only",role)
+        self.assertIn("Never call `bash` or any executable",role)
+        self.assertIn("Never rerun, replace, or repair executable",role)
+        self.assertNotIn("Use live `bash`",role)
+
 
 class ValidatorShadowControlTreeTests(unittest.TestCase):
     def test_validator_shadow_keeps_live_control_tree_on_read_only_lower_mount(self):
