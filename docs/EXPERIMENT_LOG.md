@@ -424,3 +424,17 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - Exact evidence showed D005-B's weak child Verify passed a manifest containing unsupported top-level fields, while the inherited canonical `.opencode-v2/bin/run-checks` correctly failed with `manifest has unknown field(s): acceptance_ids, deliverable, protocol`.
 - Split validation now forbids weakening the canonical final-test Verify when a split child owns `.opencode-v2/TEST_CHECKS.json`.
 - Full focused regression after the change: control-plane 139 PASS; state-machine 88 PASS; Stage-A stabilization 45 PASS; historical replay 6 PASS; transport-root 5 PASS; tick/driver/preflight selftests PASS.
+
+## Retained D003-B bounded recovery closure — 2026-09-25
+
+- Consolidated preflight passed read-only against the retained project before recovery.
+- The preserved claim-2 splitter response was proven byte/JSON-equivalent to its archived rejected proposal when read from the correct v1.18.31 session database.
+- Exactly one historical same-claim corrective native splitter child was dispatched. It completed, but again returned a false parent-contract-invalid assertion. The deterministic guard rejected it; claim count remained 2.
+- Deterministic exhaustion fallback from `d3d7e18` then materialized D003-B1 -> D003-B2 with no further splitter-model claim. Parent ownership and exact parent Verify were preserved.
+- D003-B1 completed READY on attempt 1 with a verified handoff.
+- D003-B2 terminal outcomes: attempt 1 sandbox-ownership-violation; attempt 2 exact Verify failed; attempt 3 sandbox-ownership-violation.
+- Attempt 3's exact sandbox violation was a write to `.opencode-v2/probes/_leaf_packet.py`, outside the child ownership set `.opencode-v2/probes/ephemeris_moons.json`, `fixtures/vectors/moons/`, plus its supervisor-authorized progress file. The sandbox correctly denied/contained it.
+- After attempt 3's owned-artifact repairs, a separate read-only diagnostic execution of the exact inherited Verify exited 0; supervisor finalization still correctly refused READY because the durable sandbox violation takes precedence.
+- Final retained projection is execution-blocked with D002-B, D003-B2, and D004 at their bounded attempt limits. No further retained recovery is authorized.
+- Final post-fallback regression: control-plane 141 PASS; state-machine 90 PASS; Stage-A stabilization 45 PASS; historical replay 6 PASS; transport-root 5 PASS; tick/driver/preflight selftests PASS.
+- This does not supersede deterministic R6 as the end-to-end success proof; it closes the historical D003-B recovery-policy question with bounded failure evidence.

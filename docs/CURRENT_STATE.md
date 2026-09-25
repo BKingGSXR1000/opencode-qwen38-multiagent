@@ -376,3 +376,45 @@ canonical Verify.
 Final regression after the fix: control-plane 139 PASS, state-machine 88 PASS,
 Stage-A stabilization 45 PASS, historical New51 replay 6 PASS, transport-root
 5 PASS, and tick/driver/preflight selftests PASS.
+
+## Final Stage-A correctness state — 2026-09-25
+
+This section supersedes earlier retained-run recovery notes above. The Stage-A
+correctness roadmap is complete; deferred performance/model/backend work remains
+outside this stabilization milestone.
+
+Retained D003-B recovery was exercised without resetting attempts or granting a
+third splitter claim. Historical claim 2 received exactly one same-claim native
+corrective child. That child again returned a false parent-contract-invalid
+assertion, which the deterministic guard rejected. With both ordinary splitter
+claims and the sole corrective turn exhausted, commit `d3d7e18` applied the
+deterministic no-more-model fallback: a progress-only D003-B1 handoff followed
+by D003-B2 owning the complete parent artifact set and inheriting the exact
+parent Verify. D003-B remained at `claim_count=2` and
+`corrective_turn_count=1`; no splitter claim 3 and no parent attempt reset
+occurred.
+
+D003-B1 reached READY on attempt 1 and produced a concrete diagnosis. D003-B2
+then consumed its finite terminal-leaf budget of three attempts. Attempt 1
+ended in a sandbox ownership violation; attempt 2 reached authoritative
+`verify-failed-1`; attempt 3 repaired the filesystem far enough that a
+read-only diagnostic execution of the exact inherited Verify exited 0, but the
+same session had already attempted an out-of-ownership helper write, so the
+supervisor correctly rejected it as `sandbox-ownership-violation`. No fourth
+attempt was created. This proves the bounded splitter-recovery policy while
+preserving the worker sandbox trust boundary.
+
+The retained historical project
+`/home/bking/AI/a2-controller-live-20260920-161347` is therefore intentionally
+not marked complete. Its final deterministic projection is
+`resume_phase=execution-blocked`, zero active workers, zero eligible leaves,
+and explicit finite blockers: D002-B `attempt_limit_reached` (2/2), D003-B2
+`attempt_limit_reached` (3/3), and D004 `attempt_limit_reached` (3/3).
+Retained D002 was never reset or replayed as a disposable test target.
+
+The final post-fallback regression sweep passed: control-plane 141 tests,
+state-machine 90 tests, Stage-A stabilization 45 tests, historical New51 replay
+6 tests, transport-root 5 tests, plus Stage-A tick/driver/preflight selftests.
+The fresh deterministic R6 run remains the end-to-end completion proof; the
+retained historical project remains audit evidence for finite failure/recovery
+semantics.

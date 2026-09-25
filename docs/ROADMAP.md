@@ -57,7 +57,7 @@ Only after D passes:
 - [x] audit D004's 3 attempts / `attempt_limit_reached` provenance without rewriting history
 - [x] determine correct existing deterministic next state: repair stale contracts and advance their producers before D004
 - [x] fix generic controller behavior: runtime repair credits, no-op repair rejection, and exact Verify-bound readiness
-- [~] progress remaining deliverables using normal Stage-A scheduling
+- [x] progress retained deliverables through normal Stage-A scheduling to a bounded terminal state; the historical run is now intentionally execution-blocked and R6 remains the separate complete success proof
   - [x] D003 splitter profile recovery is bounded, fingerprinted, and audited.
     The retained fourth claim exposed a one-tool guard/three-step interaction,
     then returned D003 to finite `splitter-failed` without changing its worker
@@ -69,7 +69,7 @@ Only after D passes:
   - [x] prove direct-context/no-tool splitter execution and exact directory
     ownership containment in an evidence-complete disposable canary. Do not
     reset attempts, replay D002, or grant D003 claim 6 without authorization.
-  - [~] D003 claim 6 proved the direct-context transport, but the model emitted
+  - [x] D003 claim 6 proved the direct-context transport, but the model emitted
     an unproven parent-contract-invalid result. `3dbf4f0` makes parent-plan
     repair deterministically verify-command-only.
   - [x] fresh current-state D003-equivalent disposable canary: bootstrap/
@@ -80,12 +80,12 @@ Only after D passes:
   - [x] authorized retained D003 claim 7 accepted the same ownership-safe
     split; D003-A completed canonically and D003-B ran through its normal
     deterministic child-worker retry/split policy without a D003 claim 8.
-  - [~] D003-B child split exhausted its normal two splitter claims: a missing
-    JSON proposal followed by a false oversized parent-contract-invalid result.
-    The guard rejected both without repair or grandchildren. A fresh disposable
-    canary proves the current local splitter can repeat false invalid-contract
-    assertions despite prompt tightening. Choose a deterministic fallback or
-    revised bounded-claim policy before any further retained recovery.
+  - [x] D003-B bounded recovery is closed: both normal splitter claims and the
+    one same-claim corrective child were exhausted without accepting a false
+    model proposal. The deterministic exhaustion fallback then materialized
+    D003-B1 -> D003-B2 without another splitter claim. D003-B1 verified its
+    handoff; D003-B2 exhausted its terminal three worker attempts, with the
+    final failure correctly contained by sandbox ownership enforcement.
   - [x] bounded corrective-child transport is live-proven: one logical claim
     permits exactly a primary plus one separately intent-bound native corrective
     splitter child, without another claim or recovery budget. The deterministic
@@ -102,7 +102,7 @@ Only after D passes:
 - [x] prove preflight cannot be bypassed by normal launcher/driver entrypoints
 - [x] validate concise terminal/block reporting
 - [x] final static/component/integration suite
-- [ ] update project memory to final proven state
+- [x] update project memory to final proven state
 
 ## G. Deferred performance work — outside correctness stabilization
 Do not mix into current work unless explicitly requested:
