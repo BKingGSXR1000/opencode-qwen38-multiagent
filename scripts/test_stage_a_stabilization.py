@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 import tempfile
 import time
@@ -406,6 +407,49 @@ class SemanticInfrastructureRetryTests(unittest.TestCase):
                     execution_id,
                     "generation four remains forbidden",
                 )
+
+    def test_terminal_acceptance_can_finalize_fresh_current_report(self):
+        ctrl = self.project / ".opencode-v2"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        report = ctrl / "acceptance-report.json"
+        report.write_text('{"protocol":"v2-acceptance-report-v1","result":"PASS","checks":[]}\n')
+        created_ms = int((time.time() - 1) * 1000)
+        intent = {
+            "action": self.action,
+            "created_at_ms": created_ms,
+        }
+
+        def fake_run(*_args, **_kwargs):
+            (ctrl / "acceptance-pass.json").write_text(
+                '{"protocol":"v2-acceptance-pass-v1","result":"PASS"}\n'
+            )
+            return subprocess.CompletedProcess([], 0, stdout="ACCEPTANCE_GATE_PASS\n")
+
+        with mock.patch.object(controller.subprocess, "run", side_effect=fake_run):
+            result = controller.finalize_terminal_acceptance_report(
+                self.project, intent
+            )
+        self.assertEqual(result["kind"], "terminal-acceptance-report-finalized")
+        self.assertEqual(len(result["report_sha256"]), 64)
+        self.assertEqual(len(result["acceptance_pass_sha256"]), 64)
+
+    def test_terminal_acceptance_refuses_report_older_than_execution(self):
+        ctrl = self.project / ".opencode-v2"
+        ctrl.mkdir(parents=True, exist_ok=True)
+        report = ctrl / "acceptance-report.json"
+        report.write_text('{"protocol":"v2-acceptance-report-v1","result":"PASS","checks":[]}\n')
+        old = time.time() - 60
+        os.utime(report, (old, old))
+        intent = {
+            "action": self.action,
+            "created_at_ms": int(time.time() * 1000),
+        }
+        with mock.patch.object(controller.subprocess, "run") as run:
+            result = controller.finalize_terminal_acceptance_report(
+                self.project, intent
+            )
+        self.assertIsNone(result)
+        run.assert_not_called()
 
 
 class DecisionStateVersionTests(unittest.TestCase):

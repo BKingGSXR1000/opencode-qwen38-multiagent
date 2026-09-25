@@ -760,6 +760,59 @@ def semantic_child_may_still_transition(
     return age < SEMANTIC_TERMINAL_GRACE_SECONDS
 
 
+def finalize_terminal_acceptance_report(project: Path, intent: dict) -> dict | None:
+    """Finalize a fresh durable PASS report after its validator is terminal.
+
+    The bounded-subagent plugin clears acceptance artifacts immediately before
+    every validator launch.  This recovery path additionally requires the
+    report mtime to post-date this exact execution intent, then delegates all
+    trust decisions to finalize-acceptance.py.  Model prose is never sufficient.
+    """
+    action = intent.get("action") if isinstance(intent, dict) else {}
+    if action != {"kind": "launch", "agent": "acceptance-validator", "mode": "final"}:
+        return None
+
+    report = project / ".opencode-v2" / "acceptance-report.json"
+    if not report.is_file() or report.is_symlink():
+        return None
+    try:
+        created_ms = int(intent.get("created_at_ms") or 0)
+        report_ms = report.stat().st_mtime_ns // 1_000_000
+    except (OSError, TypeError, ValueError):
+        return None
+    if created_ms <= 0 or report_ms < created_ms:
+        return None
+
+    finalizer = HARNESS_ROOT / "scripts" / "finalize-acceptance.py"
+    if not finalizer.is_file():
+        raise ControllerError(f"acceptance finalizer missing: {finalizer}")
+    proc = subprocess.run(
+        [sys.executable, str(finalizer), str(project)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=900,
+    )
+    if proc.returncode:
+        detail = proc.stdout.strip().replace("\n", " ")[:1600]
+        raise ControllerError(
+            "ACCEPTANCE_REPORT_FINALIZATION_FAILED "
+            + (detail or f"rc={proc.returncode}")
+        )
+
+    pass_path = project / ".opencode-v2" / "acceptance-pass.json"
+    marker = load_json(pass_path, "acceptance pass marker")
+    if marker.get("protocol") != "v2-acceptance-pass-v1" or marker.get("result") != "PASS":
+        raise ControllerError("acceptance finalizer produced an invalid pass marker")
+    report_sha = hashlib.sha256(report.read_bytes()).hexdigest()
+    pass_sha = hashlib.sha256(pass_path.read_bytes()).hexdigest()
+    return {
+        "kind": "terminal-acceptance-report-finalized",
+        "report_sha256": report_sha,
+        "acceptance_pass_sha256": pass_sha,
+    }
+
+
 def semantic_execution_slot(
     ledger: dict, state_version: str, root: str, canonical_action: dict
 ) -> tuple[int, str]:
@@ -1100,6 +1153,14 @@ def execute_first_semantic(
                 if not semantic_child_may_still_transition(
                     project, base_url, existing, evidence
                 ):
+                    finalized = finalize_terminal_acceptance_report(project, existing)
+                    if finalized:
+                        existing["terminal_acceptance_finalization"] = {
+                            **finalized,
+                            "finalized_at_ms": int(time.time() * 1000),
+                        }
+                        save_execution_ledger(project, ledger)
+                        return replay_receipt(existing, finalized)
                     raise ControllerError(
                         "SEMANTIC_CHILD_TERMINATED_WITHOUT_STATE_TRANSITION; "
                         f"execution_id={execution_id}; inspect durable guard errors "
