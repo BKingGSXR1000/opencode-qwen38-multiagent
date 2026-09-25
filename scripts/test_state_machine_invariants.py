@@ -1448,6 +1448,176 @@ class SplitStateMachineTests(unittest.TestCase):
             )
         again.assert_not_called()
 
+    def test_legacy_handoff_writer_verify_upgrade_preserves_history(self):
+        handoff_verify=supervisor.split_handoff_verify_command("D001-A")
+        child_a=dict(self.parent)
+        child_a.update({
+            "id":"D001-A","parent":"D001","split_children":[],
+            "owned_artifacts":"none","owned_artifact_paths":[],
+            "role":"probe-builder","verify_command":handoff_verify,
+            "acceptance_ids":[],"verify_deps":[],
+            "launch_deps":[],"split_depth":1,
+            "split_handoff_only":True,"split_handoff_source":"",
+            "split_reads_existing":[],"split_creates_or_updates":[],
+            "done_when":"Durable progress handoff records HANDOFF_READY, Findings, Evidence, and Next step; no project artifact is modified.",
+        })
+        old_writer_verify="test -f a.txt"
+        child_b=dict(self.parent)
+        child_b.update({
+            "id":"D001-B","parent":"D001","split_children":[],
+            "owned_artifacts":"`a.txt`, `b.txt`",
+            "owned_artifact_paths":["a.txt","b.txt"],
+            "role":"implementer","verify_command":old_writer_verify,
+            "launch_deps":["D001-A"],"split_depth":1,
+            "split_handoff_only":False,"split_handoff_source":"D001-A",
+            "split_reads_existing":[],"split_creates_or_updates":["a.txt","b.txt"],
+        })
+
+        raw=json.loads((self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text())
+        raw["leaves"]["D001"]["split_children"]=["D001-A","D001-B"]
+        raw["leaves"]["D001"]["split_depth"]=0
+        raw["leaves"]["D001-A"]=child_a
+        raw["leaves"]["D001-B"]=child_b
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(raw))
+
+        old_txn={
+            "owner":"supervisor","protocol":supervisor.SPLIT_TRANSACTION_PROTOCOL,
+            "state":"committed","parent_id":"D001","generation":1,
+            "children":["D001-A","D001-B"],
+            "child_defs":{"D001-A":child_a,"D001-B":child_b},
+            "transaction_id":"legacy-transaction",
+            "prepared_at":"2026-09-20T00:00:00Z",
+            "committed_at":"2026-09-20T00:01:00Z",
+        }
+        (self.work/"D001.split-transaction.json").write_text(json.dumps(old_txn))
+        supervisor.save_split_leaf_overlay({
+            "owner":"supervisor","protocol":"v2-split-leaf-overlay-v1",
+            "parents":{"D001":{
+                "children":["D001-A","D001-B"],
+                "child_defs":{"D001-A":child_a,"D001-B":child_b},
+                "transaction_id":"legacy-transaction",
+                "timestamp":"2026-09-20T00:00:00Z",
+            }},
+        })
+        supervisor.save_split_status(
+            "D001","parent-finalize-failed",
+            generation=1,children=["D001-A","D001-B"],
+            transaction_id="legacy-transaction",
+            parent_finalize_failures=supervisor.MAX_SPLIT_PARENT_FINALIZE_FAILURES,
+            parent_finalize_last_result="verify-failed-1",
+            reason="verify-failed-1",
+        )
+
+        attempts=supervisor.load_attempts()
+        attempts["deliverables"]["D001-A"]={
+            "automatic_limit":3,"count":1,"sessions":["sa"],
+            "failure_history":[],
+        }
+        attempts["deliverables"]["D001-B"]={
+            "automatic_limit":3,"count":3,
+            "sessions":["sb1","sb2","sb3"],
+            "failure_history":[
+                {"attempt":1,"classification":"genuine","reason":"verify-failed-1",
+                 "timestamp":"2026-09-20T01:00:00Z","source":"supervisor"},
+                {"attempt":2,"classification":"genuine","reason":"verify-failed-1",
+                 "timestamp":"2026-09-20T02:00:00Z","source":"supervisor"},
+            ],
+        }
+        supervisor.save_attempts(attempts)
+        parent_before=json.loads(json.dumps(attempts["deliverables"]["D001"]))
+        writer_before=json.loads(json.dumps(attempts["deliverables"]["D001-B"]))
+
+        checked_ok=type("Checked",(),{"returncode":0,"stdout":"","stderr":""})()
+        checked_fail=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"missing vectors"
+        })()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001-B","",old_writer_verify,checked_ok,"verified"
+        )
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","",self.parent["verify_command"],checked_fail,
+            "verify-failed-1"
+        )
+        self.assertEqual(
+            supervisor.supervisor_finalize_ready("D001-A",handoff_verify),
+            (True,"finalized"),
+        )
+        self.assertEqual(
+            supervisor.supervisor_finalize_ready("D001-B",old_writer_verify),
+            (True,"finalized"),
+        )
+
+        ok,detail=supervisor.recover_legacy_handoff_writer_verify("D001")
+        self.assertEqual(
+            (ok,detail),(True,"writer-contract-replacement-ready")
+        )
+
+        after=supervisor.load_attempts()
+        parent_after=after["deliverables"]["D001"]
+        writer_after=after["deliverables"]["D001-B"]
+        self.assertEqual(parent_after["count"],parent_before["count"])
+        self.assertEqual(parent_after["sessions"],parent_before["sessions"])
+        self.assertEqual(
+            parent_after["failure_history"],parent_before["failure_history"]
+        )
+        self.assertEqual(writer_after["count"],writer_before["count"])
+        self.assertEqual(writer_after["sessions"],writer_before["sessions"])
+        self.assertEqual(
+            writer_after["failure_history"],writer_before["failure_history"]
+        )
+        state=control_state.attempt_state(writer_after)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["plan_contract_retry_grants"],1)
+        self.assertEqual(state["allowed_attempts"],4)
+
+        self.assertTrue((self.work/"D001-A.ready").exists())
+        self.assertFalse((self.work/"D001-B.ready").exists())
+        evidence=json.loads(
+            (self.work/"D001-B.verify-evidence.json").read_text()
+        )
+        self.assertEqual(evidence["latest"]["command"],old_writer_verify)
+        self.assertEqual(evidence["latest"]["result"],"verified")
+
+        txn=json.loads((self.work/"D001.split-transaction.json").read_text())
+        self.assertEqual(txn["generation"],2)
+        self.assertEqual(txn["replaces_transaction_id"],"legacy-transaction")
+        self.assertEqual(
+            txn["child_defs"]["D001-B"]["verify_command"],
+            self.parent["verify_command"],
+        )
+        self.assertNotEqual(txn["transaction_id"],"legacy-transaction")
+
+        guard=json.loads(
+            (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text()
+        )
+        self.assertEqual(
+            guard["leaves"]["D001-B"]["verify_command"],
+            self.parent["verify_command"],
+        )
+        overlay=supervisor.load_split_leaf_overlay()["parents"]["D001"]
+        self.assertEqual(
+            overlay["child_defs"]["D001-B"]["verify_command"],
+            self.parent["verify_command"],
+        )
+        scope=(self.work/"D001-B.scope.md").read_text()
+        self.assertIn(
+            f"Child Verify command: `{self.parent['verify_command']}`",
+            scope,
+        )
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["state"],"accepted")
+        self.assertEqual(status["generation"],2)
+        self.assertEqual(status["parent_finalize_failures"],0)
+
+        recovery=parent_after[
+            "legacy_handoff_writer_verify_upgrades"
+        ][-1]
+        self.assertEqual(recovery["state"],"committed")
+        self.assertEqual(
+            recovery["prior_transaction_id"],"legacy-transaction"
+        )
+        self.assertTrue((self.project/recovery["archive"]).is_file())
+
     def test_stale_split_contract_retires_projection_but_preserves_history(self):
         child_a=dict(self.parent)
         child_a.update({

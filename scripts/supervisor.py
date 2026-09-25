@@ -902,9 +902,11 @@ def save_split_status(did, state, **detail):
         "owner":"supervisor",
         "parent_id":did,
         "state":state,
-        "generation":generation,
         "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
         **keep,
+        # An explicit transition generation must override the prior preserved
+        # generation.  The old field order silently kept the stale value.
+        "generation":generation,
         **detail,
     }
     atomic_write_json(split_status_path(did),payload)
@@ -3416,10 +3418,16 @@ def recover_sandbox_wrapper_history_poison(did):
         ).read_text(errors="replace")
     except OSError:
         return False,"wrapper-history-recovery-current-plugin-missing"
-    if not (
+    legacy_history_fix=(
         "captureOriginalSandboxCommand(event, output);" in plugin_text
         and "restoreOriginalSandboxCommand(event, output);" in plugin_text
-    ):
+    )
+    transform_history_fix=all(marker in plugin_text for marker in (
+        'function unwrapPersistedSandboxCommand(command, directory)',
+        '"experimental.chat.messages.transform": async (_input, output) => {',
+        'sanitizeSandboxHistoryForModel(output?.messages, directory);',
+    ))
+    if not (legacy_history_fix or transform_history_fix):
         return False,"wrapper-history-recovery-current-plugin-unfixed"
 
     reason=(
@@ -3619,6 +3627,329 @@ def recover_historical_parent_contract_repair_resolution(did):
         f"{did} key={structured_key} attempts={','.join(map(str,reclassified))}",
     )
     return True,"resolved"
+
+
+LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL=(
+    "v2-legacy-handoff-writer-verify-upgrade-v1"
+)
+
+
+def recover_legacy_handoff_writer_verify(parent):
+    """Upgrade one pre-invariant handoff writer to the exact parent Verify.
+
+    This is a contract migration, not a semantic retry. The old committed split
+    transaction and READY evidence are archived/audited, the writer's READY is
+    revoked, and the normal plan-contract revision credit authorizes exactly one
+    replacement attempt under the stronger Verify.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+
+    project=Path(PROJECT)
+    work=project/".opencode-v2"/"work"
+    guard_path=project/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
+
+    with splitter_state_lock(parent):
+        with dispatch_lock:
+            with attempt_lock():
+                status=load_split_status(parent)
+                if status.get("state")!="parent-finalize-failed":
+                    return False,"legacy-writer-upgrade-requires-parent-finalize-failed"
+                if int(status.get("parent_finalize_failures") or 0)<MAX_SPLIT_PARENT_FINALIZE_FAILURES:
+                    return False,"legacy-writer-upgrade-parent-finalize-not-exhausted"
+
+                txn=load_split_transaction(parent)
+                if (
+                    txn.get("state")!="committed"
+                    or txn.get("parent_id")!=parent
+                    or not isinstance(txn.get("child_defs"),dict)
+                    or not isinstance(txn.get("children"),list)
+                    or len(txn.get("children") or [])!=2
+                ):
+                    return False,"legacy-writer-upgrade-transaction-invalid"
+                children=list(txn["children"])
+                first_id,writer_id=children
+                child_defs=txn["child_defs"]
+                first=child_defs.get(first_id)
+                writer=child_defs.get(writer_id)
+                if not isinstance(first,dict) or not isinstance(writer,dict):
+                    return False,"legacy-writer-upgrade-child-definition-missing"
+                if not first.get("split_handoff_only"):
+                    return False,"legacy-writer-upgrade-first-child-not-handoff"
+                if writer.get("split_handoff_only"):
+                    return False,"legacy-writer-upgrade-writer-is-handoff"
+                if writer.get("split_handoff_source")!=first_id:
+                    return False,"legacy-writer-upgrade-handoff-source-mismatch"
+                if first.get("owned_artifact_paths"):
+                    return False,"legacy-writer-upgrade-handoff-has-ownership"
+
+                raw_manifest=load_json_object(
+                    guard_path,label="implementation manifest"
+                )
+                leaves=raw_manifest.get("leaves")
+                if not isinstance(leaves,dict):
+                    return False,"legacy-writer-upgrade-manifest-invalid"
+                parent_leaf=leaves.get(parent)
+                live_first=leaves.get(first_id)
+                live_writer=leaves.get(writer_id)
+                if not all(isinstance(x,dict) for x in (
+                    parent_leaf,live_first,live_writer
+                )):
+                    return False,"legacy-writer-upgrade-live-leaf-missing"
+                if list(parent_leaf.get("split_children") or [])!=children:
+                    return False,"legacy-writer-upgrade-active-children-mismatch"
+                if live_first!=first or live_writer!=writer:
+                    return False,"legacy-writer-upgrade-live-child-drift"
+
+                parent_owned=set(owned_artifact_paths(parent_leaf))
+                writer_owned=set(owned_artifact_paths(writer))
+                if not parent_owned or writer_owned!=parent_owned:
+                    return False,"legacy-writer-upgrade-writer-does-not-own-parent"
+                parent_verify=str(parent_leaf.get("verify_command") or "").strip()
+                old_verify=str(writer.get("verify_command") or "").strip()
+                if not parent_verify:
+                    return False,"legacy-writer-upgrade-parent-verify-missing"
+                if old_verify==parent_verify:
+                    return False,"legacy-writer-upgrade-already-current"
+
+                if not ready_info(first_id):
+                    return False,"legacy-writer-upgrade-handoff-not-ready"
+                writer_ready=ready_info(writer_id)
+                if not writer_ready:
+                    return False,"legacy-writer-upgrade-writer-not-ready"
+                writer_evidence=load_supervisor_verify_evidence(writer_id)
+                writer_latest=writer_evidence.get("latest")
+                if not (
+                    isinstance(writer_latest,dict)
+                    and writer_latest.get("result")=="verified"
+                    and writer_latest.get("executed") is True
+                    and int(writer_latest.get("exit_code") or 0)==0
+                    and str(writer_latest.get("command") or "")==old_verify
+                ):
+                    return False,"legacy-writer-upgrade-writer-ready-evidence-mismatch"
+
+                parent_evidence=load_supervisor_verify_evidence(parent)
+                parent_latest=parent_evidence.get("latest")
+                if not (
+                    isinstance(parent_latest,dict)
+                    and parent_latest.get("result")=="verify-failed-1"
+                    and parent_latest.get("executed") is True
+                    and int(parent_latest.get("exit_code") or 0)==1
+                    and str(parent_latest.get("command") or "")==parent_verify
+                ):
+                    return False,"legacy-writer-upgrade-parent-failure-evidence-mismatch"
+
+                overlay=load_split_leaf_overlay()
+                parents=overlay.get("parents")
+                overlay_entry=parents.get(parent) if isinstance(parents,dict) else None
+                if (
+                    not isinstance(overlay_entry,dict)
+                    or overlay_entry.get("transaction_id")!=txn.get("transaction_id")
+                    or overlay_entry.get("child_defs")!=child_defs
+                    or list(overlay_entry.get("children") or [])!=children
+                ):
+                    return False,"legacy-writer-upgrade-overlay-mismatch"
+
+                attempts=load_attempts()
+                entries=attempts.get("deliverables")
+                writer_entry=entries.get(writer_id) if isinstance(entries,dict) else None
+                parent_entry=entries.get(parent) if isinstance(entries,dict) else None
+                if not isinstance(writer_entry,dict) or not isinstance(parent_entry,dict):
+                    return False,"legacy-writer-upgrade-attempt-ledger-missing"
+                writer_state=attempt_state(writer_entry)
+                if not writer_state.get("valid"):
+                    return False,"legacy-writer-upgrade-writer-ledger-invalid"
+                writer_count=int(writer_entry.get("count") or 0)
+                if writer_count<1:
+                    return False,"legacy-writer-upgrade-writer-attempt-missing"
+
+                recovery_rows=parent_entry.setdefault(
+                    "legacy_handoff_writer_verify_upgrades",[]
+                )
+                if not isinstance(recovery_rows,list):
+                    return False,"legacy-writer-upgrade-history-invalid"
+                if recovery_rows:
+                    return False,"legacy-writer-upgrade-already-used"
+
+                old_sha=hashlib.sha256(old_verify.encode()).hexdigest()
+                new_sha=hashlib.sha256(parent_verify.encode()).hexdigest()
+                revision_rows=writer_entry.setdefault("plan_contract_revisions",[])
+                if not isinstance(revision_rows,list):
+                    return False,"legacy-writer-upgrade-revision-history-invalid"
+                if any(
+                    isinstance(row,dict)
+                    and row.get("source")=="supervisor-plan-contract-revision"
+                    and int(row.get("attempt") or 0)==writer_count
+                    and row.get("current_verify_sha256")==new_sha
+                    for row in revision_rows
+                ):
+                    return False,"legacy-writer-upgrade-credit-already-present"
+
+                archive=_archive_split_state_for_contract_repair(parent)
+                if archive is None:
+                    return False,"legacy-writer-upgrade-archive-missing"
+
+                ready_path=work/f"{writer_id}.ready"
+                try:
+                    prior_ready_text=ready_path.read_text(errors="replace")
+                except OSError:
+                    return False,"legacy-writer-upgrade-ready-unreadable"
+
+                upgraded_writer=dict(writer)
+                upgraded_writer["verify_command"]=parent_verify
+                upgraded_writer["done_when"]=str(
+                    parent_leaf.get("done_when") or writer.get("done_when") or ""
+                )
+                new_child_defs=dict(child_defs)
+                new_child_defs[writer_id]=upgraded_writer
+                new_generation=int(txn.get("generation") or 1)+1
+                new_txn_id=split_transaction_id(
+                    parent,new_generation,new_child_defs
+                )
+                now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+
+                revision_rows.append({
+                    "attempt":writer_count,
+                    "source":"supervisor-plan-contract-revision",
+                    "previous_verify_sha256":old_sha,
+                    "current_verify_sha256":new_sha,
+                    "reason":"legacy-handoff-writer-verify-upgrade",
+                    "timestamp":now,
+                })
+                projected=attempt_state(writer_entry)
+                if (
+                    not projected.get("valid")
+                    or int(projected.get("plan_contract_retry_grants") or 0)<1
+                    or int(projected.get("allowed_attempts") or 0)<=writer_count
+                ):
+                    return False,"legacy-writer-upgrade-replacement-credit-invalid"
+
+                recovery={
+                    "protocol":LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL,
+                    "state":"prepared",
+                    "prior_transaction_id":txn.get("transaction_id"),
+                    "replacement_transaction_id":new_txn_id,
+                    "prior_generation":int(txn.get("generation") or 1),
+                    "replacement_generation":new_generation,
+                    "writer":writer_id,
+                    "writer_attempt":writer_count,
+                    "previous_verify_sha256":old_sha,
+                    "current_verify_sha256":new_sha,
+                    "writer_ready_text":prior_ready_text,
+                    "archive":str(archive.relative_to(project)),
+                    "prepared_at":now,
+                }
+                recovery_rows.append(recovery)
+                save_attempts(attempts)
+
+                leaves[writer_id]=upgraded_writer
+                raw_manifest["leaves"]=leaves
+                atomic_write_json(guard_path,raw_manifest)
+
+                parents[parent]={
+                    "children":children,
+                    "child_defs":new_child_defs,
+                    "transaction_id":new_txn_id,
+                    "timestamp":now,
+                }
+                overlay["parents"]=parents
+                save_split_leaf_overlay(overlay)
+
+                replacement_txn={
+                    "owner":"supervisor",
+                    "protocol":SPLIT_TRANSACTION_PROTOCOL,
+                    "state":"committed",
+                    "parent_id":parent,
+                    "generation":new_generation,
+                    "children":children,
+                    "child_defs":new_child_defs,
+                    "transaction_id":new_txn_id,
+                    "prepared_at":now,
+                    "committed_at":now,
+                    "replaces_transaction_id":txn.get("transaction_id"),
+                    "replacement_reason":"legacy-handoff-writer-verify-upgrade",
+                }
+                atomic_write_json(split_transaction_path(parent),replacement_txn)
+
+                atomic_write_text(
+                    work/f"{writer_id}.scope.md",
+                    render_split_child_scope(
+                        writer_id,parent,upgraded_writer,parent_leaf
+                    ),
+                )
+                ready_path.unlink(missing_ok=True)
+
+                history_path=split_history_path()
+                history=load_json_object(
+                    history_path,
+                    default_missing={
+                        "owner":"supervisor",
+                        "protocol":SPLIT_PROPOSAL_PROTOCOL,
+                        "splits":[],
+                    },
+                    label="split history",
+                )
+                splits=history.get("splits")
+                if not isinstance(splits,list):
+                    raise StateCorruptionError("split history splits must be an array")
+                splits.append({
+                    "parent":parent,
+                    "children":children,
+                    "transaction_id":new_txn_id,
+                    "replaces_transaction_id":txn.get("transaction_id"),
+                    "timestamp":now,
+                    "source":"supervisor-legacy-handoff-writer-verify-upgrade",
+                })
+                history["splits"]=splits
+                atomic_write_json(history_path,history)
+
+                save_split_status(
+                    parent,"accepted",
+                    generation=new_generation,
+                    children=children,
+                    transaction_id=new_txn_id,
+                    parent_finalize_failures=0,
+                    parent_finalize_last_result="",
+                    reason="",
+                    legacy_handoff_writer_verify_upgrade={
+                        "protocol":LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL,
+                        "writer":writer_id,
+                        "previous_verify_sha256":old_sha,
+                        "current_verify_sha256":new_sha,
+                        "replacement_transaction_id":new_txn_id,
+                    },
+                    lease_until_epoch=0,
+                )
+                _split_parent_finalize_next.pop(parent,None)
+
+                attempts=load_attempts()
+                parent_entry=(attempts.get("deliverables") or {}).get(parent)
+                rows=(
+                    parent_entry.get("legacy_handoff_writer_verify_upgrades")
+                    if isinstance(parent_entry,dict) else None
+                )
+                target=rows[-1] if isinstance(rows,list) and rows else None
+                if not isinstance(target,dict):
+                    raise StateCorruptionError(
+                        f"{parent} legacy writer upgrade record disappeared"
+                    )
+                target["state"]="committed"
+                target["committed_at"]=time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                )
+                save_attempts(attempts)
+
+    log(
+        f"LEGACY_HANDOFF_WRITER_VERIFY_UPGRADED parent={parent} "
+        f"writer={writer_id} old_transaction={txn.get('transaction_id')} "
+        f"new_transaction={new_txn_id}"
+    )
+    csv(
+        "LEGACY_HANDOFF_WRITER_VERIFY_UPGRADED","", "supervisor",
+        f"{parent} writer={writer_id} old={txn.get('transaction_id')} "
+        f"new={new_txn_id}",
+    )
+    return True,"writer-contract-replacement-ready"
 
 
 def recover_stale_split_parent_contract(parent):
@@ -9603,7 +9934,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -9945,6 +10276,27 @@ def main():
             f"HISTORICAL_PARENT_CONTRACT_REPAIR_RESOLUTION_ALLOW "
             f"deliverable="
             f"{args.recover_historical_parent_contract_repair_resolution} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_legacy_handoff_writer_verify:
+        if unknown or not args.project:
+            raise SystemExit(
+                "legacy handoff writer Verify recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_legacy_handoff_writer_verify(
+            args.recover_legacy_handoff_writer_verify
+        )
+        if not ok:
+            raise SystemExit(
+                f"LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_DENY "
+                f"parent={args.recover_legacy_handoff_writer_verify} "
+                f"reason={detail}"
+            )
+        print(
+            f"LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_ALLOW "
+            f"parent={args.recover_legacy_handoff_writer_verify} "
             f"reason={detail}"
         )
         return
