@@ -290,11 +290,14 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
         for did, leaf in manifest_leaves.items()
         if isinstance(leaf, dict)
     }
-    version = hashlib.sha256(source_rendered.encode("utf-8")).hexdigest()[:16]
     source_bytes = len(source_rendered.encode("utf-8"))
+    # state_version is finalized only after the complete decision projection is
+    # built. Some action-driving inputs (repair packets, guard errors, reference
+    # validation gates) live outside control-status.json, so hashing only the
+    # rendered snapshot can alias two different scheduler decisions.
     base = {
         "protocol": QUERY_PROTOCOL,
-        "state_version": version,
+        "state_version": "",
         "source_bytes": source_bytes,
         "state_error": bool(snapshot.get("state_error")),
         "resume_phase": str(snapshot.get("resume_phase") or "execution-blocked"),
@@ -407,6 +410,14 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
     if snapshot.get("state_error"):
         decision["state_error_type"] = str(snapshot.get("state_error_type") or "")
         decision["state_error_message"] = str(snapshot.get("state_error_message") or "")[:500]
+
+    version_material=dict(decision)
+    version_material.pop("state_version",None)
+    version=hashlib.sha256(
+        json.dumps(version_material,sort_keys=True,separators=(",",":")).encode("utf-8")
+    ).hexdigest()[:16]
+    decision["state_version"]=version
+    base["state_version"]=version
 
     compact = json.dumps(decision, sort_keys=True, separators=(",", ":"))
     if len(compact) > MAX_DECISION_CHARS:

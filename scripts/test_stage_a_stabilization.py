@@ -12,6 +12,7 @@ from unittest import mock
 from pathlib import Path
 
 import control_state
+import control_query_views
 import deterministic_dispatch
 import stage_a_controller as controller
 import stage_a_path_permissions as path_permissions
@@ -153,6 +154,51 @@ class TerminalSemanticChildTests(unittest.TestCase):
         controller.session_is_active = lambda project, base_url, sid: False
         receipt = controller.execute_first_semantic(self.project, "http://127.0.0.1:1", self.result, self.root)
         self.assertTrue(receipt["replay_suppressed"])
+
+
+class DecisionStateVersionTests(unittest.TestCase):
+    def base_snapshot(self):
+        return {
+            "state_error":False,
+            "resume_phase":"acceptance",
+            "acceptance":{"complete":False},
+            "reference":{"policy":"internal"},
+            "plan":{"complete":False,"blocked":False,"planner_failures":0},
+            "scheduler":{"max_concurrent_workers":3,"active_workers":0,"reserved_workers":0,"available_worker_slots":3,"active_deliverables":[],"error":""},
+            "leaves":{},
+            "execution_blockers":[],
+            "tests":{"complete":False},
+            "acceptance_validation":{"complete":False},
+        }
+
+    def test_acceptance_guard_error_changes_decision_version_with_same_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            (project/".opencode-v2").mkdir()
+            snapshot=self.base_snapshot()
+            rendered=json.dumps(snapshot,sort_keys=True)
+            first,_=control_query_views.build_query_views(snapshot,{},rendered,project=project)
+            (project/".opencode-v2/ACCEPTANCE.guard-errors.txt").write_text("repair me\n")
+            second,_=control_query_views.build_query_views(snapshot,{},rendered,project=project)
+            self.assertEqual(first["decision.json"]["acceptance"]["next_action"],"fresh")
+            self.assertEqual(second["decision.json"]["acceptance"]["next_action"],"repair")
+            self.assertNotEqual(first["decision.json"]["state_version"],second["decision.json"]["state_version"])
+
+    def test_structured_plan_presence_changes_decision_version_with_same_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            ctrl=project/".opencode-v2"
+            ctrl.mkdir()
+            snapshot=self.base_snapshot()
+            snapshot["resume_phase"]="implementation-plan"
+            snapshot["acceptance"]["complete"]=True
+            rendered=json.dumps(snapshot,sort_keys=True)
+            first,_=control_query_views.build_query_views(snapshot,{},rendered,project=project)
+            (ctrl/"IMPLEMENTATION_PLAN.structured.json").write_text("{}\n")
+            second,_=control_query_views.build_query_views(snapshot,{},rendered,project=project)
+            self.assertEqual(first["decision.json"]["plan"]["next_action"],"fresh")
+            self.assertEqual(second["decision.json"]["plan"]["next_action"],"continue")
+            self.assertNotEqual(first["decision.json"]["state_version"],second["decision.json"]["state_version"])
 
 
 class ControllerShadowCoherenceTests(unittest.TestCase):
