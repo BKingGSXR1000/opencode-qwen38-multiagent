@@ -1014,6 +1014,43 @@ class SplitStateMachineTests(unittest.TestCase):
         self.assertEqual(expected,["D001-A","D001-B"])
         self.assertEqual(children[1]["verify_command"],supervisor.RUN_CHECKS_COMMAND)
 
+    def test_progress_handoff_writer_preserves_exact_parent_verify(self):
+        proposals=[
+            {
+                "scope":"diagnose exact failed parent verify",
+                "owned_artifacts":"none",
+                "verify_command":supervisor.SPLIT_HANDOFF_VERIFY_SENTINEL,
+                "role":"probe-builder",
+                "depends_on_sibling":"",
+                "done_when":"handoff ready",
+                "reads_existing":[],
+                "creates_or_updates":[],
+            },
+            {
+                "scope":"repair all parent artifacts",
+                "owned_artifacts":"`a.txt`, `b.txt`",
+                "verify_command":"test -f a.txt",
+                "role":"implementer",
+                "depends_on_sibling":"first",
+                "done_when":"both files are valid",
+                "reads_existing":[],
+                "creates_or_updates":["a.txt","b.txt"],
+            },
+        ]
+        with self.assertRaisesRegex(
+            ValueError,
+            "writer after progress handoff must preserve exact parent Verify",
+        ):
+            supervisor.validate_split_proposal("D001",proposals,request={})
+        proposals[1]["verify_command"]=self.parent["verify_command"]
+        expected,children=supervisor.validate_split_proposal(
+            "D001",proposals,request={}
+        )
+        self.assertEqual(expected,["D001-A","D001-B"])
+        self.assertEqual(
+            children[1]["verify_command"],self.parent["verify_command"]
+        )
+
     def test_exhausted_splitter_uses_deterministic_probe_writer_fallback(self):
         checked=type("Checked",(),{
             "returncode":1,"stdout":"","stderr":"missing b.txt\n"
@@ -1603,7 +1640,7 @@ class SplitStateMachineTests(unittest.TestCase):
             {
                 "scope":"write the validated moon fixture outputs",
                 "owned_artifacts":"`.opencode-v2/probes/moons.json`, `fixtures/vectors/moons/`",
-                "verify_command":"test -d fixtures/vectors/moons",
+                "verify_command":leaf["verify_command"],
                 "role":"implementer","depends_on_sibling":"first",
                 "done_when":"the fixture directory contains the required records",
                 "reads_existing":[".opencode-v2/probes/moons.json","fixtures/vectors/moons/"],

@@ -2109,6 +2109,12 @@ def validate_split_proposal(parent, proposals, request=None):
             raise ValueError("writer after progress handoff must depend on first child")
         if second["owned"] != parent_owned:
             raise ValueError("writer after progress handoff must own all unfinished parent artifacts")
+        parent_verify=str(leaf.get("verify_command") or "").strip()
+        writer_verify=str(children[1].get("verify_command") or "").strip()
+        if not parent_verify or writer_verify!=parent_verify:
+            raise ValueError(
+                "writer after progress handoff must preserve exact parent Verify"
+            )
         children[1]["split_handoff_source"]=expected[0]
     elif read_only:
         # The only non-shrinking shape is writer -> tester. Keep it solely for
