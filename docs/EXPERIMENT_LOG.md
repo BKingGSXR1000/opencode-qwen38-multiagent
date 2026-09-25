@@ -406,3 +406,12 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - The technical root materialized exactly two native children total: the primary and one corrective child.
 - Final split status reached `accepted` with `corrective_dispatch_state=native-child-completed`; no third child or synthetic continuation was observed.
 - Canary emitted `D003_CORRECTIVE_CANARY_PASS` and exited 0. This closes the prior HTTP-204-without-child ambiguity without authorizing any retained D003-B replay.
+
+## Evidence preservation and entrypoint closure — 2026-09-25
+
+- Retained project `/home/bking/AI/a2-controller-live-20260920-161347` was audited read-only. D002 still has exactly two historical attempts/sessions and both genuine failure records; no D002 mutation or disposable replay was performed.
+- D002 exact Verify evidence remains durable, including the attempt-2 failed command/exit and later split-parent verification.
+- Found and fixed a generic evidence defect: `persist_supervisor_verify_evidence` previously replaced an older row sharing the same attempt/session and truncated history to six entries. Verify evidence is now append-only; a fail then pass for the same attempt/session preserves both exact rows.
+- State-machine regression suite passes 85 tests with the new preservation test.
+- Stage-A stabilization now includes explicit regressions proving normal launcher/tick/driver entrypoints require consolidated preflight proof and that a failed proof prevents tick execution.
+- Driver terminal/block output is behavior-tested: identical stable blocked state prints once and exits 2 after three observations; complete prints one compact event and exits 0. Stage-A stabilization passes 44 tests.

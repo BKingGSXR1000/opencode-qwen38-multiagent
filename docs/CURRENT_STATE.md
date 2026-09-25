@@ -344,3 +344,11 @@ set before infrastructure orphan classification. Final focused regression
 state: control-plane 126 tests PASS, state-machine 79 PASS, Stage-A
 stabilization 41 PASS, historical New51 replay 6 PASS over 121 frozen decision
 cases, and transport-root 5 PASS.
+
+## Evidence / entrypoint invariants — 2026-09-25
+
+Exact supervisor Verify history is append-only. Re-running Verify for the same attempt/session can no longer overwrite an earlier failed result, and the historical evidence list is no longer truncated to six rows. The state-machine suite is 85/85 PASS.
+
+Canonical retained D002 remains read-only historical evidence: exactly two attempts, two genuine failure records, and its exact Verify evidence were re-audited without mutation. Disposable validation continues on separate fresh projects.
+
+Normal Stage-A launcher, tick, and driver entrypoints are regression-locked behind consolidated preflight proof. A failed proof prevents any tick execution. Driver terminal reporting is also regression-locked to compact deduplicated events: complete exits 0; a stable blocked state is observed three times, printed once, and exits 2.

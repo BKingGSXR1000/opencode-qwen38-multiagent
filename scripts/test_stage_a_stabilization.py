@@ -2,6 +2,9 @@
 """Isolated regression tests for the Stage-A stabilization boundary."""
 from __future__ import annotations
 
+import contextlib
+import importlib.util
+import io
 import json
 import hashlib
 import os
@@ -30,6 +33,84 @@ class LauncherReadinessTimeoutTests(unittest.TestCase):
         text = Path(__file__).with_name("start-stage-a-run.sh").read_text()
         self.assertIn("--connect-timeout 1 --max-time 2", text)
         self.assertIn('http_status(){', text)
+
+    def test_normal_entrypoints_require_consolidated_preflight_proof(self):
+        scripts = Path(__file__).resolve().parent
+        launcher = (scripts / "start-stage-a-run.sh").read_text()
+        tick = (scripts / "run-stage-a-tick.py").read_text()
+        driver = (scripts / "drive-stage-a-run.py").read_text()
+
+        first_preflight = launcher.index('python3 "$ROOT/scripts/stage_a_preflight.py"')
+        bootstrap = launcher.index('python3 "$ROOT/scripts/bootstrap-stage-a-project.py"')
+        second_preflight = launcher.index(
+            'python3 "$ROOT/scripts/stage_a_preflight.py"', first_preflight + 1
+        )
+        driver_exec = launcher.index('exec python3 "$ROOT/scripts/drive-stage-a-run.py"')
+        self.assertLess(first_preflight, bootstrap)
+        self.assertLess(second_preflight, driver_exec)
+        self.assertIn('--write-proof "$PREFLIGHT_PROOF"', launcher)
+        self.assertIn('--preflight-proof "$PREFLIGHT_PROOF"', launcher)
+        self.assertIn("ns.preflight_proof is None", tick)
+        self.assertIn("preflight.verify_proof(", tick)
+        self.assertIn("ns.preflight_proof is None", driver)
+        self.assertIn("preflight.verify_proof(proof, project, base_url, root_session)", driver)
+
+
+class DriverReportingTests(unittest.TestCase):
+    def load_driver(self):
+        path = Path(__file__).with_name("drive-stage-a-run.py")
+        spec = importlib.util.spec_from_file_location("stage_a_driver_test", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_driver_cannot_execute_tick_when_preflight_proof_fails(self):
+        driver = self.load_driver()
+        with mock.patch.object(
+            driver.preflight, "verify_proof", side_effect=driver.preflight.PreflightError("bad proof")
+        ), mock.patch.object(driver.tick, "execute_one") as execute:
+            with self.assertRaises(driver.preflight.PreflightError):
+                driver.drive(Path("/tmp/project"), "http://127.0.0.1:1", "root", Path("/tmp/proof"), 0.01, 0)
+        execute.assert_not_called()
+
+    def test_terminal_and_blocked_reporting_is_compact_and_deduplicated(self):
+        driver = self.load_driver()
+        complete = {
+            "outcome": "no-dispatch",
+            "state_version": "complete-state",
+            "actions": [{"kind": "complete"}],
+        }
+        blocked = {
+            "outcome": "no-dispatch",
+            "state_version": "blocked-state",
+            "actions": [{"kind": "blocked", "reason": "attempt_limit_reached"}],
+        }
+
+        out = io.StringIO()
+        with mock.patch.object(driver.preflight, "verify_proof"), mock.patch.object(
+            driver.tick, "execute_one", return_value=complete
+        ), mock.patch.object(driver.time, "sleep"), contextlib.redirect_stdout(out):
+            self.assertEqual(
+                driver.drive(Path("/tmp/project"), "http://127.0.0.1:1", "root", Path("/tmp/proof"), 0.01, 0),
+                0,
+            )
+        lines = [line for line in out.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {"event": "no-dispatch", "actions": [{"kind": "complete"}]})
+
+        out = io.StringIO()
+        with mock.patch.object(driver.preflight, "verify_proof"), mock.patch.object(
+            driver.tick, "execute_one", side_effect=[blocked, blocked, blocked]
+        ), mock.patch.object(driver.time, "sleep"), contextlib.redirect_stdout(out):
+            self.assertEqual(
+                driver.drive(Path("/tmp/project"), "http://127.0.0.1:1", "root", Path("/tmp/proof"), 0.01, 0),
+                2,
+            )
+        lines = [line for line in out.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0]), {"event": "no-dispatch", "actions": blocked["actions"]})
 
 
 class PlannerContractTests(unittest.TestCase):

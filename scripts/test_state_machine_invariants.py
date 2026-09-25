@@ -695,6 +695,25 @@ class VerificationSemanticsTests(unittest.TestCase):
         self.assertEqual(detail,"verify-failed-1")
         self.assertFalse(control_state.ready_info(self.project,"D001"))
 
+    def test_verify_evidence_preserves_fail_then_pass_for_same_attempt_session(self):
+        command=self.leaves["D001"]["verify_command"]
+        failed=type("Checked",(),{"returncode":1,"stdout":"","stderr":"first failure\n"})()
+        passed=type("Checked",(),{"returncode":0,"stdout":"later pass\n","stderr":""})()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","s1",command,failed,"verify-failed-1"
+        )
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","s1",command,passed,"verified"
+        )
+        evidence=supervisor.load_supervisor_verify_evidence("D001")
+        self.assertEqual(
+            [(row["attempt"],row["session"],row["result"],row["exit_code"])
+             for row in evidence["entries"]],
+            [(1,"s1","verify-failed-1",1),(1,"s1","verified",0)],
+        )
+        self.assertEqual(evidence["entries"][0]["stderr"],"first failure\n")
+        self.assertEqual(evidence["latest"]["stdout"],"later pass\n")
+
     def test_masking_verify_command_is_rejected_before_execution(self):
         errors=leaf_contract.validate_verify_command("test -f missing || true")
         self.assertTrue(any("can mask a failed check" in e for e in errors),errors)

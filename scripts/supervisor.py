@@ -3946,16 +3946,9 @@ def persist_supervisor_verify_evidence(did,sid,command,checked,detail,error=""):
         "error":str(error or "")[:1000],
     }
     data=load_supervisor_verify_evidence(did)
-    entries=[
-        row for row in data.get("entries",[])
-        if not (
-            isinstance(row,dict)
-            and int(row.get("attempt") or 0)==item["attempt"]
-            and str(row.get("session") or "")==item["session"]
-        )
-    ]
+    entries=list(data.get("entries",[]))
     entries.append(item)
-    data["entries"]=entries[-6:]
+    data["entries"]=entries
     data["latest"]=item
     atomic_write_json(verify_evidence_path(did),data)
     return item
