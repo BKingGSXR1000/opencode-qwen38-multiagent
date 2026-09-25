@@ -11,7 +11,6 @@ const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
 const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
 const deterministicTransportProbeRoots = new Set();
 const deterministicTransportToolProbeCalls = new Set();
-const originalSandboxCommands = new Map();
 const DETERMINISTIC_TRANSPORT_TOOL_TARGET = ".opencode-v2/transport-tool-target.txt";
 
 function isDeterministicTransportToolRead(args) {
@@ -78,30 +77,59 @@ function hookCallID(event) {
   return String(event?.callID || event?.callId || event?.id || "");
 }
 
-function sandboxCommandKey(event) {
-  const sessionID = hookSessionID(event);
-  const callID = hookCallID(event);
-  return sessionID && callID ? `${sessionID}:${callID}` : "";
+function regexEscape(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function captureOriginalSandboxCommand(event, output) {
-  const tool = String(event?.tool || "");
-  if (tool !== "bash" && tool !== "shell") return;
-  const args = hookArgs(event, output);
-  if (typeof args?.command !== "string") return;
-  const key = sandboxCommandKey(event);
-  if (key) originalSandboxCommands.set(key, args.command);
-}
-
-function restoreOriginalSandboxCommand(event, output) {
-  const key = sandboxCommandKey(event);
-  if (!key || !originalSandboxCommands.has(key)) return;
-  const original = originalSandboxCommands.get(key);
-  originalSandboxCommands.delete(key);
-  const args = hookArgs(event, output);
-  if (args && typeof args === "object") {
-    args.command = original;
+function unwrapPersistedSandboxCommand(command, directory) {
+  if (typeof command !== "string" || typeof directory !== "string") return command;
+  if (directory.includes("'") || WORKER_SANDBOX.includes("'")) return command;
+  const pattern = new RegExp(
+    "^'python3' '" + regexEscape(WORKER_SANDBOX) +
+    "' 'run-bash' '--project' '" + regexEscape(directory) +
+    "' '--session' '[^']+' '--agent' '[^']*' '--command-b64' " +
+    "'([A-Za-z0-9+/=]+)'$"
+  );
+  const match = command.match(pattern);
+  if (!match) return command;
+  try {
+    const decoded = Buffer.from(match[1], "base64");
+    const roundTrip = decoded.toString("base64").replace(/=+$/, "");
+    if (roundTrip !== match[1].replace(/=+$/, "")) return command;
+    return decoded.toString("utf8");
+  } catch {
+    return command;
   }
+}
+
+function sanitizeSandboxHistoryForModel(messages, directory) {
+  let changed = 0;
+  for (const message of messages || []) {
+    for (const part of message?.parts || []) {
+      if (part?.type !== "tool" || !["bash", "shell"].includes(String(part?.tool || ""))) continue;
+      const state = part?.state;
+      if (!state || typeof state !== "object") continue;
+      let input = state.input;
+      let serialized = false;
+      if (typeof input === "string") {
+        try {
+          input = JSON.parse(input);
+          serialized = true;
+        } catch {
+          continue;
+        }
+      }
+      if (!input || typeof input !== "object" || typeof input.command !== "string") continue;
+      const original = unwrapPersistedSandboxCommand(input.command, directory);
+      if (original === input.command) continue;
+      const persisted = input.command;
+      input.command = original;
+      state.input = serialized ? JSON.stringify(input) : input;
+      if (state.title === persisted) state.title = original;
+      changed += 1;
+    }
+  }
+  return changed;
 }
 
 function implementationDispatchToken(event, did) {
@@ -500,6 +528,10 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
       }
     },
 
+    "experimental.chat.messages.transform": async (_input, output) => {
+      sanitizeSandboxHistoryForModel(output?.messages, directory);
+    },
+
     "tool.execute.before": async (event, output) => {
       const probeArgs = hookArgs(event, output);
       if (String(event?.tool || "") === "read" && isDeterministicTransportToolRead(probeArgs)) {
@@ -517,14 +549,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
       guardSplitterToolBoundary(directory, event, output);
       guardProgressHandoff(directory, event, output);
       await guardEarlyWrite(directory, event, output, compatApi);
-      captureOriginalSandboxCommand(event, output);
-      try {
-        guardWorkerMutation(directory, event, output);
-      } catch (error) {
-        const key = sandboxCommandKey(event);
-        if (key) originalSandboxCommands.delete(key);
-        throw error;
-      }
+      guardWorkerMutation(directory, event, output);
 
       if (event.tool !== "subagent" && event.tool !== "task") return;
 
@@ -604,7 +629,6 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
     },
 
     "tool.execute.after": async (event, output) => {
-      restoreOriginalSandboxCommand(event, output);
       const result = event?.result || output;
 
       const probeKey = `${hookSessionID(event)}:${hookCallID(event)}`;

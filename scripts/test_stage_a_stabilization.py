@@ -314,25 +314,35 @@ class WorkerSandboxPythonSideEffectTests(unittest.TestCase):
 
 
 class WorkerSandboxPluginHistoryTests(unittest.TestCase):
-    def test_plugin_restores_original_bash_command_after_sandbox_rewrite(self):
+    def test_plugin_sanitizes_persisted_wrapper_before_model_history(self):
         plugin=(
             Path(__file__).resolve().parent.parent
             / "xdg/config/opencode/plugins/v2-bounded-subagent.js"
         ).read_text()
-        before=plugin.index('captureOriginalSandboxCommand(event, output);')
-        guard=plugin.index('guardWorkerMutation(directory, event, output);',before)
-        after_hook=plugin.index('"tool.execute.after": async (event, output) => {')
-        restore=plugin.index('restoreOriginalSandboxCommand(event, output);',after_hook)
-        self.assertLess(before,guard)
-        self.assertGreater(restore,after_hook)
+        transform=plugin.index(
+            '"experimental.chat.messages.transform": async (_input, output) => {'
+        )
+        sanitize=plugin.index(
+            'sanitizeSandboxHistoryForModel(output?.messages, directory);',
+            transform,
+        )
+        before=plugin.index('"tool.execute.before": async (event, output) => {')
+        self.assertLess(transform,sanitize)
+        self.assertLess(sanitize,before)
         self.assertIn(
-            'if (key) originalSandboxCommands.set(key, args.command);',
+            'function unwrapPersistedSandboxCommand(command, directory)',
             plugin,
         )
         self.assertIn(
-            'args.command = original;',
+            'const original = unwrapPersistedSandboxCommand(input.command, directory);',
             plugin,
         )
+        self.assertIn(
+            'state.input = serialized ? JSON.stringify(input) : input;',
+            plugin,
+        )
+        self.assertNotIn('captureOriginalSandboxCommand(event, output);',plugin)
+        self.assertNotIn('restoreOriginalSandboxCommand(event, output);',plugin)
 
 
 class ImplementationRetryGenerationTests(unittest.TestCase):
