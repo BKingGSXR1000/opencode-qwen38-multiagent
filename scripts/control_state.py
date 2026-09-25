@@ -647,7 +647,14 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         if item.get("reclassified_by")=="runtime-context-delivery-repair"
     )
     infra_history=len(infrastructure_rows)-context_delivery_history
-    genuine_failures = classifications.count("genuine")
+    genuine_failures = sum(
+        1 for item in history
+        if (
+            isinstance(item,dict)
+            and item.get("classification")=="genuine"
+            and item.get("recovered_by")!="runtime-ownership-attribution-repair"
+        )
+    )
     external_contract_history=sum(
         1 for item in history
         if isinstance(item,dict)
@@ -1026,7 +1033,12 @@ def snapshot(project):
         children = children if isinstance(children, list) else []
         history = entry.get("failure_history", []) if isinstance(entry, dict) else []
         genuine_failures = sum(
-            1 for item in history if isinstance(item, dict) and item.get("classification") == "genuine"
+            1 for item in history
+            if (
+                isinstance(item,dict)
+                and item.get("classification")=="genuine"
+                and item.get("recovered_by")!="runtime-ownership-attribution-repair"
+            )
         )
         request_exists = (project / ".opencode-v2" / "work" / f"{did}.split-request.json").exists()
         split_marker = entry.get("split_required") if isinstance(entry, dict) else None

@@ -2050,6 +2050,77 @@ class VerificationSemanticsTests(unittest.TestCase):
         )
         self.assertFalse((self.work/"D001.ready").exists())
 
+    def test_recovers_proven_false_ownership_rows_and_clears_unclaimed_split(self):
+        self.ledger["deliverables"]["D001"]={
+            "count":2,
+            "sessions":["s-old","s1"],
+            "automatic_limit":3,
+            "failure_history":[
+                {
+                    "attempt":1,
+                    "classification":"genuine",
+                    "reason":"ownership-violation:reference/__pycache__/x.pyc",
+                    "session":"s-old",
+                    "source":"supervisor",
+                    "timestamp":"2026-09-25T00:00:00Z",
+                },
+                {
+                    "attempt":2,
+                    "classification":"genuine",
+                    "reason":"ownership-violation:b.txt",
+                    "session":"s1",
+                    "source":"supervisor",
+                    "timestamp":"2026-09-25T00:01:00Z",
+                },
+            ],
+            "split_required":{
+                "generation":1,
+                "reason":"genuine-failure-threshold",
+                "timestamp":"2026-09-25T00:01:00Z",
+            },
+        }
+        self._write_ledger()
+        (self.work/"D001.split-request.json").write_text('{"parent_id":"D001"}\n')
+        supervisor.save_split_status("D001","split-required",generation=1)
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"overlapping_other_owned_paths",return_value={"b.txt"}
+        ), mock.patch.object(
+            supervisor,"session_explicitly_mutated_path",return_value=False
+        ), mock.patch.object(
+            supervisor,"ownership_violations",return_value=[]
+        ):
+            proofs,archives=supervisor.recover_ownership_attribution_failures(
+                ["D001"]
+            )
+        self.assertEqual(
+            [row["attempt"] for row in proofs["D001"]],[1,2]
+        )
+        self.assertTrue(archives["D001"])
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ]["D001"]
+        self.assertNotIn("split_required",entry)
+        self.assertEqual(
+            [row["classification"] for row in entry["failure_history"]],
+            ["genuine","genuine"],
+        )
+        self.assertTrue(all(
+            row.get("recovered_by")==
+                supervisor.OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER
+            for row in entry["failure_history"]
+        ))
+        self.assertFalse((self.work/"D001.split-request.json").exists())
+        self.assertFalse((self.work/"D001.split-status.json").exists())
+        self.assertEqual(
+            sum(
+                1 for row in entry["failure_history"]
+                if supervisor.failure_counts_as_genuine(row)
+            ),
+            0,
+        )
+
     def test_corrupt_verify_wait_fails_closed(self):
         (self.work/"D001.verify-wait.json").write_text("{broken")
         with self.assertRaises(state_io.StateCorruptionError):

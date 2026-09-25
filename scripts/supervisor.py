@@ -6062,8 +6062,7 @@ def record_leaf_failure(did, reason, classification="genuine", sid=None):
                 history.append(row)
             if classification=="genuine":
                 genuine=sum(
-                    1 for x in history
-                    if isinstance(x,dict) and x.get("classification")=="genuine"
+                    1 for x in history if failure_counts_as_genuine(x)
                 )
                 leaf=(load_manifest().get("leaves") or {}).get(did,{})
                 handoff_only=isinstance(leaf,dict) and bool(leaf.get("split_handoff_only"))
@@ -6098,7 +6097,7 @@ def read_only_genuine_terminal(did):
     entry=(load_attempts().get("deliverables") or {}).get(did,{})
     history=entry.get("failure_history",[]) if isinstance(entry,dict) else []
     return any(
-        isinstance(item,dict) and item.get("classification")=="genuine"
+        failure_counts_as_genuine(item)
         for item in history
     )
 
