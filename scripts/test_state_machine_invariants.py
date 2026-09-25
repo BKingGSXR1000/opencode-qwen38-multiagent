@@ -1648,15 +1648,86 @@ class WorkerSandboxTrustBoundaryTests(unittest.TestCase):
         supervisor.PROJECT=self.old
         self.tmp.cleanup()
 
-    def test_finalize_rejects_recorded_sandbox_violation(self):
+    def test_finalize_rejects_actual_sandbox_escape(self):
         ctx=worker_sandbox.resolve_worker(self.project,"s1","","implementer")
         worker_sandbox.record_violation(
-            self.project,ctx,"direct-tool-outside-ownership",
-            {"tool":"edit","path":"other.txt"},
+            self.project,ctx,"sandbox-outside-ownership",
+            {"paths":["other.txt"],"command":"touch other.txt","exit_code":0},
         )
         ok,detail=supervisor.post_session_finalize("D001","s1")
         self.assertFalse(ok)
         self.assertEqual(detail,"sandbox-ownership-violation")
+
+    def test_denied_direct_write_is_audited_but_does_not_poison_finalize(self):
+        ctx=worker_sandbox.resolve_worker(self.project,"s1","","implementer")
+        supervisor.write_ownership_baseline("D001")
+        (self.project/"owned.txt").write_text("valid\n")
+        worker_sandbox.record_violation(
+            self.project,ctx,"direct-tool-outside-ownership",
+            {"tool":"write","path":"helper.py","owned":["owned.txt"]},
+        )
+        self.assertFalse(
+            worker_sandbox.has_fatal_violation(self.project,"D001","s1")
+        )
+        ok,detail=supervisor.post_session_finalize("D001","s1")
+        self.assertTrue(ok,detail)
+        self.assertEqual(detail,"finalized")
+
+    def test_denied_only_terminal_attempt_can_recover_same_attempt(self):
+        ctx=worker_sandbox.resolve_worker(self.project,"s1","","implementer")
+        supervisor.write_ownership_baseline("D001")
+        supervisor.write_execution_baseline("D001",1)
+        (self.project/"owned.txt").write_text("valid\n")
+        worker_sandbox.record_violation(
+            self.project,ctx,"direct-tool-outside-ownership",
+            {"tool":"write","path":"helper.py","owned":["owned.txt"]},
+        )
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        attempts["deliverables"]["D001"]["failure_history"]=[{
+            "attempt":1,
+            "classification":"genuine",
+            "reason":"sandbox-ownership-violation",
+            "timestamp":"2026-09-25T00:00:00Z",
+            "source":"supervisor",
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(attempts))
+        ok,detail=supervisor.recover_denied_tool_finalize("D001")
+        self.assertTrue(ok,detail)
+        self.assertEqual(detail,"finalized")
+        self.assertTrue((self.work/"D001.ready").exists())
+        after=json.loads((self.work/"attempts.json").read_text())
+        entry=after["deliverables"]["D001"]
+        self.assertEqual(
+            entry["failure_history"][0]["reason"],
+            "sandbox-ownership-violation",
+        )
+        marker=entry["denied_tool_finalize_recovery"]
+        self.assertEqual(marker["state"],"finalized")
+        self.assertEqual(marker["attempt"],1)
+        self.assertEqual(marker["session"],"s1")
+
+    def test_denied_tool_recovery_refuses_actual_sandbox_escape(self):
+        ctx=worker_sandbox.resolve_worker(self.project,"s1","","implementer")
+        supervisor.write_execution_baseline("D001",1)
+        (self.project/"owned.txt").write_text("valid\n")
+        worker_sandbox.record_violation(
+            self.project,ctx,"sandbox-outside-ownership",
+            {"paths":["other.txt"],"command":"touch other.txt","exit_code":0},
+        )
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        attempts["deliverables"]["D001"]["failure_history"]=[{
+            "attempt":1,
+            "classification":"genuine",
+            "reason":"sandbox-ownership-violation",
+            "timestamp":"2026-09-25T00:00:00Z",
+            "source":"supervisor",
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(attempts))
+        self.assertEqual(
+            supervisor.recover_denied_tool_finalize("D001"),
+            (False,"denied-tool-recovery-audit-not-denied-only"),
+        )
+        self.assertFalse((self.work/"D001.ready").exists())
 
 
 class AttemptScopedExecutionEvidenceTests(unittest.TestCase):

@@ -28,6 +28,9 @@ from worker_sandbox import (
     commit_verify_outputs as worker_sandbox_commit_verify_outputs,
     session_used_sandbox as worker_session_used_sandbox,
     violation_path as worker_sandbox_violation_path,
+    has_fatal_violation as worker_sandbox_has_fatal_violation,
+    has_only_denied_preexecution_violations as
+        worker_sandbox_has_only_denied_preexecution_violations,
 )
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 from control_query_views import materialize_control_query_views
@@ -2944,6 +2947,143 @@ def recover_exhausted_splitter_deterministic_handoff(parent):
     return True,"accepted"
 
 
+DENIED_TOOL_FINALIZE_RECOVERY_PROTOCOL="v2-denied-tool-finalize-recovery-v1"
+
+
+def recover_denied_tool_finalize(did):
+    """Re-run finalization for one terminal attempt poisoned only by denied tools.
+
+    The historical attempt/failure rows remain untouched.  Recovery is allowed
+    only when the current terminal attempt was recorded as
+    sandbox-ownership-violation, every sandbox audit row is a pre-execution
+    denial, and this same attempt durably changed owned/progress state.
+    """
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-finalized"
+
+    project=Path(PROJECT)
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf.get("split_children"):
+        return False,"denied-tool-recovery-requires-executable-leaf"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"denied-tool-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"denied-tool-recovery-invalid-attempt-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+            ):
+                return False,"denied-tool-recovery-session-mismatch"
+            sid=sessions[-1]
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict) and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1:
+                return False,"denied-tool-recovery-terminal-failure-missing"
+            failure=failures[0]
+            if (
+                failure.get("classification")!="genuine"
+                or failure.get("reason")!="sandbox-ownership-violation"
+            ):
+                return False,"denied-tool-recovery-terminal-failure-mismatch"
+
+    if not worker_sandbox_has_only_denied_preexecution_violations(
+        project,did,sid
+    ):
+        return False,"denied-tool-recovery-audit-not-denied-only"
+    if not durable_worker_execution(did,sid):
+        return False,"denied-tool-recovery-no-durable-execution"
+
+    violation=worker_sandbox_violation_path(project,did,sid)
+    try:
+        violation_sha=hashlib.sha256(violation.read_bytes()).hexdigest()
+    except OSError:
+        return False,"denied-tool-recovery-audit-unreadable"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"denied-tool-recovery-missing-ledger-entry"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"denied-tool-recovery-ledger-changed"
+            existing=entry.get("denied_tool_finalize_recovery")
+            if isinstance(existing,dict):
+                if (
+                    existing.get("protocol")!=DENIED_TOOL_FINALIZE_RECOVERY_PROTOCOL
+                    or int(existing.get("attempt") or 0)!=count
+                    or existing.get("session")!=sid
+                    or existing.get("violation_sha256")!=violation_sha
+                ):
+                    return False,"denied-tool-recovery-conflicting-marker"
+                if existing.get("state")=="finalized" and ready_info(did):
+                    return True,"already-finalized"
+                if existing.get("state") not in {"prepared","failed"}:
+                    return False,"denied-tool-recovery-marker-invalid"
+            else:
+                entry["denied_tool_finalize_recovery"]={
+                    "protocol":DENIED_TOOL_FINALIZE_RECOVERY_PROTOCOL,
+                    "state":"prepared",
+                    "attempt":count,
+                    "session":sid,
+                    "violation_sha256":violation_sha,
+                    "historical_failure":{
+                        "classification":failure.get("classification"),
+                        "reason":failure.get("reason"),
+                        "timestamp":failure.get("timestamp"),
+                    },
+                    "prepared_at":time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                    ),
+                }
+                save_attempts(data)
+
+    ok,detail=post_session_finalize(did,sid)
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            marker=(
+                entry.get("denied_tool_finalize_recovery")
+                if isinstance(entry,dict) else None
+            )
+            if isinstance(marker,dict):
+                marker["state"]="finalized" if ok else "failed"
+                marker["result"]=detail
+                marker["finished_at"]=time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                )
+                save_attempts(data)
+
+    event=(
+        "DENIED_TOOL_FINALIZE_RECOVERED"
+        if ok else "DENIED_TOOL_FINALIZE_RECOVERY_FAILED"
+    )
+    log(
+        f"{event} session={sid} deliverable={did} "
+        f"attempt={count} result={detail}"
+    )
+    csv(event,sid,"supervisor",f"{did} attempt={count} result={detail}")
+    return ok,detail
+
+
 def recover_stale_split_parent_contract(parent):
     """Retire an old split projection after a proven parent contract revision.
 
@@ -5420,11 +5560,9 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
         and isinstance(leaf.get("split_children"),list)
         and leaf.get("split_children")
     )
-    if sid:
-        sandbox_violation=worker_sandbox_violation_path(Path(PROJECT),did,sid)
-        if sandbox_violation.exists() and sandbox_violation.stat().st_size:
-            clear_verify_wait(did)
-            return False,"sandbox-ownership-violation"
+    if sid and worker_sandbox_has_fatal_violation(Path(PROJECT),did,sid):
+        clear_verify_wait(did)
+        return False,"sandbox-ownership-violation"
     paths=owned_artifact_paths(leaf)
     progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
     handoff_only=bool(leaf.get("split_handoff_only"))
@@ -8928,7 +9066,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -9183,6 +9321,27 @@ def main():
         print(
             f"SPLIT_DETERMINISTIC_FALLBACK_ALLOW "
             f"parent={args.recover_exhausted_splitter_fallback} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_denied_tool_finalize:
+        if unknown or not args.project:
+            raise SystemExit(
+                "denied-tool finalize recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_denied_tool_finalize(
+            args.recover_denied_tool_finalize
+        )
+        if not ok:
+            raise SystemExit(
+                f"DENIED_TOOL_FINALIZE_RECOVERY_DENY "
+                f"deliverable={args.recover_denied_tool_finalize} "
+                f"reason={detail}"
+            )
+        print(
+            f"DENIED_TOOL_FINALIZE_RECOVERY_ALLOW "
+            f"deliverable={args.recover_denied_tool_finalize} "
             f"reason={detail}"
         )
         return

@@ -402,6 +402,65 @@ def violation_path(project: Path, did: str, session: str):
     )
 
 
+FATAL_VIOLATION_KINDS={"sandbox-outside-ownership"}
+DENIED_PREEXECUTION_VIOLATION_KINDS={
+    "direct-tool-outside-ownership",
+    "direct-tool-symlink-ownership",
+    "forbidden-code-mode",
+}
+
+
+def violation_is_fatal(record):
+    return (
+        isinstance(record,dict)
+        and str(record.get("kind") or "") in FATAL_VIOLATION_KINDS
+    )
+
+
+def violation_records(project: Path, did: str, session: str):
+    path=violation_path(project,did,session)
+    if not path.exists() or not path.stat().st_size:
+        return []
+    records=[]
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            record=json.loads(line)
+            if not isinstance(record,dict):
+                raise ValueError("violation record is not an object")
+            records.append(record)
+    except (OSError,ValueError,json.JSONDecodeError) as exc:
+        raise SandboxError(
+            f"invalid sandbox violation audit for {did}/{session}: {exc}"
+        ) from exc
+    return records
+
+
+def has_fatal_violation(project: Path, did: str, session: str):
+    try:
+        return any(
+            violation_is_fatal(record)
+            for record in violation_records(project,did,session)
+        )
+    except SandboxError:
+        # Corrupt audit evidence fails closed.
+        return True
+
+
+def has_only_denied_preexecution_violations(
+    project: Path, did: str, session: str
+):
+    try:
+        records=violation_records(project,did,session)
+    except SandboxError:
+        return False
+    return bool(records) and all(
+        str(record.get("kind") or "") in DENIED_PREEXECUTION_VIOLATION_KINDS
+        for record in records
+    )
+
+
 def record_violation(project: Path, ctx, kind: str, detail):
     path=violation_path(project,ctx["did"],ctx["session"])
     path.parent.mkdir(parents=True,exist_ok=True)
