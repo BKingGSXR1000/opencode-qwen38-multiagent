@@ -340,6 +340,31 @@ class HistoricalParentContractRepairResolutionTests(unittest.TestCase):
 
 
 class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
+    def test_materialization_receipt_accepts_supervisor_log_prefix(self):
+        stage_a_controller.validate_materialization_output(
+            "[2026-09-25T18:35:15+0200] DISPATCH_ALLOW session=child "
+            "agent=implementer deliverable=D001 attempt=1\n"
+            "DISPATCH_MATERIALIZED session=child deliverable=D001 attempt=1\n",
+            "child",
+        )
+
+    def test_materialization_receipt_rejects_wrong_or_duplicate_session(self):
+        with self.assertRaisesRegex(
+            stage_a_controller.ControllerError,"session mismatch"
+        ):
+            stage_a_controller.validate_materialization_output(
+                "DISPATCH_MATERIALIZED session=other deliverable=D001 attempt=1\n",
+                "child",
+            )
+        with self.assertRaisesRegex(
+            stage_a_controller.ControllerError,"unexpected output"
+        ):
+            stage_a_controller.validate_materialization_output(
+                "DISPATCH_MATERIALIZED session=child deliverable=D001 attempt=1\n"
+                "DISPATCH_MATERIALIZED session=child deliverable=D001 attempt=1\n",
+                "child",
+            )
+
     def test_exact_derived_runtime_prompt_may_exceed_transport_cap(self):
         prompt="DELIVERABLE: D001\n" + ("x" * supervisor.MAX_IMPLEMENTATION_PROMPT_CHARS)
         with mock.patch.object(supervisor,"implementation_runtime_prompt",return_value=prompt):

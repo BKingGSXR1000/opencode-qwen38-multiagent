@@ -387,6 +387,30 @@ def native_child_ids(intent: dict, children: list[dict]) -> list[str]:
     return sorted(set(result))
 
 
+def validate_materialization_output(stdout: str, sid: str) -> None:
+    """Accept supervisor diagnostics around exactly one session-bound receipt."""
+    lines=[line.strip() for line in str(stdout or "").splitlines() if line.strip()]
+    receipts=[
+        line for line in lines if line.startswith("DISPATCH_MATERIALIZED ")
+    ]
+    if len(receipts)!=1:
+        raise ControllerError(
+            "native child materialization returned unexpected output: "
+            + str(stdout or "").strip()[:1600]
+        )
+    fields={}
+    for token in receipts[0].split()[1:]:
+        if "=" not in token:
+            continue
+        key,value=token.split("=",1)
+        fields[key]=value
+    if fields.get("session")!=sid:
+        raise ControllerError(
+            "native child materialization receipt session mismatch: "
+            + receipts[0][:1600]
+        )
+
+
 def materialize_native_child(project: Path, base_url: str, sid: str, agent: str) -> None:
     """Bind an observed child to its preclaim through supervisor-owned state."""
     supervisor = Path(__file__).with_name("supervisor.py")
@@ -414,11 +438,7 @@ def materialize_native_child(project: Path, base_url: str, sid: str, agent: str)
         raise ControllerError(
             "native child materialization failed: " + proc.stdout.strip()[:1600]
         )
-    if not proc.stdout.startswith("DISPATCH_MATERIALIZED "):
-        raise ControllerError(
-            "native child materialization returned unexpected output: "
-            + proc.stdout.strip()[:1600]
-        )
+    validate_materialization_output(proc.stdout,sid)
 
 
 def bind_unbound_native_child(
