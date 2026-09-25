@@ -43,6 +43,28 @@ class PlannerContractTests(unittest.TestCase):
         self.assertIn("bounded owned test/helper", role)
 
 
+class DirectOwnedWritePromptTests(unittest.TestCase):
+    def test_write_capable_roles_match_runtime_direct_write_gate(self):
+        agents = (
+            "implementer",
+            "core-builder",
+            "feature-builder",
+            "reasoning-builder",
+            "integrator",
+            "test-builder",
+        )
+        root = Path(__file__).resolve().parent.parent / "xdg/config/opencode/agents"
+        for agent in agents:
+            with self.subTest(agent=agent):
+                role = (root / f"{agent}.md").read_text()
+                self.assertIn("Runtime direct-owned-write gate", role)
+                self.assertIn(
+                    "the next\ntool call MUST directly create or update a declared owned artifact",
+                    role,
+                )
+                self.assertIn("A no-op rewrite of identical\ncontent does not satisfy this gate", role)
+
+
 class WorkerSandboxPythonSideEffectTests(unittest.TestCase):
     def test_worker_and_verify_disable_python_bytecode_side_effects(self):
         source = (

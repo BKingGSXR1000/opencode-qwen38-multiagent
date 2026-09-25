@@ -105,6 +105,22 @@ or has `context_error`, return `CONTEXT_PACKET_MISSING` rather than reconstructi
 scope. CONTROL_CONTRACT rules remain unchanged.
 <!-- V2.6.16 LEAF CONTEXT PACKET END -->
 
+<!-- V2.6.17 DIRECT OWNED WRITE GATE BEGIN -->
+## Runtime direct-owned-write gate
+
+For a write-capable leaf, the authoritative leaf packet is the one initial
+context inspection allowed before an owned-artifact change. After reading that
+packet, if this attempt has not yet changed a declared owned artifact, the next
+tool call MUST directly create or update a declared owned artifact. Do not read
+dependency files, progress files, list directories, or run `bash` first. The
+packet already contains the leaf outcome, acceptance requirements, dependency
+contract, and exact Verify command needed to create a minimal scaffold.
+
+After a real owned-artifact delta exists in this attempt, normal bounded
+inspection/refinement/verification is allowed. A no-op rewrite of identical
+content does not satisfy this gate.
+<!-- V2.6.17 DIRECT OWNED WRITE GATE END -->
+
 <!-- V2.6.7 WORKER BEGIN -->
 ## Bounded durable worker
 
@@ -139,8 +155,8 @@ If glob disagrees with read/list, trust read/list and move on.
 
 The step budget exists to finish the deliverable, not to maximize investigation.
 
-- By tool turn 4 at the latest, create or update at least one primary owned
-  artifact unless the required owned artifact already exists and is correct.
+- The runtime direct-owned-write gate above is stricter than this later
+  deadline; satisfy that gate first. Afterward, keep owned work early and bounded.
 - Prefer creating a minimal valid scaffold first, then refine it.
 - Network/dependency research, optional vendoring, and exploratory probes must
   not consume the budget before core owned files exist.
