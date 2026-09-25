@@ -240,6 +240,25 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
         )
         self.assertIn("the runtime wraps bash automatically",prompt)
 
+    def test_runtime_prompt_requires_small_parseable_first_write(self):
+        manifest={
+            "leaves":{
+                "D010":{
+                    "owned_artifact_paths":["reference/reference.py"],
+                    "owned_artifacts":"`reference/reference.py`",
+                    "complexity":"M",
+                }
+            }
+        }
+        with mock.patch.object(supervisor,"load_manifest",return_value=manifest):
+            prompt=supervisor.implementation_runtime_prompt(
+                "D010","core-builder"
+            )
+        self.assertIn("Start with a SMALL, parseable, contract-shaped artifact",prompt)
+        self.assertIn("minimal executable/exportable skeleton",prompt)
+        self.assertIn("extend it with bounded edits after the write succeeds",prompt)
+        self.assertIn("avoids malformed tool JSON from oversized content",prompt)
+
 
 class WorkerSandboxPythonSideEffectTests(unittest.TestCase):
     def test_worker_and_verify_disable_python_bytecode_side_effects(self):

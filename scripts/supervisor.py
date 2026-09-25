@@ -41,7 +41,7 @@ from control_query_views import materialize_control_query_views
 from deterministic_dispatch import select_actions as deterministic_select_actions
 from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
-    visible_progress_marker,
+    visible_watchdog_decision, visible_progress_marker,
 )
 
 ROOT=Path(os.environ.get("V2_ROOT", str(Path(__file__).resolve().parents[1])))
@@ -683,10 +683,12 @@ def implementation_runtime_prompt(did,agent):
             "already exists, inspect only that artifact; do not explore the plan, repository, "
             "or unrelated runtime state before making progress.\n"
             "2. Your NEXT tool-bearing response MUST write or edit an owned project artifact. "
-            "Start with the smallest contract-shaped, valid artifact that records the facts "
-            "available from the packet and permitted dependency outputs. Missing evidence is "
-            "a value to record or validate after the artifact exists, not permission for more "
-            "unbounded discovery.\n"
+            "Start with a SMALL, parseable, contract-shaped artifact rather than trying to emit "
+            "the full implementation in one large tool call. Keep the first write concise "
+            "(prefer a minimal executable/exportable skeleton with no long prose/comments), "
+            "then extend it with bounded edits after the write succeeds. This avoids malformed "
+            "tool JSON from oversized content. Missing evidence is a value to record or validate "
+            "after the artifact exists, not permission for more unbounded discovery.\n"
             "3. After the first owned-artifact change, inspect only direct dependencies needed "
             "to complete it, run the exact Verify command, and repair only owned artifacts.\n"
             "4. Call the bash tool with ONLY the intended shell command. Never invoke "
@@ -10468,7 +10470,17 @@ def api_poll_loop():
                         elif text_chars>=ht:
                             reason=f"text_chars={text_chars}"
                         elif age>=hs:
-                            reason=f"no_tool_age={int(age)}s"
+                            visible_decision=visible_watchdog_decision(
+                                age,backend_snapshot,base_seconds=hs
+                            )
+                            if visible_decision.get("abort"):
+                                detail=str(
+                                    visible_decision.get("reason")
+                                    or "backend-not-progressing"
+                                )
+                                reason=(
+                                    f"no_tool_age={int(age)}s {detail}"
+                                )
 
                     if reason:
                         st["aborted_key"]=key
