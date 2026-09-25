@@ -910,6 +910,62 @@ class SplitStateMachineTests(unittest.TestCase):
         self.assertEqual(expected,["D001-A","D001-B"])
         self.assertEqual(children[1]["verify_command"],supervisor.RUN_CHECKS_COMMAND)
 
+    def test_exhausted_splitter_uses_deterministic_probe_writer_fallback(self):
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"missing b.txt\n"
+        })()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","s2",self.parent["verify_command"],checked,"verify-failed-1"
+        )
+        self.assertEqual(
+            supervisor.record_leaf_failure("D001","verify-failed-1","genuine"),
+            (True,"split-required"),
+        )
+        supervisor.save_split_status(
+            "D001","split-validation-failed",
+            claim_count=supervisor.MAX_SPLITTER_ATTEMPTS,
+            proposal_failures=3,
+            corrective_turn_count=1,
+            corrective_dispatch_state="native-child-completed",
+        )
+        ok,detail=supervisor.recover_exhausted_splitter_deterministic_handoff("D001")
+        self.assertEqual((ok,detail),(True,"accepted"))
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["claim_count"],supervisor.MAX_SPLITTER_ATTEMPTS)
+        self.assertEqual(status["corrective_turn_count"],1)
+        fallback=status["deterministic_splitter_fallback"]
+        self.assertEqual(fallback["protocol"],"v2-deterministic-splitter-fallback-v1")
+        self.assertEqual(fallback["children"],["D001-A","D001-B"])
+        leaves=supervisor.load_manifest()["leaves"]
+        self.assertTrue(leaves["D001-A"]["split_handoff_only"])
+        self.assertEqual(leaves["D001-A"]["owned_artifact_paths"],[])
+        self.assertEqual(
+            leaves["D001-B"]["owned_artifact_paths"],
+            self.parent["owned_artifact_paths"],
+        )
+        self.assertEqual(
+            leaves["D001-B"]["verify_command"],
+            self.parent["verify_command"],
+        )
+        self.assertEqual(leaves["D001-B"]["split_handoff_source"],"D001-A")
+
+    def test_deterministic_splitter_fallback_requires_completed_corrective(self):
+        checked=type("Checked",(),{"returncode":1,"stdout":"","stderr":""})()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","s2",self.parent["verify_command"],checked,"verify-failed-1"
+        )
+        supervisor.record_leaf_failure("D001","verify-failed-1","genuine")
+        supervisor.save_split_status(
+            "D001","split-validation-failed",
+            claim_count=supervisor.MAX_SPLITTER_ATTEMPTS,
+            proposal_failures=2,
+        )
+        self.assertEqual(
+            supervisor.recover_exhausted_splitter_deterministic_handoff("D001"),
+            (False,"deterministic-fallback-requires-corrective-turn"),
+        )
+        self.assertEqual(supervisor.leaf_children("D001"),[])
+
     def test_parent_contract_invalid_reason_remains_bounded_and_strict(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         payload={

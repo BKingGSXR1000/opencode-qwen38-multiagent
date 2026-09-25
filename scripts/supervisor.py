@@ -885,7 +885,7 @@ def save_split_status(did, state, **detail):
         "corrective_context_sha256","corrective_dispatch_state",
         "corrective_execution_id","corrective_root_session",
         "corrective_reason_sha256","corrective_primary_response",
-        "historical_corrective_recovery",
+        "historical_corrective_recovery","deterministic_splitter_fallback",
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -2822,6 +2822,126 @@ def recover_historical_splitter_corrective_turn(parent):
             f"claim={claim_count} session={session} token={dispatch_token}"
         )
     return ok,detail
+
+
+def recover_exhausted_splitter_deterministic_handoff(parent):
+    """Deterministically decompose a verifier-failed parent after splitter exhaustion.
+
+    This is not another model claim.  It is available only after both ordinary
+    splitter claims and the sole corrective child have completed without a valid
+    proposal.  The supervisor creates the already-supported progress-handoff ->
+    writer shape from the current canonical parent contract, preserving the
+    exact parent Verify and all ownership.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+    status=load_split_status(parent)
+    if status.get("state")!="split-validation-failed":
+        return False,"deterministic-fallback-requires-split-validation-failed"
+    if int(status.get("claim_count") or 0) < MAX_SPLITTER_ATTEMPTS:
+        return False,"deterministic-fallback-requires-exhausted-claims"
+    if int(status.get("corrective_turn_count") or 0) < 1:
+        return False,"deterministic-fallback-requires-corrective-turn"
+    if status.get("corrective_dispatch_state")!="native-child-completed":
+        return False,"deterministic-fallback-corrective-not-complete"
+    if leaf_children(parent):
+        return False,"deterministic-fallback-parent-already-split"
+
+    request=load_json_object(
+        split_request_path(parent),label=f"split request {parent}"
+    )
+    if not _split_request_verification_recovery_allowed(request):
+        return False,"deterministic-fallback-requires-verify-failure"
+
+    manifest=load_manifest()
+    leaf=(manifest.get("leaves") or {}).get(parent)
+    if not isinstance(leaf,dict):
+        return False,"deterministic-fallback-parent-missing"
+    owned=owned_artifact_paths(leaf)
+    if not owned:
+        return False,"deterministic-fallback-parent-has-no-ownership"
+    role=str(leaf.get("role") or "")
+    if role not in IMPLEMENTATION_AGENTS:
+        return False,"deterministic-fallback-parent-role-unsupported"
+    verify=str(leaf.get("verify_command") or "").strip()
+    done_when=str(leaf.get("done_when") or "").strip()
+    if not verify or not done_when:
+        return False,"deterministic-fallback-parent-contract-incomplete"
+
+    contract=request.get("parent_contract")
+    if not isinstance(contract,dict):
+        return False,"deterministic-fallback-request-contract-missing"
+    request_owned,request_owned_error=_strict_owned_artifact_text(
+        str(contract.get("owned_artifacts") or "")
+    )
+    if (
+        request_owned_error
+        or request_owned!=owned
+        or str(contract.get("verify_command") or "").strip()!=verify
+        or str(contract.get("done_when") or "").strip()!=done_when
+    ):
+        return False,"deterministic-fallback-request-contract-stale"
+
+    evidence=[
+        row for row in request.get("supervisor_verify_evidence",[])
+        if isinstance(row,dict)
+        and row.get("executed") is True
+        and str(row.get("command") or "").strip()==verify
+        and _split_failure_is_verification_related(row.get("result"))
+    ]
+    if not evidence:
+        return False,"deterministic-fallback-exact-verify-evidence-missing"
+
+    existing=[rel for rel in owned if (Path(PROJECT)/rel).exists()]
+    proposals=[
+        {
+            "scope":(
+                "Diagnose the exact failed parent Verify from authoritative "
+                "supervisor evidence and current parent-owned artifacts; record "
+                "the concrete failure cause and smallest writer repair delta."
+            ),
+            "owned_artifacts":"none",
+            "verify_command":SPLIT_HANDOFF_VERIFY_SENTINEL,
+            "role":"probe-builder",
+            "depends_on_sibling":"",
+            "done_when":"A durable HANDOFF_READY progress record identifies the exact repair delta.",
+            "reads_existing":existing,
+            "creates_or_updates":[],
+        },
+        {
+            "scope":(
+                "Consume the predecessor handoff and repair the parent-owned "
+                "artifacts until the exact inherited parent Verify passes."
+            ),
+            "owned_artifacts":_canonical_owned_artifacts(owned),
+            "verify_command":verify,
+            "role":role,
+            "depends_on_sibling":"first",
+            "done_when":done_when,
+            "reads_existing":existing,
+            "creates_or_updates":owned,
+        },
+    ]
+    children=persist_split(parent,proposals)
+    fallback={
+        "protocol":"v2-deterministic-splitter-fallback-v1",
+        "claim_count":int(status.get("claim_count") or 0),
+        "corrective_turn_count":int(status.get("corrective_turn_count") or 0),
+        "source_state":"split-validation-failed",
+        "verify_sha256":hashlib.sha256(verify.encode()).hexdigest(),
+        "children":children,
+        "created_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    }
+    save_split_status(
+        parent,"accepted",
+        children=children,
+        deterministic_splitter_fallback=fallback,
+    )
+    log(
+        f"DETERMINISTIC_SPLITTER_FALLBACK parent={parent} "
+        f"children={','.join(children)} claim_count={fallback['claim_count']}"
+    )
+    return True,"accepted"
 
 
 def recover_stale_split_parent_contract(parent):
@@ -8808,7 +8928,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -9042,6 +9162,27 @@ def main():
         print(
             f"SPLIT_HISTORICAL_CORRECTIVE_RECOVERY_ALLOW "
             f"parent={args.recover_historical_splitter_corrective} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_exhausted_splitter_fallback:
+        if unknown or not args.project:
+            raise SystemExit(
+                "exhausted splitter fallback requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_exhausted_splitter_deterministic_handoff(
+            args.recover_exhausted_splitter_fallback
+        )
+        if not ok:
+            raise SystemExit(
+                f"SPLIT_DETERMINISTIC_FALLBACK_DENY "
+                f"parent={args.recover_exhausted_splitter_fallback} "
+                f"reason={detail}"
+            )
+        print(
+            f"SPLIT_DETERMINISTIC_FALLBACK_ALLOW "
+            f"parent={args.recover_exhausted_splitter_fallback} "
             f"reason={detail}"
         )
         return

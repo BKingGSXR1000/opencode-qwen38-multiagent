@@ -68,6 +68,15 @@ may request that route only for a `verify_command` independently rejected by
 the deterministic contract validator. Missing artifacts within the parent's
 canonical ownership remain normal split-recovery work.
 
+If both ordinary splitter claims and the single same-claim corrective child are
+exhausted after authoritative exact-Verify failures, the supervisor may use one
+deterministic fallback instead of granting another model claim: create the
+already-supported progress-only probe handoff followed by one writer that owns
+the complete parent artifact set. The writer inherits the parent role,
+`done_when`, and exact `verify_command` unchanged. This fallback requires the
+current split request to match the current parent contract and requires
+supervisor-owned failed Verify evidence for that exact command.
+
 ## 8. Verify and final tests
 
 Canonical Verify is contractual. Execute exact repository-owned verification; never weaken Verify to make a worker pass. Known fixture defects may be corrected only when independently established and only in the intended fixture. Final tests use trusted repository-owned `run-checks.py` plus durable evidence.
