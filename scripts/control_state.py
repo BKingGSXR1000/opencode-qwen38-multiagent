@@ -502,12 +502,15 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         if not isinstance(item, dict):
             return state
         classification = item.get("classification")
-        if classification not in {"genuine", "infrastructure"}:
+        if classification not in {"genuine", "infrastructure", "bad-plan"}:
             return state
         classifications.append(classification)
 
     infra_history = classifications.count("infrastructure")
     genuine_failures = classifications.count("genuine")
+    bad_plan_history = classifications.count("bad-plan")
+    plan_contract_credits = _plan_contract_revision_credit_count(entry,count)
+    bad_plan_credits = _parent_contract_repair_credit_count(entry,count)
     # record_infrastructure_abort writes the grant immediately before the
     # matching infrastructure failure-history row, so at most one grant may be
     # temporarily ahead of failure_history.
@@ -515,8 +518,17 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         return state
     if genuine_failures > automatic_limit:
         return state
+    # Every bad-plan row must be backed by the durable supervisor repair
+    # resolution; otherwise this compatibility path must stay fail-closed.
+    if bad_plan_history != bad_plan_credits:
+        return state
 
-    allowed = automatic_limit + infra_grants
+    allowed = (
+        automatic_limit
+        + infra_grants
+        + plan_contract_credits
+        + bad_plan_credits
+    )
     if count > allowed:
         return state
 
@@ -524,6 +536,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     if count - len(history) not in (0, 1):
         return state
 
+    excess=max(0,count-automatic_limit)
     repaired = dict(state)
     repaired.update({
         "valid": True,
@@ -531,10 +544,15 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         "automatic_limit": automatic_limit,
         "automatic_attempts_consumed": genuine_failures,
         "infrastructure_retry_grants": infra_grants,
+        "plan_contract_retry_grants": plan_contract_credits,
+        "bad_plan_retry_grants": bad_plan_credits,
         "allowed_attempts": allowed,
-        "infrastructure_grants_remaining": max(0, allowed - count),
+        # Keep the canonical ordering: infrastructure credits are consumed
+        # before plan/bad-plan replacement credits.
+        "infrastructure_grants_remaining": max(0,infra_grants-excess),
         "infrastructure_authorized_attempt": (
-            count >= automatic_limit and count < allowed
+            count > automatic_limit
+            and count <= automatic_limit + infra_grants
         ),
         "v2612_infrastructure_repair": True,
     })

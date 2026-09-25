@@ -455,6 +455,38 @@ class SandboxWrapperHistoryRecoveryTests(unittest.TestCase):
             entry["sandbox_wrapper_history_recoveries"][0]["attempt"],5
         )
 
+    def test_v2612_partial_state_repair_projects_new_plan_credit(self):
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"sandbox_wrapper_history_evidence",
+            return_value=self.proof(),
+        ):
+            self.assertEqual(
+                supervisor.recover_sandbox_wrapper_history_poison("D001"),
+                (True,"recovered"),
+            )
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        entry["count"]=6
+        entry["sessions"].append("s6")
+        stronger=hashlib.sha256(b"stronger verify").hexdigest()
+        entry["plan_contract_revisions"]=[{
+            "attempt":6,
+            "source":"supervisor-plan-contract-revision",
+            "previous_verify_sha256":"old",
+            "current_verify_sha256":stronger,
+            "timestamp":"2026-09-25T00:00:00Z",
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(data))
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["v2612_infrastructure_repair"])
+        self.assertEqual(state["infrastructure_retry_grants"],3)
+        self.assertEqual(state["infrastructure_grants_remaining"],0)
+        self.assertEqual(state["plan_contract_retry_grants"],1)
+        self.assertEqual(state["allowed_attempts"],7)
+
     def test_refuses_without_nested_wrapper_failure(self):
         proof=self.proof()
         proof["manual_wrapper_failures"]=0
