@@ -235,6 +235,110 @@ class RuntimePlanRepairTests(unittest.TestCase):
             self.assertEqual(guard["runtime_repair_change_errors"](ctrl),[])
 
 
+class HistoricalParentContractRepairResolutionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        (self.work/"contract-repair-history").mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        mark_phase_ready(
+            self.project,"IMPLEMENTATION_PLAN.md","IMPLEMENTATION_PLAN_COMPLETE"
+        )
+        (self.ctrl/"IMPLEMENTATION_PLAN.structured-map.json").write_text(
+            json.dumps({
+                "protocol":"v2-structured-plan-map-v1",
+                "id_to_key":{"D004":"fixture_manifest"},
+            })
+        )
+        self.history=[
+            {
+                "attempt":2,
+                "classification":"bad-plan",
+                "reason":"early_write_deadline_no_owned_artifact_delta",
+                "reclassified_by":"runtime-parent-contract-repair",
+                "source":"supervisor",
+                "timestamp":"2026-09-21T00:00:00Z",
+            },
+            {
+                "attempt":3,
+                "classification":"bad-plan",
+                "reason":"verify-failed-1",
+                "reclassified_by":"runtime-parent-contract-repair",
+                "source":"supervisor",
+                "timestamp":"2026-09-21T00:01:00Z",
+            },
+        ]
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D004":{
+                    "automatic_limit":3,
+                    "count":3,
+                    "sessions":["s1","s2","s3"],
+                    "failure_history":self.history,
+                }
+            },
+        }))
+        (self.work/"contract-repair-history"/"D004.1.json").write_text(
+            json.dumps({
+                "owner":"supervisor",
+                "protocol":"v2-contract-repair-history-v1",
+                "parent_id":"D004",
+                "archived_at":"2026-09-21T00:02:00Z",
+                "records":{"D004.split-status.json":"{}"},
+            })
+        )
+        (self.work/"contract-repair-events.log").write_text(
+            "[2026-09-21T00:02:00Z] "
+            "PARENT_CONTRACT_REPAIR_REQUESTED deliverable=D004 "
+            "key=fixture_manifest field=prerequisite_artifacts reason=test\n"
+        )
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def test_recovery_restores_credit_without_rewriting_history(self):
+        before=json.loads((self.work/"attempts.json").read_text())
+        ok,detail=supervisor.recover_historical_parent_contract_repair_resolution(
+            "D004"
+        )
+        self.assertTrue(ok,detail)
+        self.assertEqual(detail,"resolved")
+        after=json.loads((self.work/"attempts.json").read_text())
+        entry=after["deliverables"]["D004"]
+        self.assertEqual(entry["count"],3)
+        self.assertEqual(entry["sessions"],["s1","s2","s3"])
+        self.assertEqual(entry["failure_history"],self.history)
+        marker=entry["parent_contract_repair_resolution"]
+        self.assertEqual(marker["structured_key"],"fixture_manifest")
+        self.assertEqual(marker["reclassified_attempts"],[2,3])
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["bad_plan_retry_grants"],2)
+        self.assertEqual(state["allowed_attempts"],5)
+        self.assertEqual(
+            before["deliverables"]["D004"]["failure_history"],
+            entry["failure_history"],
+        )
+        ok,detail=supervisor.recover_historical_parent_contract_repair_resolution(
+            "D004"
+        )
+        self.assertTrue(ok,detail)
+        self.assertEqual(detail,"already-resolved")
+
+    def test_recovery_fails_closed_without_supervisor_event(self):
+        (self.work/"contract-repair-events.log").write_text("")
+        ok,detail=supervisor.recover_historical_parent_contract_repair_resolution(
+            "D004"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(detail,"historical-parent-repair-event-missing")
+
+
 class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
     def test_exact_derived_runtime_prompt_may_exceed_transport_cap(self):
         prompt="DELIVERABLE: D001\n" + ("x" * supervisor.MAX_IMPLEMENTATION_PROMPT_CHARS)

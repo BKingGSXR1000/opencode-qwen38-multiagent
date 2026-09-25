@@ -3084,6 +3084,125 @@ def recover_denied_tool_finalize(did):
     return ok,detail
 
 
+HISTORICAL_PARENT_REPAIR_RESOLUTION_PROTOCOL=(
+    "v2-historical-parent-contract-repair-resolution-v1"
+)
+
+
+def recover_historical_parent_contract_repair_resolution(did):
+    """Restore only a missing durable retry-credit marker from archived proof."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if not plan_ready():
+        return False,"historical-parent-repair-plan-not-ready"
+
+    project=Path(PROJECT)
+    work=project/".opencode-v2"/"work"
+    try:
+        structured_key=_structured_plan_symbolic_key(did)
+    except Exception:
+        return False,"historical-parent-repair-structured-key-missing"
+
+    archive_dir=work/"contract-repair-history"
+    archives=[]
+    if archive_dir.is_dir():
+        for path in sorted(archive_dir.glob(f"{did}.*.json")):
+            try:
+                data=load_json_object(
+                    path,label=f"contract repair archive {did}"
+                )
+            except Exception:
+                continue
+            if (
+                data.get("owner")=="supervisor"
+                and data.get("protocol")=="v2-contract-repair-history-v1"
+                and data.get("parent_id")==did
+                and isinstance(data.get("records"),dict)
+                and data["records"]
+            ):
+                archives.append(path)
+    if not archives:
+        return False,"historical-parent-repair-archive-missing"
+
+    event_path=work/"contract-repair-events.log"
+    try:
+        events=event_path.read_text(errors="replace")
+    except OSError:
+        return False,"historical-parent-repair-event-log-missing"
+    event_token=(
+        f"PARENT_CONTRACT_REPAIR_REQUESTED deliverable={did} "
+        f"key={structured_key} "
+    )
+    if event_token not in events:
+        return False,"historical-parent-repair-event-missing"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"historical-parent-repair-ledger-missing"
+            existing=entry.get("parent_contract_repair_resolution")
+            if isinstance(existing,dict):
+                approved=existing.get("reclassified_attempts")
+                if (
+                    existing.get("structured_key")==structured_key
+                    and isinstance(approved,list)
+                    and approved
+                ):
+                    return True,"already-resolved"
+                return False,"historical-parent-repair-conflicting-resolution"
+            if entry.get("split_rearm_after_contract_repair"):
+                return False,"historical-parent-repair-still-pending"
+
+            reclassified=[]
+            for item in entry.get("failure_history",[]) or []:
+                if not isinstance(item,dict) or not (
+                    item.get("classification")=="bad-plan"
+                    and item.get("reclassified_by")==
+                        "runtime-parent-contract-repair"
+                ):
+                    continue
+                try:
+                    attempt=int(item.get("attempt") or 0)
+                except (TypeError,ValueError):
+                    continue
+                if attempt>0 and attempt not in reclassified:
+                    reclassified.append(attempt)
+            if not reclassified:
+                return False,"historical-parent-repair-no-reclassified-attempts"
+
+            marker={
+                "protocol":HISTORICAL_PARENT_REPAIR_RESOLUTION_PROTOCOL,
+                "structured_key":structured_key,
+                "reclassified_attempts":reclassified,
+                "archive_files":[
+                    path.relative_to(project).as_posix() for path in archives
+                ],
+                "event_log":event_path.relative_to(project).as_posix(),
+                "timestamp":time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                ),
+            }
+            entry["parent_contract_repair_resolution"]=marker
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"historical-parent-repair-projected-ledger-invalid"
+            if int(projected.get("bad_plan_retry_grants") or 0)!=len(reclassified):
+                return False,"historical-parent-repair-credit-mismatch"
+            save_attempts(data)
+
+    log(
+        f"HISTORICAL_PARENT_CONTRACT_REPAIR_RESOLVED deliverable={did} "
+        f"key={structured_key} attempts={','.join(map(str,reclassified))}"
+    )
+    csv(
+        "HISTORICAL_PARENT_CONTRACT_REPAIR_RESOLVED","", "supervisor",
+        f"{did} key={structured_key} attempts={','.join(map(str,reclassified))}",
+    )
+    return True,"resolved"
+
+
 def recover_stale_split_parent_contract(parent):
     """Retire an old split projection after a proven parent contract revision.
 
@@ -9066,7 +9185,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -9342,6 +9461,29 @@ def main():
         print(
             f"DENIED_TOOL_FINALIZE_RECOVERY_ALLOW "
             f"deliverable={args.recover_denied_tool_finalize} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_historical_parent_contract_repair_resolution:
+        if unknown or not args.project:
+            raise SystemExit(
+                "historical parent-contract repair resolution requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_historical_parent_contract_repair_resolution(
+            args.recover_historical_parent_contract_repair_resolution
+        )
+        if not ok:
+            raise SystemExit(
+                f"HISTORICAL_PARENT_CONTRACT_REPAIR_RESOLUTION_DENY "
+                f"deliverable="
+                f"{args.recover_historical_parent_contract_repair_resolution} "
+                f"reason={detail}"
+            )
+        print(
+            f"HISTORICAL_PARENT_CONTRACT_REPAIR_RESOLUTION_ALLOW "
+            f"deliverable="
+            f"{args.recover_historical_parent_contract_repair_resolution} "
             f"reason={detail}"
         )
         return
