@@ -489,9 +489,12 @@ def materialize_control_query_views(project, snapshot, manifest, source_rendered
     for did, payload in leaf_contexts.items():
         name = f"{did}-context.json"
         wanted.add(name)
+        # Context packets are human/tool-read contracts. Keep them multi-line
+        # so one long string value cannot make OpenCode's line-bounded read
+        # hide later fields such as verify_command and done_when.
         atomic_write_text(
             leaf_root / name,
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            json.dumps(payload, sort_keys=True, indent=2) + "\n",
         )
     for path in leaf_root.glob("D*.json"):
         if path.name not in wanted:

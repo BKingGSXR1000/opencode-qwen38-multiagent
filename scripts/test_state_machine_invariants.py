@@ -505,6 +505,284 @@ class SandboxWrapperHistoryRecoveryTests(unittest.TestCase):
         )
 
 
+class ContextDeliveryRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        self.sid="ses-context-truncated"
+        self.verify="test -s owned.txt"
+        self.leaf={
+            "id":"D001","name":"owned","outcome":"repair owned",
+            "owned_artifacts":"`owned.txt`",
+            "owned_artifact_paths":["owned.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":self.verify,"role":"implementer",
+            "done_when":"owned exists","acceptance_ids":["A001"],
+            "parallel":"none","split_children":[],"complexity":"S",
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.leaf},
+        }))
+        (self.project/"owned.txt").write_text("partial\n")
+        progress=self.work/"D001.progress.md"
+        progress.write_text("supervisor correction with required parameters\n")
+        progress_sha=hashlib.sha256(progress.read_bytes()).hexdigest()
+        self.progress_baseline=f"file:{progress_sha}"
+        (self.work/"D001.attempt-7.execution-baseline.json").write_text(
+            json.dumps({
+                "owner":"supervisor","deliverable":"D001","attempt":7,
+                "files":{
+                    ".opencode-v2/work/D001.progress.md":
+                        self.progress_baseline,
+                    "owned.txt":"file:"+hashlib.sha256(
+                        (self.project/"owned.txt").read_bytes()
+                    ).hexdigest(),
+                },
+            })
+        )
+        history=[
+            {"attempt":1,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":2,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":3,"classification":"infrastructure","reason":"runtime"},
+            {"attempt":4,"classification":"infrastructure","reason":"runtime"},
+            {"attempt":5,"classification":"infrastructure","reason":"wrapper"},
+            {"attempt":6,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":7,"classification":"genuine","reason":"verify-failed-1"},
+        ]
+        infra=[
+            {"grant":1,"source":"supervisor","kind":"runtime-cancel",
+             "session":"s3","evidence":"durable-partial-state-preserved",
+             "reason":"runtime"},
+            {"grant":1,"source":"supervisor","kind":"runtime-cancel",
+             "session":"s4","evidence":"durable-partial-state-preserved",
+             "reason":"runtime"},
+            {"grant":1,"source":"supervisor","kind":"runtime-cancel",
+             "session":"s5","evidence":"durable-partial-state-preserved",
+             "reason":"wrapper"},
+        ]
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{"D001":{
+                "automatic_limit":3,"count":7,
+                "sessions":["s1","s2","s3","s4","s5","s6",self.sid],
+                "failure_history":history,
+                "infrastructure_retry_grants":3,
+                "infrastructure_failures":infra,
+                "plan_contract_revisions":[{
+                    "attempt":6,
+                    "source":"supervisor-plan-contract-revision",
+                    "previous_verify_sha256":"old",
+                    "current_verify_sha256":hashlib.sha256(
+                        self.verify.encode()
+                    ).hexdigest(),
+                    "timestamp":"2026-09-25T00:00:00Z",
+                }],
+            }},
+        }))
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"still incomplete\n"
+        })()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001",self.sid,self.verify,checked,"verify-failed-1"
+        )
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def proof(self):
+        return {
+            "context_reads":1,
+            "truncated_context_reads":1,
+            "context_verify_visible":False,
+            "progress_read_denials":2,
+            "write_required_denials":13,
+            "maximum_steps_reached":True,
+            "completed_tool_turns":23,
+            "progress_baseline":self.progress_baseline,
+            "context_output_sha256":"a"*64,
+        }
+
+    def test_reclassifies_only_context_delivery_failure_and_grants_one_slot(self):
+        before=json.loads(
+            (self.work/"D001.verify-evidence.json").read_text()
+        )
+        initial=json.loads((self.work/"attempts.json").read_text())
+        initial_state=control_state.attempt_state(
+            initial["deliverables"]["D001"]
+        )
+        self.assertTrue(initial_state["valid"])
+        self.assertEqual(initial_state["allowed_attempts"],7)
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"context_delivery_failure_evidence",
+            return_value=self.proof(),
+        ), mock.patch.object(
+            supervisor,"context_delivery_fixes_installed",return_value=True
+        ):
+            ok,detail=supervisor.recover_context_delivery_failure("D001")
+        self.assertEqual((ok,detail),(True,"recovered"))
+
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        self.assertEqual(entry["count"],7)
+        self.assertEqual(
+            entry["sessions"],
+            ["s1","s2","s3","s4","s5","s6",self.sid],
+        )
+        self.assertEqual(entry["infrastructure_retry_grants"],3)
+        latest=entry["failure_history"][-1]
+        self.assertEqual(latest["attempt"],7)
+        self.assertEqual(latest["classification"],"infrastructure")
+        self.assertEqual(latest["original_reason"],"verify-failed-1")
+        self.assertEqual(
+            latest["reclassified_by"],
+            "runtime-context-delivery-repair",
+        )
+        recovery=entry["context_delivery_recoveries"][0]
+        self.assertEqual(
+            recovery["source"],"supervisor-context-delivery-repair"
+        )
+        self.assertEqual(recovery["grant"],1)
+        self.assertEqual(recovery["progress_baseline"],self.progress_baseline)
+
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["v2612_infrastructure_repair"])
+        self.assertEqual(state["infrastructure_retry_grants"],3)
+        self.assertEqual(state["context_delivery_retry_grants"],1)
+        self.assertEqual(state["plan_contract_retry_grants"],1)
+        self.assertEqual(state["allowed_attempts"],8)
+        self.assertEqual(state["automatic_attempts_consumed"],2)
+        self.assertEqual(
+            json.loads((self.work/"D001.verify-evidence.json").read_text()),
+            before,
+        )
+
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ):
+            self.assertEqual(
+                supervisor.recover_context_delivery_failure("D001"),
+                (True,"already-recovered"),
+            )
+
+    def test_refuses_without_denied_progress_read(self):
+        proof=self.proof()
+        proof["progress_read_denials"]=0
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"context_delivery_failure_evidence",
+            return_value=proof,
+        ), mock.patch.object(
+            supervisor,"context_delivery_fixes_installed",return_value=True
+        ):
+            ok,detail=supervisor.recover_context_delivery_failure("D001")
+        self.assertEqual(
+            (ok,detail),
+            (False,"context-delivery-recovery-progress-read-not-denied"),
+        )
+
+    def test_evidence_detects_compact_truncation_and_progress_denial(self):
+        context=str(
+            self.project/".opencode-v2/query/leaves/D001-context.json"
+        )
+        progress=str(self.work/"D001.progress.md")
+        parts=[
+            {"type":"tool","tool":"read","state":{
+                "status":"completed",
+                "input":{"filePath":context},
+                "output":(
+                    "<content>\n1: {\"current_progress\":\"facts... "
+                    "(line truncated to 2000 chars)\n\n"
+                    "(End of file - total 1 lines)\n</content>"
+                ),
+            }},
+            {"type":"tool","tool":"read","state":{
+                "status":"error",
+                "input":{"filePath":progress},
+                "error":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED "
+                        "IMPLEMENTATION_WRITE_REQUIRED deliverable=D001",
+            }},
+        ]
+        for _ in range(3):
+            parts.append({"type":"tool","tool":"bash","state":{
+                "status":"error","input":{"command":"pwd"},
+                "error":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED "
+                        "IMPLEMENTATION_WRITE_REQUIRED deliverable=D001",
+            }})
+        records=[{"id":"m1","data":{"role":"assistant"}}]
+        with mock.patch.object(
+            supervisor,"_v1_message_records",return_value=records
+        ), mock.patch.object(
+            supervisor,"_v1_message_parts",return_value=parts
+        ), mock.patch.object(
+            supervisor,"last_assistant_text_db",
+            return_value="Maximum steps for this agent have been reached."
+        ), mock.patch.object(
+            supervisor,"persisted_completed_tool_turns",return_value=8
+        ):
+            evidence=supervisor.context_delivery_failure_evidence(
+                self.sid,"D001",7
+            )
+        self.assertEqual(evidence["context_reads"],1)
+        self.assertEqual(evidence["truncated_context_reads"],1)
+        self.assertFalse(evidence["context_verify_visible"])
+        self.assertEqual(evidence["progress_read_denials"],1)
+        self.assertEqual(evidence["write_required_denials"],4)
+        self.assertTrue(evidence["maximum_steps_reached"])
+        self.assertEqual(evidence["progress_baseline"],self.progress_baseline)
+        self.assertEqual(len(evidence["context_output_sha256"]),64)
+
+    def test_progress_read_is_one_shot_and_hard_deadline_is_reachable(self):
+        progress=str(self.work/"D001.progress.md")
+        prompt="DELIVERABLE: D001\n"
+        patches=(
+            mock.patch.object(
+                supervisor,"_session_agent_db",return_value="implementer"
+            ),
+            mock.patch.object(
+                supervisor,"first_user_text_db",return_value=prompt
+            ),
+            mock.patch.object(
+                supervisor,"persisted_completed_tool_turns",return_value=4
+            ),
+            mock.patch.object(
+                supervisor,"attempt_sequence_for_session",return_value=7
+            ),
+            mock.patch.object(
+                supervisor,"_owned_artifact_changed_since_execution_baseline",
+                return_value=(False,"unchanged")
+            ),
+        )
+        with patches[0],patches[1],patches[2],patches[3],patches[4]:
+            state,detail=supervisor.implementation_direct_write_gate_state(
+                self.sid,"read",{"filePath":progress}
+            )
+            self.assertEqual(state,"implementation-progress-read-once")
+            self.assertIn("next_tool=direct-owned-artifact-write",detail)
+            marker=supervisor.implementation_progress_read_marker("D001",7)
+            self.assertTrue(marker.is_file())
+            with mock.patch.object(
+                supervisor,"set_abort_intent"
+            ) as abort:
+                state,detail=supervisor.enforce_early_write_gate(
+                    self.sid,"bash",{"command":"pwd"}
+                )
+            self.assertEqual(state,"deny")
+            self.assertIn("implementation_direct_write_noncompliance",detail)
+            abort.assert_called_once()
+
+
 class HistoricalParentContractRepairResolutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()

@@ -6,6 +6,7 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            load_attempts as state_load_attempts,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
+                           MAX_CONTEXT_DELIVERY_RETRY_GRANTS,
                            MAX_UNMATERIALIZED_DISPATCH_REPLAYS,
                            MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
                            RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
@@ -3510,6 +3511,299 @@ def recover_sandbox_wrapper_history_poison(did):
     return True,"recovered"
 
 
+CONTEXT_DELIVERY_RECOVERY_PROTOCOL="v2-context-delivery-recovery-v1"
+
+
+def context_delivery_failure_evidence(sid,did,attempt):
+    """Return durable evidence for the compact-context/direct-write trap."""
+    result={
+        "context_reads":0,
+        "truncated_context_reads":0,
+        "context_verify_visible":False,
+        "progress_read_denials":0,
+        "write_required_denials":0,
+        "maximum_steps_reached":False,
+        "completed_tool_turns":0,
+        "progress_baseline":"",
+        "context_output_sha256":"",
+    }
+    if not sid or not did or int(attempt or 0)<1:
+        return result
+
+    progress_rel=f".opencode-v2/work/{did}.progress.md"
+    context_rel=f".opencode-v2/query/leaves/{did}-context.json"
+    context_outputs=[]
+    try:
+        records=_v1_message_records(sid)
+    except Exception:
+        records=[]
+    for record in records:
+        if record.get("data",{}).get("role")!="assistant":
+            continue
+        for part in _v1_message_parts(record["id"]):
+            if part.get("type")!="tool":
+                continue
+            tool=str(part.get("tool") or "")
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            raw=state.get("input")
+            if isinstance(raw,dict):
+                args=raw
+            elif isinstance(raw,str):
+                try:
+                    args=json.loads(raw)
+                except Exception:
+                    args={}
+            else:
+                args={}
+            error=str(state.get("error") or "")
+            output=str(state.get("output") or "")
+            if (
+                tool=="read"
+                and _tool_targets_exact_project_path(
+                    tool,args,context_rel
+                )
+            ):
+                result["context_reads"]+=1
+                context_outputs.append(output)
+                if (
+                    "line truncated to 2000 chars" in output
+                    and "(End of file - total 1 lines)" in output
+                ):
+                    result["truncated_context_reads"]+=1
+                if '"verify_command"' in output:
+                    result["context_verify_visible"]=True
+            if "IMPLEMENTATION_WRITE_REQUIRED" in error:
+                result["write_required_denials"]+=1
+                if (
+                    tool=="read"
+                    and _tool_targets_exact_project_path(
+                        tool,args,progress_rel
+                    )
+                ):
+                    result["progress_read_denials"]+=1
+
+    if context_outputs:
+        material="\n".join(context_outputs).encode("utf-8")
+        result["context_output_sha256"]=hashlib.sha256(material).hexdigest()
+
+    baseline=execution_baseline_path(did,attempt)
+    try:
+        data=load_json_object(
+            baseline,label=f"execution baseline {did} attempt {attempt}"
+        )
+        files=data.get("files") if isinstance(data.get("files"),dict) else {}
+        value=str(files.get(progress_rel) or "")
+        if value.startswith("file:") and len(value)==69:
+            result["progress_baseline"]=value
+    except Exception:
+        pass
+
+    result["maximum_steps_reached"]=bool(
+        re.search(
+            r"maximum steps for this agent have been reached",
+            last_assistant_text_db(sid) or "",
+            re.IGNORECASE,
+        )
+    )
+    result["completed_tool_turns"]=persisted_completed_tool_turns(sid)
+    return result
+
+
+def context_delivery_fixes_installed():
+    """Require both halves of the repair before granting a replacement."""
+    try:
+        query_source=(
+            ROOT/"scripts"/"control_query_views.py"
+        ).read_text(errors="replace")
+        supervisor_source=Path(__file__).read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        'json.dumps(payload, sort_keys=True, indent=2)' in query_source
+        and "v2-implementation-progress-read-once-v1" in supervisor_source
+        and "implementation_direct_write_noncompliance" in supervisor_source
+    )
+
+
+def recover_context_delivery_failure(did):
+    """Replace one attempt lost to mechanically hidden authoritative context."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"context-delivery-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"context-delivery-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+            ):
+                return False,"context-delivery-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("context_delivery_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"context-delivery-recovery-history-invalid"
+            if len(prior)>=MAX_CONTEXT_DELIVERY_RETRY_GRANTS:
+                if any(
+                    isinstance(item,dict)
+                    and int(item.get("attempt") or 0)==count
+                    and item.get("session")==sid
+                    for item in prior
+                ):
+                    return True,"already-recovered"
+                return False,"context-delivery-recovery-limit"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-1"
+            ):
+                return False,"context-delivery-recovery-terminal-failure-mismatch"
+            if count < int(state.get("allowed_attempts") or 0):
+                return False,"context-delivery-recovery-not-exhausted"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"context-delivery-recovery-session-still-active"
+
+    evidence=context_delivery_failure_evidence(sid,did,count)
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    deadline=early_write_completed_turn_limit(leaf)
+    if int(evidence.get("context_reads") or 0)<1:
+        return False,"context-delivery-recovery-context-read-missing"
+    if int(evidence.get("truncated_context_reads") or 0)<1:
+        return False,"context-delivery-recovery-context-not-truncated"
+    if evidence.get("context_verify_visible"):
+        return False,"context-delivery-recovery-verify-was-visible"
+    if not evidence.get("progress_baseline"):
+        return False,"context-delivery-recovery-progress-not-in-baseline"
+    if int(evidence.get("progress_read_denials") or 0)<1:
+        return False,"context-delivery-recovery-progress-read-not-denied"
+    if int(evidence.get("write_required_denials") or 0)<deadline:
+        return False,"context-delivery-recovery-insufficient-gate-denials"
+    if not evidence.get("maximum_steps_reached"):
+        return False,"context-delivery-recovery-no-max-step-terminal"
+    if int(evidence.get("completed_tool_turns") or 0)<deadline:
+        return False,"context-delivery-recovery-insufficient-tool-turns"
+    if not context_delivery_fixes_installed():
+        return False,"context-delivery-recovery-current-code-unfixed"
+
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    canonical=str(leaf.get("verify_command") or "")
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")=="verify-failed-1"
+        and int(verify.get("exit_code") or -1)==1
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"context-delivery-recovery-verify-evidence-mismatch"
+
+    reason=(
+        "context-delivery-failure "
+        f"truncated_context={evidence['truncated_context_reads']} "
+        f"progress_read_denied={evidence['progress_read_denials']} "
+        f"write_required_denials={evidence['write_required_denials']} "
+        "maximum_steps_reached"
+    )
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"context-delivery-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"context-delivery-recovery-ledger-changed"
+            prior=entry.setdefault("context_delivery_recoveries",[])
+            if prior:
+                return False,"context-delivery-recovery-limit"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or failures[0].get("classification")!="genuine":
+                return False,"context-delivery-recovery-failure-changed"
+
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]=str(failure.get("reason") or "")
+            failure["classification"]="infrastructure"
+            failure["reason"]=reason
+            failure["reclassified_by"]="runtime-context-delivery-repair"
+            prior.append({
+                "protocol":CONTEXT_DELIVERY_RECOVERY_PROTOCOL,
+                "source":"supervisor-context-delivery-repair",
+                "grant":1,
+                "attempt":count,
+                "session":sid,
+                "context_reads":int(evidence["context_reads"]),
+                "truncated_context_reads":int(
+                    evidence["truncated_context_reads"]
+                ),
+                "progress_read_denials":int(
+                    evidence["progress_read_denials"]
+                ),
+                "write_required_denials":int(
+                    evidence["write_required_denials"]
+                ),
+                "completed_tool_turns":int(
+                    evidence["completed_tool_turns"]
+                ),
+                "progress_baseline":str(evidence["progress_baseline"]),
+                "context_output_sha256":str(
+                    evidence["context_output_sha256"]
+                ),
+                "verify_result":"verify-failed-1",
+                "timestamp":time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                ),
+            })
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(
+                    projected.get("context_delivery_retry_grants") or 0
+                )!=1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"context-delivery-recovery-projected-ledger-invalid"
+            save_attempts(data)
+
+    log(
+        f"CONTEXT_DELIVERY_RECOVERY deliverable={did} attempt={count} "
+        f"session={sid} truncated={evidence['truncated_context_reads']} "
+        f"progress_denials={evidence['progress_read_denials']} "
+        f"gate_denials={evidence['write_required_denials']}"
+    )
+    csv(
+        "CONTEXT_DELIVERY_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} truncated={evidence['truncated_context_reads']} "
+        f"progress_denials={evidence['progress_read_denials']} "
+        f"gate_denials={evidence['write_required_denials']}",
+    )
+    return True,"recovered"
+
+
 HISTORICAL_PARENT_REPAIR_RESOLUTION_PROTOCOL=(
     "v2-historical-parent-contract-repair-resolution-v1"
 )
@@ -6207,12 +6501,29 @@ def probe_direct_write_gate_state(sid,tool="",args=None):
     )
 
 
+def implementation_progress_read_marker(did,attempt):
+    return (
+        Path(PROJECT)/".opencode-v2"/"work"/
+        f"{did}.attempt-{int(attempt)}.implementation-progress-read.json"
+    )
+
+
+def implementation_progress_read_available(did,attempt):
+    progress=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+    return (
+        int(attempt or 0)>0
+        and progress.is_file()
+        and not implementation_progress_read_marker(did,attempt).exists()
+    )
+
+
 def implementation_direct_write_gate_state(sid,tool="",args=None):
     """After context inspection, steer implementation leaves to an owned write.
 
-    Unlike the later early-write deadline, this is a recoverable boundary: the
-    rejected discovery call is shown to the worker and it can immediately make
-    the required owned-artifact write without losing the attempt.
+    A pre-existing progress file may contain supervisor/predecessor state that
+    cannot fit on one JSON context line. Permit exactly one direct read of that
+    exact file before requiring the owned write. All other discovery remains
+    denied.
     """
     agent=_session_agent_db(sid)
     if agent not in IMPLEMENTATION_AGENTS or agent in READ_ONLY_SPLIT_ROLES:
@@ -6238,9 +6549,37 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
             f"implementation_direct_write completed_tool_turns={turns} "
             f"owned_artifact_write={did}"
         )
+
+    progress_rel=f".opencode-v2/work/{did}.progress.md"
+    progress_available=implementation_progress_read_available(did,attempt)
+    if (
+        progress_available
+        and tool=="read"
+        and _tool_targets_exact_project_path(tool,args,progress_rel)
+    ):
+        marker=implementation_progress_read_marker(did,attempt)
+        atomic_write_json(marker,{
+            "owner":"supervisor",
+            "protocol":"v2-implementation-progress-read-once-v1",
+            "deliverable":did,
+            "attempt":int(attempt),
+            "session":sid,
+            "path":progress_rel,
+            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        })
+        return "implementation-progress-read-once",(
+            f"implementation_direct_write completed_tool_turns={turns} "
+            f"allowed_once=read {progress_rel} next_tool=direct-owned-artifact-write"
+        )
+
+    progress_hint=(
+        f" allowed_once=read {progress_rel} then direct-owned-artifact-write"
+        if progress_available else ""
+    )
     return "implementation-write-required",(
         f"IMPLEMENTATION_WRITE_REQUIRED deliverable={did} completed_tool_turns={turns} "
         f"required=1 detail={detail} next_tool=direct-owned-artifact-write"
+        f"{progress_hint}"
     )
 
 
@@ -6250,10 +6589,43 @@ def enforce_early_write_gate(sid,tool="",args=None):
         sid,tool,args
     )
     if implementation_state=="implementation-write-required":
+        did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        turns=persisted_completed_tool_turns(sid)
+        deadline=early_write_completed_turn_limit(leaf)
+        attempt=attempt_sequence_for_session(sid,did) if did else 0
+        if not attempt and did:
+            entry=(load_attempts().get("deliverables") or {}).get(did,{})
+            attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+        # A pre-existing progress file gets exactly one direct read. Once that
+        # durable context has been exposed, the ordinary hard early-write
+        # deadline becomes reachable instead of being masked forever by the
+        # recoverable direct-write steering branch.
+        if (
+            did and turns>=deadline
+            and not implementation_progress_read_available(did,attempt)
+        ):
+            agent=_session_agent_db(sid)
+            reason=(
+                "implementation_direct_write_noncompliance "
+                f"completed_tool_turns={turns} deadline={deadline} "
+                f"deliverable={did}"
+            )
+            set_abort_intent(sid,reason,agent,"requested")
+            log(
+                f"PLUGIN_INTERRUPT_REQUESTED session={sid} "
+                f"agent={agent} reason={reason}"
+            )
+            csv("PLUGIN_INTERRUPT_REQUESTED",sid,agent,reason)
+            return "deny",reason
         log(f"IMPLEMENTATION_WRITE_REQUIRED session={sid} {implementation_detail}")
         csv("IMPLEMENTATION_WRITE_REQUIRED",sid,_session_agent_db(sid),implementation_detail)
         return implementation_state,implementation_detail
-    if implementation_state in {"implementation-write-only","satisfied"}:
+    if implementation_state in {
+        "implementation-write-only",
+        "implementation-progress-read-once",
+        "satisfied",
+    }:
         return implementation_state,implementation_detail
 
     probe_state,probe_detail=probe_direct_write_gate_state(sid,tool,args)
@@ -9934,7 +10306,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -10253,6 +10625,27 @@ def main():
         print(
             f"SANDBOX_WRAPPER_HISTORY_RECOVERY_ALLOW "
             f"deliverable={args.recover_sandbox_wrapper_history_poison} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_context_delivery_failure:
+        if unknown or not args.project:
+            raise SystemExit(
+                "context-delivery recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_context_delivery_failure(
+            args.recover_context_delivery_failure
+        )
+        if not ok:
+            raise SystemExit(
+                f"CONTEXT_DELIVERY_RECOVERY_DENY "
+                f"deliverable={args.recover_context_delivery_failure} "
+                f"reason={detail}"
+            )
+        print(
+            f"CONTEXT_DELIVERY_RECOVERY_ALLOW "
+            f"deliverable={args.recover_context_delivery_failure} "
             f"reason={detail}"
         )
         return

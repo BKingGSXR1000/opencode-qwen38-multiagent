@@ -17,6 +17,10 @@ MAX_SPLIT_DEPTH = 2
 # *dispatch slot* without relabelling a broken beta compaction as a successful
 # implementation attempt.  It is deliberately not a general retry mechanism.
 MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
+# One additional replacement is permitted only when the supervisor can prove
+# that the worker's authoritative context was mechanically truncated/blocked
+# and that the resulting attempt was reclassified as infrastructure.
+MAX_CONTEXT_DELIVERY_RETRY_GRANTS = 1
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS = MAX_INFRASTRUCTURE_RETRY_GRANTS
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # A human authorization may survive one *proven, pre-execution* runtime abort.
@@ -230,6 +234,51 @@ def _plan_contract_revision_credit_count(entry, count):
     return len(seen)
 
 
+def _context_delivery_recovery_credit_count(entry, count):
+    if not isinstance(entry,dict):
+        return 0
+    rows=entry.get("context_delivery_recoveries") or []
+    history=entry.get("failure_history") or []
+    if not isinstance(rows,list) or not isinstance(history,list):
+        return 0
+    recovered=set()
+    for row in rows:
+        if not isinstance(row,dict):
+            continue
+        try:
+            grant=int(row.get("grant") or 0)
+            attempt=int(row.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        if (
+            row.get("source")!="supervisor-context-delivery-repair"
+            or grant!=1
+        ):
+            continue
+        session=row.get("session")
+        if not (1 <= attempt <= count and isinstance(session,str) and session):
+            continue
+        matched=False
+        for item in history:
+            if not isinstance(item,dict):
+                continue
+            try:
+                failure_attempt=int(item.get("attempt") or 0)
+            except (TypeError,ValueError):
+                continue
+            if (
+                failure_attempt==attempt
+                and item.get("classification")=="infrastructure"
+                and item.get("reclassified_by")==
+                    "runtime-context-delivery-repair"
+            ):
+                matched=True
+                break
+        if matched:
+            recovered.add(attempt)
+    return min(len(recovered),MAX_CONTEXT_DELIVERY_RETRY_GRANTS)
+
+
 def _parent_contract_repair_credit_count(entry, count):
     if not isinstance(entry,dict):
         return 0
@@ -279,6 +328,7 @@ def _attempt_state_v2612_original(entry):
                 "total_dispatches": -1, "automatic_attempts_consumed": 0,
                 "infrastructure_retry_grants": 0,
                 "infrastructure_grants_remaining": 0,
+                "context_delivery_retry_grants": 0,
                 "allowed_attempts": AUTOMATIC_ATTEMPT_LIMIT,
                 "infrastructure_authorized_attempt": False,
                 "operator_authorized_attempt": False}
@@ -330,8 +380,14 @@ def _attempt_state_v2612_original(entry):
     # it afterwards incorrectly turns that legal replacement into an invalid
     # operator reservation.
     plan_contract_credits=_plan_contract_revision_credit_count(entry,count)
+    context_delivery_credits=_context_delivery_recovery_credit_count(entry,count)
     bad_plan_credits=_parent_contract_repair_credit_count(entry,count)
-    non_operator_credits=infrastructure_grants+plan_contract_credits+bad_plan_credits
+    non_operator_credits=(
+        infrastructure_grants
+        + plan_contract_credits
+        + context_delivery_credits
+        + bad_plan_credits
+    )
 
     operator_attempts = entry.get("operator_retry_attempts", [])
     if not isinstance(operator_attempts, list):
@@ -437,6 +493,7 @@ def _attempt_state_v2612_original(entry):
         "operator_authorized_attempt": valid and operator_dispatches > 0,
         "bad_plan_retry_grants": bad_plan_credits,
         "plan_contract_retry_grants": plan_contract_credits,
+        "context_delivery_retry_grants": context_delivery_credits,
     }
 
 # V2.6.12 INFRASTRUCTURE LEDGER REPAIR BEGIN
@@ -506,17 +563,33 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
             return state
         classifications.append(classification)
 
-    infra_history = classifications.count("infrastructure")
+    infrastructure_rows=[
+        item for item in history
+        if isinstance(item,dict) and item.get("classification")=="infrastructure"
+    ]
+    context_delivery_history=sum(
+        1 for item in infrastructure_rows
+        if item.get("reclassified_by")=="runtime-context-delivery-repair"
+    )
+    infra_history=len(infrastructure_rows)-context_delivery_history
     genuine_failures = classifications.count("genuine")
     bad_plan_history = classifications.count("bad-plan")
     plan_contract_credits = _plan_contract_revision_credit_count(entry,count)
+    context_delivery_credits = _context_delivery_recovery_credit_count(entry,count)
     bad_plan_credits = _parent_contract_repair_credit_count(entry,count)
     # record_infrastructure_abort writes the grant immediately before the
     # matching infrastructure failure-history row, so at most one grant may be
     # temporarily ahead of failure_history.
     if infra_history > infra_grants or infra_grants - infra_history > 1:
         return state
-    if genuine_failures > automatic_limit:
+    if context_delivery_history != context_delivery_credits:
+        return state
+    if genuine_failures > (
+        automatic_limit
+        + plan_contract_credits
+        + context_delivery_credits
+        + bad_plan_credits
+    ):
         return state
     # Every bad-plan row must be backed by the durable supervisor repair
     # resolution; otherwise this compatibility path must stay fail-closed.
@@ -527,6 +600,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         automatic_limit
         + infra_grants
         + plan_contract_credits
+        + context_delivery_credits
         + bad_plan_credits
     )
     if count > allowed:
@@ -542,9 +616,20 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         "valid": True,
         "count": count,
         "automatic_limit": automatic_limit,
-        "automatic_attempts_consumed": genuine_failures,
+        "automatic_attempts_consumed": max(
+            0,
+            min(
+                count
+                - infra_grants
+                - plan_contract_credits
+                - context_delivery_credits
+                - bad_plan_credits,
+                automatic_limit,
+            ),
+        ),
         "infrastructure_retry_grants": infra_grants,
         "plan_contract_retry_grants": plan_contract_credits,
+        "context_delivery_retry_grants": context_delivery_credits,
         "bad_plan_retry_grants": bad_plan_credits,
         "allowed_attempts": allowed,
         # Keep the canonical ordering: infrastructure credits are consumed
