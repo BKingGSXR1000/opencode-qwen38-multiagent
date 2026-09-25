@@ -6465,6 +6465,11 @@ def run_verify_fail_closed(command,runner=subprocess.run,session=""):
 def ownership_baseline_path(did):
     return Path(PROJECT)/".opencode-v2/work"/f"{did}.ownership-baseline.json"
 
+def generated_python_cache_path(path):
+    """True for interpreter bytecode/cache artifacts, never durable project work."""
+    p=Path(path)
+    return "__pycache__" in p.parts or p.suffix in {".pyc",".pyo"}
+
 def project_fingerprints():
     """Fingerprint regular project files for a claimed leaf's ownership check."""
     root=Path(PROJECT); result={}
@@ -6473,6 +6478,8 @@ def project_fingerprints():
             continue
         relative=path.relative_to(root).as_posix()
         if relative.startswith(".opencode-v2/work/"):
+            continue
+        if generated_python_cache_path(relative):
             continue
         try:
             result[relative]=hashlib.sha256(path.read_bytes()).hexdigest()
@@ -6515,6 +6522,8 @@ def execution_scope_fingerprints(did):
                 if not child.is_file():
                     continue
                 relchild=child.relative_to(root).as_posix()
+                if generated_python_cache_path(relchild):
+                    continue
                 try:
                     result[relchild]="file:"+hashlib.sha256(child.read_bytes()).hexdigest()
                 except OSError:
