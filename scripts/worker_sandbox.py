@@ -943,7 +943,11 @@ def _prepare_verify_shadow(project: Path, shadow: Path, lower_root: str):
         raise SandboxError(f"cannot enumerate project for Verify snapshot: {exc}") from exc
     for child in children:
         rel=child.name
-        if rel==".git" or path_is_ephemeral(rel):
+        # Control/query files are published atomically by the live supervisor.
+        # Keep the entire control tree on the read-only lower mount instead of
+        # copying it into the disposable validator shadow; copying can race a
+        # short-lived .<name>.<random>.tmp publication file.
+        if rel in {".git", ".opencode-v2"} or path_is_ephemeral(rel):
             continue
         if child.is_dir() and not child.is_symlink():
             rel += "/"

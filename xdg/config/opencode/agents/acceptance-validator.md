@@ -53,6 +53,20 @@ Finite-step rule:
 - if evidence is still insufficient, write a FAIL report naming the unsupported
   Axxx IDs instead of consuming the remaining steps.
 
+Executable-command provenance:
+- NEVER invent, rewrite, simplify, or paraphrase an executable command for the
+  acceptance report.
+- If TEST_REPORT or a supervisor-owned `D*.verify-evidence.json` already
+  executed a command that proves the MUST, copy that exact command and its
+  observed exit code verbatim into the report.
+- Otherwise copy the exact command already specified for that MUST in the
+  ACCEPTANCE.md Evidence Strategy and execute that exact string before
+  recording its exit code.
+- One already-proven canonical command may be reused verbatim for multiple MUST
+  IDs when it proves all of them.
+- If no canonical executable command proves a MUST, report FAIL rather than
+  synthesizing a new command.
+
 Use live `bash` only when a MUST still has a genuine evidence gap. Every live
 command MUST:
 - be one physical line;

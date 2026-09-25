@@ -18,6 +18,7 @@ import deterministic_dispatch
 import stage_a_controller as controller
 import stage_a_path_permissions as path_permissions
 import supervisor
+import worker_sandbox
 
 
 OWNED = ".opencode-v2/ACCEPTANCE.md"
@@ -515,6 +516,30 @@ class AcceptanceValidatorBudgetTests(unittest.TestCase):
         self.assertIn("spend at most 6 tool-call rounds gathering evidence",role)
         self.assertIn("no later than your 8th assistant/tool step",role)
         self.assertIn("the report write is mandatory",role)
+
+    def test_validator_cannot_invent_executable_report_commands(self):
+        role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
+        self.assertIn("NEVER invent, rewrite, simplify, or paraphrase an executable command",role)
+        self.assertIn("copy that exact command and its",role)
+        self.assertIn("One already-proven canonical command may be reused verbatim",role)
+
+
+class ValidatorShadowControlTreeTests(unittest.TestCase):
+    def test_validator_shadow_keeps_live_control_tree_on_read_only_lower_mount(self):
+        with tempfile.TemporaryDirectory() as td:
+            base=Path(td)
+            project=base/"project"
+            shadow=base/"shadow"
+            (project/".opencode-v2/query/leaves").mkdir(parents=True)
+            (project/".opencode-v2/query/leaves/D001.json").write_text("{}\n")
+            (project/"README.md").write_text("hello\n")
+            worker_sandbox._prepare_verify_shadow(
+                project,shadow,"/v2-lower"
+            )
+            control=shadow/".opencode-v2"
+            self.assertTrue(control.is_symlink())
+            self.assertEqual(os.readlink(control),"/v2-lower/.opencode-v2")
+            self.assertTrue((shadow/"README.md").is_file())
 
 
 class ControllerShadowCoherenceTests(unittest.TestCase):
