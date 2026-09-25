@@ -1188,6 +1188,41 @@ def normalize_worker_bash_command(project: Path, ctx, command: str):
     return current
 
 
+def normalize_validator_bash_command(project: Path, session: str, command: str):
+    """Collapse reflected canonical validator wrappers back to one layer."""
+    current=str(command)
+    prefix=[
+        "python3",str(Path(__file__).resolve()),"run-validator-bash",
+        "--project",str(project.resolve()),
+        "--session",session,
+        "--command-b64",
+    ]
+    for _ in range(8):
+        try:
+            parts=shlex.split(current,posix=True)
+        except ValueError:
+            return current
+        if len(parts)!=len(prefix)+1 or parts[:-1]!=prefix:
+            return current
+        token=parts[-1]
+        try:
+            raw=base64.b64decode(token,validate=True)
+            current=raw.decode("utf-8")
+        except Exception as exc:
+            raise SandboxError(
+                "ACCEPTANCE_FIREWALL_DENY malformed canonical validator wrapper"
+            ) from exc
+    try:
+        parts=shlex.split(current,posix=True)
+    except ValueError:
+        return current
+    if len(parts)==len(prefix)+1 and parts[:-1]==prefix:
+        raise SandboxError(
+            "ACCEPTANCE_FIREWALL_DENY excessive canonical validator wrapper nesting"
+        )
+    return current
+
+
 def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str, args):
     ctx=resolve_worker(project,session,call_id,agent)
     if not ctx.get("worker"):
@@ -1211,6 +1246,7 @@ def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str,
                 command=args.get("command") if isinstance(args,dict) else None
                 if not isinstance(command,str) or not command.strip():
                     raise SandboxError("acceptance-validator bash command missing")
+                command=normalize_validator_bash_command(project,ctx["session"],command)
                 return {"action":"replace-validator-bash","worker":False,"validator":True,"command":replacement_validator_command(project,ctx["session"],command)}
         return {"action":"pass","worker":False,"reason":ctx.get("reason","")}
     if tool=="execute":
@@ -1307,6 +1343,23 @@ def selftest(require_bwrap=False):
         assert normalize_worker_bash_command(project,ctx,raw_cmd)==raw_cmd
         assert normalize_worker_bash_command(project,ctx,wrapped)==raw_cmd
         assert normalize_worker_bash_command(project,ctx,double_wrapped)==raw_cmd
+
+        validator_raw="python3 -m unittest discover -s tests -v"
+        validator_wrapped=replacement_validator_command(
+            project,"ses_acceptance",validator_raw
+        )
+        validator_double=replacement_validator_command(
+            project,"ses_acceptance",validator_wrapped
+        )
+        assert normalize_validator_bash_command(
+            project,"ses_acceptance",validator_raw
+        )==validator_raw
+        assert normalize_validator_bash_command(
+            project,"ses_acceptance",validator_wrapped
+        )==validator_raw
+        assert normalize_validator_bash_command(
+            project,"ses_acceptance",validator_double
+        )==validator_raw
 
         tampered=wrapped+" ; printf bad > other.txt"
         assert normalize_worker_bash_command(project,ctx,tampered)==tampered
