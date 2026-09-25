@@ -397,3 +397,12 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   stabilization 41 PASS, historical New51 replay 6 PASS over 121 archived
   decisions, transport-root 5 PASS, plus run-checks/finalizer/controller/
   restart-canary selftests PASS.
+
+## Corrective native-child transport live closure — 2026-09-25
+
+- Ran `scripts/run-d003-corrective-canary.sh` against the current local backend.
+- Disposable project: `/home/bking/AI/a2-canaries/20260925-124620-d003b-corrective/project`.
+- The deterministic malformed primary response consumed one logical splitter claim and one corrective turn only.
+- The technical root materialized exactly two native children total: the primary and one corrective child.
+- Final split status reached `accepted` with `corrective_dispatch_state=native-child-completed`; no third child or synthetic continuation was observed.
+- Canary emitted `D003_CORRECTIVE_CANARY_PASS` and exited 0. This closes the prior HTTP-204-without-child ambiguity without authorizing any retained D003-B replay.

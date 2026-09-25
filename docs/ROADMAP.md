@@ -86,20 +86,19 @@ Only after D passes:
     canary proves the current local splitter can repeat false invalid-contract
     assertions despite prompt tightening. Choose a deterministic fallback or
     revised bounded-claim policy before any further retained recovery.
-  - [~] bounded corrective-child transport is component-tested: one logical
-    claim permits a primary plus one separately intent-bound native corrective
-    splitter child, without another claim or recovery budget. Fresh disposable
-    preflight passed with zero launches and primary invalid-response handling
-    persisted the corrective intent at claim=1/corrective=1. The corrective
-    root POST returned HTTP 204 but produced no native child; do not replay it
-    or issue retained recovery until this v1 transport ambiguity is proven.
+  - [x] bounded corrective-child transport is live-proven: one logical claim
+    permits exactly a primary plus one separately intent-bound native corrective
+    splitter child, without another claim or recovery budget. The deterministic
+    D003-B canary on 2026-09-25 produced exactly two native root children,
+    reached corrective_dispatch_state=native-child-completed, and observed zero
+    synthetic continuation messages.
 - [ ] preserve exact Verify and attempt evidence
 - [ ] never use D002 as a disposable test target
 
 ## F. Continuous/generic operation
 - [ ] prove generic driver advances across multiple action types without manual orchestration
-- [ ] prove restart/resume from durable state
-- [ ] prove no duplicate semantic dispatch after ambiguous transport outcomes
+- [x] prove restart/resume from durable state
+- [x] prove no duplicate semantic dispatch after ambiguous transport outcomes
 - [ ] prove preflight cannot be bypassed by normal launcher/driver entrypoints
 - [ ] validate concise terminal/block reporting
 - [ ] final static/component/integration suite

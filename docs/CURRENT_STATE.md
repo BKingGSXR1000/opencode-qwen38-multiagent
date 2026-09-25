@@ -277,25 +277,26 @@ Keep Work context small: exact DB rows, exact session/event grep, bounded log/fi
 
 Update this file after meaningful state changes so a fresh Work session can resume without reconstructing history.
 
-## Unproven corrective-native-child transport — 2026-09-22
+## Corrective-native-child transport — live proven 2026-09-25
 
-The bounded correction policy now treats one logical splitter claim as at most
-two native `task-splitter` children: a primary child plus one corrective child.
+The bounded correction policy treats one logical splitter claim as at most two
+native `task-splitter` children: a primary child plus one corrective child.
 The corrective child is separately intent-bound to the existing claim, primary
 session, deterministic rejection hash, ordinal `1`, and technical root; it
 does not increment the splitter claim count or grant another recovery budget.
 The direct context carries the unchanged canonical split request, primary
 response, exact deterministic rejection, and a bare-JSON-only instruction.
 
-Focused splitter component coverage passes (26 tests), as do Python/Node syntax
-checks. A fresh disposable D003-B-equivalent preflight passed with zero POSTs
-and zero worker launches. Its primary response was deterministically invalid;
-the corrective intent persisted at claim count `1` / corrective count `1`, and
-the corrective root `prompt_async` returned HTTP 204. However, no second native
-child appeared under the root, so that accepted POST remains transport-ambiguous.
-No replay was attempted. This implementation is component-tested but is **not
-yet proven end-to-end live**. The disposable runtime was stopped. Retained
-D003-B/D003/D002/D004 state and recovery budgets were not touched.
+The deterministic live canary
+`/home/bking/AI/a2-canaries/20260925-124620-d003b-corrective/project`
+closed the prior transport ambiguity. Its malformed primary response triggered
+exactly one corrective intent and the quiesced technical-root POST materialized
+a second native `task-splitter` child. Final assertions passed with
+`claim_count=1`, `corrective_turn_count=1`,
+`corrective_dispatch_state=native-child-completed`, exactly two root children,
+and zero synthetic continuation messages. The canary exited 0 with
+`D003_CORRECTIVE_CANARY_PASS`. No retained D003-B/D003/D002/D004 state or
+recovery budget was touched.
 
 ## Deterministic full-run and restart/crash validation — 2026-09-25
 
