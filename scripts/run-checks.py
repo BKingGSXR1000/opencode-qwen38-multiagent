@@ -119,7 +119,7 @@ def bootstrap_control_surface(project):
         atomic_write(path,text); path.chmod(path.stat().st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)
     return wrappers
 
-def run_checks(project: Path):
+def run_checks(project: Path, persist=True):
     ctrl=project/".opencode-v2"; spec_path=ctrl/"TEST_CHECKS.json"; report_path=ctrl/"TEST_REPORT.json"; logs=ctrl/"test-logs"
     if not spec_path.exists(): raise ValueError("TEST_CHECKS.json missing")
     try: spec=json.loads(spec_path.read_text()); checks,required=validate_test_checks(spec)
@@ -127,7 +127,9 @@ def run_checks(project: Path):
     required_targets=[]
     for raw in required: required_targets.append((raw,validate_required_file(project,raw)))
     missing=[raw for raw,target in required_targets if not target.exists()]
-    results=[]; logs.mkdir(parents=True,exist_ok=True)
+    results=[]
+    if persist:
+        logs.mkdir(parents=True,exist_ok=True)
     for i,ch in enumerate(checks,1):
         name=ch["name"].strip(); cmd=ch["command"].strip(); timeout=ch.get("timeout_seconds",180)
         start=time.time(); timed_out=False; unsafe=validate_verify_command(cmd)
@@ -140,11 +142,13 @@ def run_checks(project: Path):
             except subprocess.TimeoutExpired as e:
                 rc=124; stdout=e.stdout or ""; stderr=e.stderr or ""; timed_out=True
         log=logs/f"{i:02d}-{slug(name)}.log"
-        atomic_write(log,f"$ {cmd}\nexit={rc} timeout={timed_out}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
+        if persist:
+            atomic_write(log,f"$ {cmd}\nexit={rc} timeout={timed_out}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
         results.append({"name":name,"command":cmd,"exit_code":rc,"timed_out":timed_out,"duration_seconds":round(time.time()-start,3),"log":str(log.relative_to(project))})
     passed=not missing and all(x["exit_code"]==0 and not x["timed_out"] for x in results)
     report={"protocol":"v2-test-report-v1","status":"pass" if passed else "fail","checks_run":len(results),"checks_passed":sum(1 for x in results if x["exit_code"]==0 and not x["timed_out"]),"missing_required_files":missing,"checks":results}
-    atomic_write(report_path,json.dumps(report,indent=2,sort_keys=True)+"\n")
+    if persist:
+        atomic_write(report_path,json.dumps(report,indent=2,sort_keys=True)+"\n")
     return report, 0 if passed else 1
 
 def selftest():
@@ -160,6 +164,14 @@ def selftest():
         (project/".opencode-v2/TEST_CHECKS.json").write_text(json.dumps({"checks":[{"name":"ok","command":"test -s ok.txt"}],"required_files":["ok.txt"]}))
         report,rc=run_checks(project)
         assert rc==0 and report["checks_passed"]==1, report
+        report_path=project/".opencode-v2/TEST_REPORT.json"
+        before=report_path.read_bytes()
+        log_paths=sorted((project/".opencode-v2/test-logs").glob("*.log"))
+        log_before={p.name:p.read_bytes() for p in log_paths}
+        report_ro,rc_ro=run_checks(project,persist=False)
+        assert rc_ro==0 and report_ro["checks_passed"]==1, report_ro
+        assert report_path.read_bytes()==before, "read-only run rewrote TEST_REPORT.json"
+        assert {p.name:p.read_bytes() for p in sorted((project/".opencode-v2/test-logs").glob("*.log"))}==log_before, "read-only run rewrote test logs"
     print("run-checks selftest: OK")
 
 def main():
@@ -177,7 +189,8 @@ def main():
         print(f"IMPLEMENTATION_PLAN_SCAFFOLD_READY {ctrl/'IMPLEMENTATION_PLAN.md'}")
         for path in wrappers: print(f"CONTROL_COMMAND_READY {path}")
         return
-    try: report,rc=run_checks(project)
+    persist=os.environ.get("V2_ACCEPTANCE_SANDBOX")!="1"
+    try: report,rc=run_checks(project,persist=persist)
     except ValueError as e: raise SystemExit(f"ERROR: {e}")
     print(json.dumps(report,indent=2)); raise SystemExit(rc)
 if __name__=="__main__": main()
