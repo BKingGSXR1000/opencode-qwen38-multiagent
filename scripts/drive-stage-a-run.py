@@ -25,6 +25,18 @@ class DriverError(RuntimeError):
     pass
 
 
+def transient_controller_race(exc: BaseException) -> bool:
+    message = str(exc)
+    return any(
+        marker in message
+        for marker in (
+            "transport root is not idle",
+            "state changed before dispatch:",
+            "deterministic actions changed before dispatch",
+        )
+    )
+
+
 def compact_event(receipt: dict) -> dict:
     if receipt.get("outcome") == "dispatched":
         action = ((receipt.get("receipt") or {}).get("action") or {})
@@ -51,9 +63,11 @@ def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: fl
         try:
             receipt = tick.execute_one(project, base_url, root_session)
         except controller.ControllerError as exc:
-            # A root can be transiently busy while its child materializes. This
-            # is neither a scheduling decision nor a reason to dispatch again.
-            if "transport root is not idle" not in str(exc):
+            # Runtime state can change between selection and the execution
+            # lock while another worker finalizes. These optimistic-concurrency
+            # races are reasons to re-project, never reasons to die or replay
+            # the stale dispatch.
+            if not transient_controller_race(exc):
                 raise DriverError(str(exc)) from exc
             time.sleep(poll)
             continue
@@ -81,6 +95,15 @@ def selftest() -> None:
         raise DriverError("terminal state classification mismatch")
     if terminal([{"kind": "wait"}]) is not None:
         raise DriverError("wait was classified terminal")
+    for message in (
+        "transport root is not idle",
+        "state changed before dispatch: selected=a current=b",
+        "deterministic actions changed before dispatch",
+    ):
+        if not transient_controller_race(controller.ControllerError(message)):
+            raise DriverError(f"transient controller race was not recognized: {message}")
+    if transient_controller_race(controller.ControllerError("real deterministic failure")):
+        raise DriverError("non-transient controller failure was masked")
     print("stage-a driver selftest: OK")
 
 
