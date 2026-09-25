@@ -266,6 +266,7 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
                 "D010-A","probe-builder"
             )
         self.assertIn("SANDBOX DISCOVERY RULE",prompt)
+        self.assertIn("multiple independent read/grep calls in parallel",prompt)
         self.assertIn("find -L",prompt)
         self.assertIn(
             "recursive find/glob that does not follow symlinks is NOT evidence",
