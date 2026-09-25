@@ -7508,6 +7508,17 @@ def grant_operator_retry(dids, reason="explicit operator retry command"):
             save_attempts(data)
     return selected
 
+def supervisor_replacement_ceiling(state):
+    """Highest dispatch sequence covered without a human/operator grant."""
+    return (
+        int(state.get("automatic_limit") or 0)
+        + int(state.get("infrastructure_retry_grants") or 0)
+        + int(state.get("bad_plan_retry_grants") or 0)
+        + int(state.get("plan_contract_retry_grants") or 0)
+        + int(state.get("context_delivery_retry_grants") or 0)
+    )
+
+
 def claim_attempt(sid,did):
     """Atomically reserve an automatic or explicitly operator-authorized attempt.
 
@@ -7549,9 +7560,17 @@ def claim_attempt(sid,did):
                             item["session"]=sid
                     save_attempts(data); session_task[sid]=(did,count)
                     return "existing",count
-                pending=[item for item in ent.get("operator_retry_attempts",[])
-                         if isinstance(item,dict) and item.get("state")=="reserved" and
-                         isinstance(item.get("session"),str) and item["session"].startswith("dispatch:")]
+                pending=[
+                    item for item in ent.get("operator_retry_attempts",[])
+                    if (
+                        isinstance(item,dict)
+                        and item.get("state")=="reserved"
+                        and isinstance(item.get("session"),str)
+                        and item["session"].startswith("dispatch:")
+                        and int(item.get("sequence") or 0)>
+                            supervisor_replacement_ceiling(state)
+                    )
+                ]
                 if sid.startswith("dispatch:") and pending:
                     # Repeated tool delivery of the same Dxxx must re-use the
                     # extant human authorization, not reserve another one.
@@ -7586,10 +7605,7 @@ def claim_attempt(sid,did):
                     return "limit",count
                 count+=1; ent["count"]=count; sessions.append(sid)
                 uses_operator=(
-                    count > state["automatic_limit"]
-                    + state["infrastructure_retry_grants"]
-                    + int(state.get("bad_plan_retry_grants") or 0)
-                    + int(state.get("plan_contract_retry_grants") or 0)
+                    count > supervisor_replacement_ceiling(state)
                 )
                 if uses_operator:
                     # This is a reservation, not consumption.  Only the
@@ -7616,7 +7632,13 @@ def consume_operator_reservation(sid,did,evidence):
             for item in entry.get("operator_retry_attempts",[]):
                 if isinstance(item,dict) and item.get("session")==sid and item.get("state")=="reserved":
                     sequence=int(item.get("sequence") or 0)
-                    if sequence <= (int(state.get("automatic_limit") or 0)+int(state.get("infrastructure_retry_grants") or 0)+int(state.get("bad_plan_retry_grants") or 0)+int(state.get("plan_contract_retry_grants") or 0)):
+                    if sequence <= (
+                        int(state.get("automatic_limit") or 0)
+                        + int(state.get("infrastructure_retry_grants") or 0)
+                        + int(state.get("bad_plan_retry_grants") or 0)
+                        + int(state.get("plan_contract_retry_grants") or 0)
+                        + int(state.get("context_delivery_retry_grants") or 0)
+                    ):
                         return False,"supervisor-replacement-not-operator"
                     item.update({"state":"consumed", "outcome":"meaningful_execution",
                                  "consumes_operator_grant":True, "evidence":evidence,
@@ -7643,7 +7665,13 @@ def release_operator_reservation(sid,did,reason):
                 if not (isinstance(item,dict) and item.get("session")==sid and item.get("state")=="reserved"):
                     continue
                 sequence=int(item.get("sequence") or 0)
-                if sequence <= (int(state.get("automatic_limit") or 0)+int(state.get("infrastructure_retry_grants") or 0)+int(state.get("bad_plan_retry_grants") or 0)+int(state.get("plan_contract_retry_grants") or 0)):
+                if sequence <= (
+                    int(state.get("automatic_limit") or 0)
+                    + int(state.get("infrastructure_retry_grants") or 0)
+                    + int(state.get("bad_plan_retry_grants") or 0)
+                    + int(state.get("plan_contract_retry_grants") or 0)
+                    + int(state.get("context_delivery_retry_grants") or 0)
+                ):
                     return False,"supervisor-replacement-not-operator"
                 released=state["operator_infrastructure_aborted"] < MAX_OPERATOR_INFRASTRUCTURE_ABORTS
                 item.update({

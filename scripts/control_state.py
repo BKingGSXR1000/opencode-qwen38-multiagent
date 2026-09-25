@@ -526,7 +526,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     # Never use this repair to bypass human/operator accounting.
     if int(entry.get("operator_retry_grants") or 0) != 0:
         return state
-    if entry.get("operator_retry_attempts") or entry.get("operator_overrides"):
+    if entry.get("operator_overrides"):
         return state
 
     sessions = entry.get("sessions")
@@ -605,6 +605,37 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     )
     if count > allowed:
         return state
+
+    # Historical preclaim code could write a non-consuming operator reservation
+    # for a dispatch that was actually covered by supervisor-only replacement
+    # credits. Permit only that exact harmless shape; any real human/operator
+    # accounting still fails closed above.
+    operator_attempts=entry.get("operator_retry_attempts") or []
+    if not isinstance(operator_attempts,list):
+        return state
+    seen_operator_sequences=set()
+    for item in operator_attempts:
+        if not isinstance(item,dict):
+            return state
+        try:
+            sequence=int(item.get("sequence") or 0)
+        except (TypeError,ValueError):
+            return state
+        session=item.get("session")
+        if (
+            sequence<=automatic_limit
+            or sequence>allowed
+            or sequence in seen_operator_sequences
+            or item.get("source")!="supervisor"
+            or item.get("state")!="reserved"
+            or item.get("consumes_operator_grant") is not False
+            or not isinstance(session,str)
+            or not session
+            or sequence>len(sessions)
+            or sessions[sequence-1]!=session
+        ):
+            return state
+        seen_operator_sequences.add(sequence)
 
     # At most one current dispatch may be unclassified while it is still live.
     if count - len(history) not in (0, 1):

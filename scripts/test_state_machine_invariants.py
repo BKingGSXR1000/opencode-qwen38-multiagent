@@ -675,6 +675,70 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
                 (True,"already-recovered"),
             )
 
+    def test_context_credit_claim_does_not_create_operator_reservation(self):
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"context_delivery_failure_evidence",
+            return_value=self.proof(),
+        ), mock.patch.object(
+            supervisor,"context_delivery_fixes_installed",return_value=True
+        ):
+            self.assertEqual(
+                supervisor.recover_context_delivery_failure("D001"),
+                (True,"recovered"),
+            )
+
+        status,sequence=supervisor.claim_attempt(
+            "dispatch:context-credit-test","D001"
+        )
+        self.assertEqual((status,sequence),("claimed",8))
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        self.assertEqual(entry["count"],8)
+        self.assertEqual(
+            entry["sessions"][-1],"dispatch:context-credit-test"
+        )
+        self.assertFalse(entry.get("operator_retry_attempts"))
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+        self.assertEqual(state["allowed_attempts"],8)
+
+    def test_legacy_covered_reservation_is_ignored_and_reusable(self):
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"context_delivery_failure_evidence",
+            return_value=self.proof(),
+        ), mock.patch.object(
+            supervisor,"context_delivery_fixes_installed",return_value=True
+        ):
+            self.assertEqual(
+                supervisor.recover_context_delivery_failure("D001"),
+                (True,"recovered"),
+            )
+
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        entry["count"]=8
+        entry["sessions"].append("dispatch:legacy-covered")
+        entry["operator_retry_attempts"]=[{
+            "sequence":8,
+            "session":"dispatch:legacy-covered",
+            "state":"reserved",
+            "consumes_operator_grant":False,
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:00:00Z",
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(data))
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["v2612_infrastructure_repair"])
+        self.assertFalse(state["operator_authorized_attempt"])
+        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+        self.assertEqual(state["allowed_attempts"],8)
+
     def test_refuses_without_denied_progress_read(self):
         proof=self.proof()
         proof["progress_read_denials"]=0
