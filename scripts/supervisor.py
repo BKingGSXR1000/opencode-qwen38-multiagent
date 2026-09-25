@@ -3093,6 +3093,157 @@ def recover_denied_tool_finalize(did):
     return ok,detail
 
 
+VERSION_SKEW_ZERO_WORK_RECOVERY_PROTOCOL=(
+    "v2-version-skew-zero-work-dispatch-recovery-v1"
+)
+
+
+def recover_version_skew_zero_work_dispatch(did):
+    """Rearm the same dispatch sequence after a proven supervisor version skew."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+
+    project=Path(PROJECT)
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"version-skew-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"version-skew-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count or not isinstance(sessions[-1],str)
+                or not sessions[-1] or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"version-skew-recovery-current-session-mismatch"
+            sid=sessions[-1]
+            classified={
+                int(item.get("attempt") or 0)
+                for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+            }
+            if count in classified:
+                return False,"version-skew-recovery-attempt-already-classified"
+            if count < int(state.get("allowed_attempts") or 0):
+                return False,"version-skew-recovery-not-terminal"
+            prior=entry.get("version_skew_zero_work_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"version-skew-recovery-history-invalid"
+            if any(
+                isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+                for item in prior
+            ):
+                return False,"version-skew-recovery-already-used"
+
+    if meaningful_worker_execution(sid,did):
+        return False,"version-skew-recovery-meaningful-execution-present"
+    if persisted_completed_tool_turns(sid):
+        return False,"version-skew-recovery-tool-execution-present"
+
+    statuses=v1_session_status_snapshot()
+    status=statuses.get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"version-skew-recovery-session-still-active"
+
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return False,"version-skew-recovery-agent-invalid"
+    prompt=first_user_text_db(sid)
+    if not prompt:
+        return False,"version-skew-recovery-prompt-missing"
+    did_from_prompt,violation=validate_dispatch(agent,prompt,runtime=True)
+    if did_from_prompt!=did or violation:
+        return False,"version-skew-recovery-current-prompt-not-canonical"
+
+    try:
+        event_text=LOG.read_text(errors="replace")
+    except OSError:
+        return False,"version-skew-recovery-event-log-missing"
+    deny=(
+        f"DISPATCH_DENY session={sid} agent={agent} "
+        "noncanonical_runtime_handoff"
+    )
+    allow=(
+        f"DISPATCH_ALLOW session={sid} agent={agent} "
+        f"deliverable={did} attempt={count}"
+    )
+    deny_pos=event_text.find(deny)
+    allow_pos=event_text.find(allow)
+    if deny_pos<0 or allow_pos<0 or deny_pos>=allow_pos:
+        return False,"version-skew-recovery-deny-allow-proof-missing"
+
+    prompt_sha=hashlib.sha256(prompt.encode()).hexdigest()
+    marker_id=hashlib.sha256(
+        f"{did}\0{count}\0{sid}\0{prompt_sha}".encode()
+    ).hexdigest()[:20]
+    placeholder=f"dispatch:version-skew-recovery:{marker_id}:{did}"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"version-skew-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"version-skew-recovery-ledger-changed"
+            history=entry.setdefault("version_skew_zero_work_recoveries",[])
+            history.append({
+                "protocol":VERSION_SKEW_ZERO_WORK_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "replacement":placeholder,
+                "prompt_sha256":prompt_sha,
+                "evidence":{
+                    "deny":"noncanonical_runtime_handoff",
+                    "allow":"current-code materialization accepted same session",
+                    "meaningful_execution":False,
+                    "completed_tool_turns":0,
+                },
+                "timestamp":time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                ),
+            })
+            entry["sessions"][-1]=placeholder
+            entry["unmaterialized_dispatch_sequence"]=count
+            entry["unmaterialized_dispatch_replays"]=0
+            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+                "sequence":count,
+                "replaced":sid,
+                "replacement":placeholder,
+                "source":"supervisor-version-skew-recovery",
+                "timestamp":time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                ),
+            })
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"version-skew-recovery-projected-ledger-invalid"
+            if not projected.get("unmaterialized_dispatch_reusable"):
+                return False,"version-skew-recovery-not-reusable"
+            save_attempts(data)
+
+    log(
+        f"VERSION_SKEW_ZERO_WORK_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} placeholder={placeholder}"
+    )
+    csv(
+        "VERSION_SKEW_ZERO_WORK_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} placeholder={placeholder}",
+    )
+    return True,"rearmed-same-attempt"
+
+
 HISTORICAL_PARENT_REPAIR_RESOLUTION_PROTOCOL=(
     "v2-historical-parent-contract-repair-resolution-v1"
 )
@@ -9194,7 +9345,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -9470,6 +9621,28 @@ def main():
         print(
             f"DENIED_TOOL_FINALIZE_RECOVERY_ALLOW "
             f"deliverable={args.recover_denied_tool_finalize} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_version_skew_zero_work_dispatch:
+        if unknown or not args.project or not args.opencode_base_url:
+            raise SystemExit(
+                "version-skew zero-work recovery requires "
+                "--project --opencode-base-url"
+            )
+        PROJECT=args.project
+        ok,detail=recover_version_skew_zero_work_dispatch(
+            args.recover_version_skew_zero_work_dispatch
+        )
+        if not ok:
+            raise SystemExit(
+                f"VERSION_SKEW_ZERO_WORK_RECOVERY_DENY "
+                f"deliverable={args.recover_version_skew_zero_work_dispatch} "
+                f"reason={detail}"
+            )
+        print(
+            f"VERSION_SKEW_ZERO_WORK_RECOVERY_ALLOW "
+            f"deliverable={args.recover_version_skew_zero_work_dispatch} "
             f"reason={detail}"
         )
         return

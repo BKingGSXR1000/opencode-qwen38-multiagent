@@ -235,6 +235,127 @@ class RuntimePlanRepairTests(unittest.TestCase):
             self.assertEqual(guard["runtime_repair_change_errors"](ctrl),[])
 
 
+class VersionSkewZeroWorkRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        self.old_log=supervisor.LOG
+        supervisor.PROJECT=str(self.project)
+        supervisor.LOG=self.project/"events.log"
+        leaf={
+            "id":"D001","name":"owned","outcome":"repair owned",
+            "owned_artifacts":"`owned.txt`",
+            "owned_artifact_paths":["owned.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":"test -s owned.txt",
+            "role":"implementer","done_when":"owned exists",
+            "acceptance_ids":["A001"],"parallel":"none",
+            "split_children":[],"complexity":"S",
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9",
+            "project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":leaf},
+        }))
+        mark_phase_ready(
+            self.project,"IMPLEMENTATION_PLAN.md","IMPLEMENTATION_PLAN_COMPLETE"
+        )
+        self.sid="ses-version-skew"
+        self.prompt=supervisor.implementation_runtime_prompt(
+            "D001","implementer"
+        )
+        self.history=[
+            {"attempt":1,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":2,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":3,"classification":"infrastructure",
+             "reason":"immediate-runtime-cancel zero-token-zero-tool aborted"},
+        ]
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "automatic_limit":3,
+                    "count":4,
+                    "sessions":["s1","s2","s3",self.sid],
+                    "failure_history":self.history,
+                    "infrastructure_retry_grants":1,
+                    "infrastructure_failures":[{
+                        "timestamp":"2026-09-25T00:00:00Z",
+                        "grant":1,
+                        "source":"supervisor",
+                        "kind":"runtime-cancel",
+                        "session":"s3",
+                        "evidence":"no-owned-artifact-or-progress",
+                        "reason":"test",
+                    }],
+                    "unmaterialized_dispatch_sequence":4,
+                    "unmaterialized_dispatch_replays":1,
+                }
+            },
+        }))
+        supervisor.LOG.write_text(
+            f"DISPATCH_DENY session={self.sid} agent=implementer "
+            "noncanonical_runtime_handoff\n"
+            f"DISPATCH_ALLOW session={self.sid} agent=implementer "
+            "deliverable=D001 attempt=4\n"
+        )
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        supervisor.LOG=self.old_log
+        self.tmp.cleanup()
+
+    def test_rearms_same_zero_work_attempt_without_new_count(self):
+        with mock.patch.object(
+            supervisor,"meaningful_worker_execution",return_value=""
+        ), mock.patch.object(
+            supervisor,"persisted_completed_tool_turns",return_value=0
+        ), mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value=self.prompt
+        ):
+            ok,detail=supervisor.recover_version_skew_zero_work_dispatch(
+                "D001"
+            )
+        self.assertEqual((ok,detail),(True,"rearmed-same-attempt"))
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        self.assertEqual(entry["count"],4)
+        self.assertEqual(entry["failure_history"],self.history)
+        self.assertTrue(entry["sessions"][-1].startswith(
+            "dispatch:version-skew-recovery:"
+        ))
+        self.assertEqual(entry["unmaterialized_dispatch_sequence"],4)
+        self.assertEqual(entry["unmaterialized_dispatch_replays"],0)
+        self.assertEqual(
+            entry["version_skew_zero_work_recoveries"][0]["session"],
+            self.sid,
+        )
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+
+    def test_refuses_when_current_attempt_has_meaningful_execution(self):
+        with mock.patch.object(
+            supervisor,"meaningful_worker_execution",return_value="owned"
+        ):
+            ok,detail=supervisor.recover_version_skew_zero_work_dispatch(
+                "D001"
+            )
+        self.assertEqual(
+            (ok,detail),
+            (False,"version-skew-recovery-meaningful-execution-present"),
+        )
+
+
 class HistoricalParentContractRepairResolutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
