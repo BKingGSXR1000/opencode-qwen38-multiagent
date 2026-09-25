@@ -241,6 +241,10 @@ class TerminalSemanticChildTests(unittest.TestCase):
         self.action = {"kind": "launch", "agent": "acceptance-planner", "mode": "fresh"}
         self.result = {"state_version": "state-a", "actions": [self.action]}
         self.execution_id = controller.execution_action_id("state-a", self.root, self.action)
+        semantic_part = controller.build_semantic_subtask(self.action)
+        self.semantic_prompt_sha256 = hashlib.sha256(
+            semantic_part["prompt"].encode("utf-8")
+        ).hexdigest()
         controller.save_execution_ledger(self.project, {
             "owner": "stage-a-controller",
             "protocol": controller.EXECUTION_LEDGER_PROTOCOL,
@@ -250,6 +254,7 @@ class TerminalSemanticChildTests(unittest.TestCase):
                     "state_version": "state-a",
                     "root_session": self.root,
                     "action": self.action,
+                    "semantic_prompt_sha256": self.semantic_prompt_sha256,
                     "created_at_ms": int((time.time() - 30) * 1000),
                     "baseline_child_ids": [],
                 }
@@ -512,10 +517,10 @@ class DecisionStateVersionTests(unittest.TestCase):
 class AcceptanceValidatorBudgetTests(unittest.TestCase):
     def test_validator_reserves_budget_for_mandatory_report_write(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
-        self.assertIn("steps: 12",role)
-        self.assertIn("spend at most 6 tool-call rounds gathering evidence",role)
-        self.assertIn("no later than your 8th assistant/tool step",role)
-        self.assertIn("the report write is mandatory",role)
+        self.assertIn("steps: 6",role)
+        self.assertIn("FIRST tool call MUST create `.opencode-v2/acceptance-report.json`",role)
+        self.assertIn("complete immutable evidence surface",role)
+        self.assertIn("use later steps only to correct the report",role)
 
     def test_validator_cannot_invent_executable_report_commands(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
@@ -525,11 +530,103 @@ class AcceptanceValidatorBudgetTests(unittest.TestCase):
 
     def test_validator_is_read_only_except_for_the_acceptance_report(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
-        self.assertIn("bash: deny",role)
+        for denied in ("read: deny","glob: deny","grep: deny","list: deny","bash: deny"):
+            self.assertIn(denied,role)
         self.assertIn("Final acceptance is evidence review only",role)
         self.assertIn("Never call `bash` or any executable",role)
         self.assertIn("Never rerun, replace, or repair executable",role)
         self.assertNotIn("Use live `bash`",role)
+
+
+class AcceptanceValidatorPacketTests(unittest.TestCase):
+    def make_project(self, base: Path) -> Path:
+        project=base/"project"
+        ctrl=project/".opencode-v2"
+        work=ctrl/"work"
+        work.mkdir(parents=True)
+        (ctrl/"ORIGINAL_TASK.md").write_text("Build the app.\n")
+        (ctrl/"ACCEPTANCE.md").write_text(
+            "# Acceptance Contract\nReference policy: internal\n"
+            "- [ ] A001: app.txt exists and contains hello.\n"
+        )
+        command="test -f app.txt"
+        guard={
+            "protocol":"V2.6.9",
+            "leaves":{
+                "D001":{
+                    "id":"D001",
+                    "name":"app artifact",
+                    "role":"implementer",
+                    "outcome":"Create app.txt.",
+                    "done_when":"app.txt exists.",
+                    "acceptance_ids":["A001"],
+                    "owned_artifact_paths":["app.txt"],
+                    "verify_command":command,
+                }
+            },
+        }
+        (ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps(guard))
+        (project/"app.txt").write_text("hello\n")
+        (work/"D001.ready").write_text("status=ready\n")
+        evidence={
+            "owner":"supervisor",
+            "protocol":"v2-supervisor-verify-evidence-v1",
+            "latest":{
+                "command":command,
+                "executed":True,
+                "exit_code":0,
+                "result":"verified",
+                "timestamp":"2026-09-25T00:00:00Z",
+                "stdout":"",
+                "stderr":"",
+            },
+        }
+        (work/"D001.verify-evidence.json").write_text(json.dumps(evidence))
+        report={
+            "protocol":"v2-test-report-v1",
+            "status":"pass",
+            "checks_run":1,
+            "checks_passed":1,
+            "missing_required_files":[],
+            "checks":[{
+                "name":"app",
+                "command":command,
+                "exit_code":0,
+                "timed_out":False,
+            }],
+        }
+        (ctrl/"TEST_REPORT.json").write_text(json.dumps(report))
+        return project
+
+    def test_packet_binds_exact_must_mapping_evidence_and_artifact_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=self.make_project(Path(td))
+            packet=controller.build_acceptance_validation_packet(project)
+            self.assertEqual(packet["protocol"],controller.ACCEPTANCE_CONTEXT_PROTOCOL)
+            self.assertEqual(packet["must_ids"],["A001"])
+            self.assertEqual(packet["acceptance_to_leaves"],{"A001":["D001"]})
+            self.assertEqual(packet["leaf_evidence"][0]["verify"]["command"],"test -f app.txt")
+            self.assertEqual(packet["leaf_evidence"][0]["verify"]["exit_code"],0)
+            snapshot=next(x for x in packet["artifact_snapshots"] if x["path"]=="app.txt")
+            self.assertEqual(snapshot["content"],"hello\n")
+            self.assertEqual(len(packet["packet_sha256"]),64)
+            part=controller.build_semantic_subtask(
+                {"kind":"launch","agent":"acceptance-validator","mode":"final"},
+                project,
+            )
+            self.assertIn("CANONICAL_ACCEPTANCE_CONTEXT_JSON_BEGIN",part["prompt"])
+            self.assertIn(packet["packet_sha256"],part["prompt"])
+            self.assertNotIn("command",part)
+
+    def test_packet_rejects_verify_command_provenance_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=self.make_project(Path(td))
+            path=project/".opencode-v2/work/D001.verify-evidence.json"
+            evidence=json.loads(path.read_text())
+            evidence["latest"]["command"]="true"
+            path.write_text(json.dumps(evidence))
+            with self.assertRaisesRegex(controller.ControllerError,"provenance mismatch"):
+                controller.build_acceptance_validation_packet(project)
 
 
 class ValidatorShadowControlTreeTests(unittest.TestCase):

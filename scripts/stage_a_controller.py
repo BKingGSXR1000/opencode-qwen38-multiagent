@@ -26,6 +26,10 @@ HARNESS_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
 EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
+ACCEPTANCE_CONTEXT_PROTOCOL = "v2-acceptance-validator-context-v1"
+ACCEPTANCE_CONTEXT_MAX_FILE_BYTES = 16 * 1024
+ACCEPTANCE_CONTEXT_MAX_ARTIFACT_BYTES = 64 * 1024
+ACCEPTANCE_CONTEXT_MAX_AUX_BYTES = 32 * 1024
 PLANNER_PROMPTS = {
     "fresh": """Create the first structured implementation plan for this project.
 
@@ -85,14 +89,14 @@ Resolve exactly one durable validation item. Resume
 .opencode-v2/acceptance/reference-work.json if an item is in progress;
 otherwise resolve only the first missing external-reference item. Follow the
 reference-researcher protocol and persist its required durable evidence.""",
-    ("acceptance-validator", "final"): """Run final acceptance validation for this project.
+    ("acceptance-validator", "final"): """Run final acceptance validation from the
+controller-supplied canonical evidence packet below. The packet is the complete
+evidence surface for this run. Do not discover or execute anything else.
 
-Read the durable acceptance, test, and reference evidence. Prefer existing
-supervisor/test evidence over recreating checks. If a live check is still
-needed, use one short raw single-line command for one purpose; never invoke the
-sandbox wrapper yourself. Follow the acceptance-validator protocol exactly; do
-not treat model prose as final success and do not modify implementation
-artifacts.""",
+Your FIRST tool call must create `.opencode-v2/acceptance-report.json`. Judge
+every exact MUST Axxx against the packet. If the packet does not prove a MUST,
+record FAIL for that MUST instead of seeking more evidence. Follow the
+acceptance-validator report schema exactly; model prose alone is never success.""",
 }
 
 
@@ -702,12 +706,296 @@ def build_planner_subtask(action: dict) -> dict:
     }
 
 
-def build_semantic_subtask(action: dict) -> dict:
+
+def acceptance_must_ids(acceptance_text: str) -> list[str]:
+    result: list[str] = []
+    for raw in str(acceptance_text or "").splitlines():
+        line = raw.strip()
+        if not line.startswith("- [ ] ") or ":" not in line:
+            continue
+        candidate = line[len("- [ ] "):].split(":", 1)[0].strip()
+        if len(candidate) == 4 and candidate.startswith("A") and candidate[1:].isdigit():
+            if candidate in result:
+                raise ControllerError(f"duplicate acceptance MUST id: {candidate}")
+            result.append(candidate)
+    if not result:
+        raise ControllerError("acceptance contract contains no exact MUST Axxx IDs")
+    return result
+
+
+def _safe_relative_project_path(project: Path, raw: str) -> Path:
+    rel = Path(str(raw or ""))
+    if not str(raw or "") or rel.is_absolute() or ".." in rel.parts:
+        raise ControllerError(f"unsafe acceptance artifact path: {raw!r}")
+    return rel
+
+
+def _snapshot_project_artifact(
+    project: Path,
+    path: Path,
+    artifact_budget: list[int],
+) -> dict:
+    root = project.resolve()
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ControllerError(f"acceptance artifact missing: {path}") from exc
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise ControllerError(f"acceptance artifact escapes project: {path}") from exc
+
+    shown_path = relative.as_posix()
+    if resolved.is_dir():
+        entries = []
+        for child in sorted(resolved.iterdir(), key=lambda item: item.name)[:64]:
+            try:
+                entries.append(child.resolve().relative_to(root).as_posix())
+            except (OSError, ValueError):
+                continue
+        return {
+            "path": shown_path,
+            "type": "directory",
+            "entries": entries,
+        }
+    if not resolved.is_file():
+        raise ControllerError(f"acceptance artifact is not a regular file: {path}")
+
+    raw = resolved.read_bytes()
+    item = {
+        "path": shown_path,
+        "type": "file",
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    if path.is_symlink():
+        item["source_symlink"] = True
+    if len(raw) > ACCEPTANCE_CONTEXT_MAX_FILE_BYTES:
+        item["content_omitted"] = "file-too-large"
+        return item
+    if len(raw) > artifact_budget[0]:
+        item["content_omitted"] = "packet-artifact-budget-exhausted"
+        return item
+    if b"\x00" in raw:
+        item["content_omitted"] = "binary"
+        return item
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        item["content_omitted"] = "non-utf8"
+        return item
+    artifact_budget[0] -= len(raw)
+    item["content"] = content
+    return item
+
+
+def _owned_artifact_snapshots(project: Path, leaves: dict) -> list[dict]:
+    root = project.resolve()
+    budget = [ACCEPTANCE_CONTEXT_MAX_ARTIFACT_BYTES]
+    seen: set[str] = set()
+    snapshots: list[dict] = []
+    for did in sorted(leaves):
+        leaf = leaves[did]
+        if not isinstance(leaf, dict):
+            raise ControllerError(f"plan guard leaf is not an object: {did}")
+        raw_paths = leaf.get("owned_artifact_paths") or []
+        if not isinstance(raw_paths, list) or not all(isinstance(x, str) for x in raw_paths):
+            raise ControllerError(f"owned artifact paths invalid for {did}")
+        for raw_path in raw_paths:
+            rel = _safe_relative_project_path(project, raw_path)
+            pattern = rel.as_posix()
+            if any(ch in pattern for ch in "*?["):
+                matches = sorted(project.glob(pattern), key=lambda item: item.as_posix())
+                if len(matches) > 64:
+                    raise ControllerError(
+                        f"acceptance artifact pattern has too many matches: {raw_path}"
+                    )
+                if not matches:
+                    raise ControllerError(
+                        f"acceptance artifact pattern has no matches: {raw_path}"
+                    )
+            else:
+                matches = [project / rel]
+            for match in matches:
+                try:
+                    key = match.resolve(strict=True).relative_to(root).as_posix()
+                except (FileNotFoundError, ValueError) as exc:
+                    raise ControllerError(
+                        f"acceptance artifact path invalid for {did}: {match}"
+                    ) from exc
+                if key in seen:
+                    continue
+                seen.add(key)
+                snapshots.append(_snapshot_project_artifact(project, match, budget))
+    return snapshots
+
+
+def _optional_acceptance_evidence(project: Path) -> dict:
+    control = project / ".opencode-v2"
+    candidates = [
+        control / "reference-validation-gate.json",
+        control / "acceptance" / "reference-work.json",
+        control / "acceptance" / "reference-evidence.json",
+        control / "browser-evidence.json",
+    ]
+    items_dir = control / "acceptance" / "reference-items"
+    if items_dir.is_dir():
+        candidates.extend(sorted(items_dir.glob("*.json"))[:32])
+
+    remaining = ACCEPTANCE_CONTEXT_MAX_AUX_BYTES
+    result = {}
+    for path in candidates:
+        if not path.is_file() or path.is_symlink():
+            continue
+        raw = path.read_bytes()
+        rel = path.relative_to(project).as_posix()
+        meta = {
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        if len(raw) <= remaining:
+            try:
+                meta["json"] = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                meta["content_omitted"] = "invalid-json-or-encoding"
+            else:
+                remaining -= len(raw)
+        else:
+            meta["content_omitted"] = "packet-aux-budget-exhausted"
+        result[rel] = meta
+    return result
+
+
+def build_acceptance_validation_packet(project: Path) -> dict:
+    project = project.resolve()
+    control = project / ".opencode-v2"
+    acceptance_path = control / "ACCEPTANCE.md"
+    task_path = control / "ORIGINAL_TASK.md"
+    try:
+        acceptance_text = acceptance_path.read_text(encoding="utf-8")
+        original_task = task_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, UnicodeDecodeError) as exc:
+        raise ControllerError(f"acceptance packet source unreadable: {exc}") from exc
+
+    must_ids = acceptance_must_ids(acceptance_text)
+    guard = load_json(control / "IMPLEMENTATION_PLAN.guard.json", "plan guard")
+    leaves = guard.get("leaves")
+    if not isinstance(leaves, dict) or not leaves:
+        raise ControllerError("plan guard leaves missing for acceptance packet")
+
+    test_report = load_json(control / "TEST_REPORT.json", "final test report")
+    if (
+        test_report.get("status") != "pass"
+        or not isinstance(test_report.get("checks_run"), int)
+        or isinstance(test_report.get("checks_run"), bool)
+        or int(test_report.get("checks_run")) <= 0
+        or test_report.get("checks_passed") != test_report.get("checks_run")
+        or (test_report.get("missing_required_files") or [])
+    ):
+        raise ControllerError("final test report is not a clean PASS for acceptance packet")
+
+    mapped: dict[str, list[str]] = {}
+    leaf_evidence = []
+    work = control / "work"
+    for did in sorted(leaves):
+        leaf = leaves[did]
+        if not isinstance(leaf, dict):
+            raise ControllerError(f"plan guard leaf invalid for acceptance packet: {did}")
+        acceptance_ids = leaf.get("acceptance_ids") or []
+        if not isinstance(acceptance_ids, list) or not all(
+            isinstance(item, str) for item in acceptance_ids
+        ):
+            raise ControllerError(f"acceptance_ids invalid for {did}")
+        for aid in acceptance_ids:
+            mapped.setdefault(aid, []).append(did)
+
+        ready = work / f"{did}.ready"
+        if not ready.is_file() or ready.is_symlink():
+            raise ControllerError(f"READY marker missing for acceptance leaf {did}")
+        evidence = load_json(work / f"{did}.verify-evidence.json", f"verify evidence {did}")
+        if evidence.get("owner") != "supervisor":
+            raise ControllerError(f"verify evidence owner is not supervisor for {did}")
+        latest = evidence.get("latest")
+        if not isinstance(latest, dict):
+            raise ControllerError(f"verify evidence latest missing for {did}")
+        command = str(latest.get("command") or "")
+        canonical_command = str(leaf.get("verify_command") or "")
+        if not canonical_command or command != canonical_command:
+            raise ControllerError(f"verify command provenance mismatch for {did}")
+        if (
+            latest.get("executed") is not True
+            or latest.get("result") != "verified"
+            or latest.get("exit_code") != 0
+        ):
+            raise ControllerError(f"leaf verify evidence is not a clean PASS for {did}")
+        leaf_evidence.append({
+            "id": did,
+            "name": str(leaf.get("name") or ""),
+            "role": str(leaf.get("role") or ""),
+            "outcome": str(leaf.get("outcome") or ""),
+            "done_when": str(leaf.get("done_when") or ""),
+            "acceptance_ids": list(acceptance_ids),
+            "owned_artifact_paths": list(leaf.get("owned_artifact_paths") or []),
+            "verify": {
+                "command": command,
+                "executed": True,
+                "exit_code": 0,
+                "result": "verified",
+                "timestamp": str(latest.get("timestamp") or ""),
+                "stdout": str(latest.get("stdout") or "")[:4000],
+                "stderr": str(latest.get("stderr") or "")[:4000],
+            },
+            "ready_sha256": hashlib.sha256(ready.read_bytes()).hexdigest(),
+        })
+
+    if set(mapped) != set(must_ids):
+        raise ControllerError(
+            "acceptance packet Axxx mapping mismatch: "
+            f"missing={sorted(set(must_ids)-set(mapped))} "
+            f"extra={sorted(set(mapped)-set(must_ids))}"
+        )
+
+    packet = {
+        "protocol": ACCEPTANCE_CONTEXT_PROTOCOL,
+        "project": str(project),
+        "original_task": original_task,
+        "acceptance_contract": acceptance_text,
+        "must_ids": must_ids,
+        "acceptance_to_leaves": {aid: sorted(mapped[aid]) for aid in must_ids},
+        "final_test_report": test_report,
+        "leaf_evidence": leaf_evidence,
+        "artifact_snapshots": _owned_artifact_snapshots(project, leaves),
+        "auxiliary_evidence": _optional_acceptance_evidence(project),
+    }
+    material = json.dumps(
+        packet, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    packet["packet_sha256"] = hashlib.sha256(material).hexdigest()
+    return packet
+
+
+def build_semantic_subtask(action: dict, project: Path | None = None) -> dict:
     canonical = canonical_execution_action(action)
     key = (canonical.get("agent"), canonical.get("mode"))
     prompt = SEMANTIC_PROMPTS.get(key)
     if not prompt:
         raise ControllerError(f"unsupported semantic action: {canonical!r}")
+    if key == ("acceptance-validator", "final"):
+        if project is None:
+            raise ControllerError("final acceptance semantic subtask requires project")
+        packet = build_acceptance_validation_packet(project)
+        rendered = json.dumps(
+            packet, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        prompt = (
+            prompt
+            + "\n\nCANONICAL_ACCEPTANCE_CONTEXT_JSON_BEGIN\n"
+            + rendered
+            + "\nCANONICAL_ACCEPTANCE_CONTEXT_JSON_END\n"
+            + "Do not call read, list, glob, grep, bash, task, web, or question tools. "
+            + "Your first tool call MUST write only "
+            + "`.opencode-v2/acceptance-report.json` from this packet."
+        )
     return {
         "type": "subtask",
         "prompt": prompt,
@@ -1125,7 +1413,10 @@ def execute_first_semantic(
             "mixed/unsupported deterministic actions in semantic-only slice: "
             + json.dumps(unsupported, sort_keys=True)
         )
-    part = build_semantic_subtask(canonical_action)
+    part = build_semantic_subtask(canonical_action, project)
+    semantic_prompt_sha256 = hashlib.sha256(
+        str(part.get("prompt") or "").encode("utf-8")
+    ).hexdigest()
     root = resolve_root_session(project, base_url, explicit_root)
 
     with execution_lock(project):
@@ -1146,6 +1437,11 @@ def execute_first_semantic(
         if existing is not None:
             if not isinstance(existing, dict) or existing.get("action") != canonical_action:
                 raise ControllerError(f"execution ledger action mismatch: {execution_id}")
+            if str(existing.get("semantic_prompt_sha256") or "") != semantic_prompt_sha256:
+                raise ControllerError(
+                    "semantic prompt changed without deterministic state transition: "
+                    f"execution_id={execution_id}"
+                )
             evidence = semantic_reconcile_evidence(
                 existing, child_snapshot(project, base_url, root)
             )
@@ -1180,6 +1476,7 @@ def execute_first_semantic(
             "root_session": root,
             "action": canonical_action,
             "semantic_generation": semantic_generation,
+            "semantic_prompt_sha256": semantic_prompt_sha256,
             "transport": "prompt_async+SubtaskPart",
             "transport_may_have_been_attempted": True,
             "created_at_ms": int(time.time() * 1000),
@@ -1862,11 +2159,15 @@ def selftest() -> None:
     for action in (
         {"kind": "launch", "agent": "reference-researcher", "mode": "foundation"},
         {"kind": "launch", "agent": "reference-researcher", "mode": "validation"},
-        {"kind": "launch", "agent": "acceptance-validator", "mode": "final"},
     ):
         canonical = canonical_execution_action(action)
         if canonical != action or build_semantic_subtask(canonical)["agent"] != action["agent"]:
             raise ControllerError(f"semantic action is not executable: {action!r}")
+    final_validator_action = {
+        "kind": "launch", "agent": "acceptance-validator", "mode": "final",
+    }
+    if canonical_execution_action(final_validator_action) != final_validator_action:
+        raise ControllerError("final acceptance semantic action is not canonical")
     repair_prompt = PLANNER_PROMPTS["repair"].lower()
     if any(word in repair_prompt for word in ("jupiter", "fixture_probe", "horizons")):
         raise ControllerError("repair prompt is not project-generic")

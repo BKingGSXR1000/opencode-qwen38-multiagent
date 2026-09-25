@@ -3,7 +3,7 @@ import hashlib,json,multiprocessing,runpy,subprocess,sys,tempfile,unittest
 from unittest import mock
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
-import control_state,leaf_contract,stage_a_controller,supervisor,state_io,worker_sandbox,watchdog_telemetry
+import control_state,leaf_contract,stage_a_controller,structured_plan,supervisor,state_io,worker_sandbox,watchdog_telemetry
 
 def ready_text(did,attempt=1,owner="supervisor",protocol=None,verify_command=""):
     protocol=protocol or control_state.LEAF_READY_PROTOCOL
@@ -43,6 +43,91 @@ class SharedLeafContractTests(unittest.TestCase):
         bad=dict(good); bad["D001-B"]={"parent":"D001","owned_artifact_paths":["public/a.js"]}
         self.assertTrue(leaf_contract.ownership_overlap_errors(bad))
         self.assertTrue(leaf_contract.ownership_overlap_errors({"D001":{"owned_artifact_paths":["src/"]},"D002":{"owned_artifact_paths":["src/app.js"]}}))
+
+class StructuredPlanAcceptanceCoverageTests(unittest.TestCase):
+    def base_plan(self):
+        return {
+            "protocol":structured_plan.PROTOCOL,
+            "status":"complete",
+            "leaves":[
+                {
+                    "key":"app",
+                    "name":"app",
+                    "outcome":"Create app.txt.",
+                    "owned_artifacts":["app.txt"],
+                    "launch_deps":[],
+                    "contract_deps":[],
+                    "verify_deps":[],
+                    "acceptance_ids":["A001"],
+                    "complexity":"S",
+                    "repeated_operations":1,
+                    "deep_reasoning":False,
+                    "role":"implementer",
+                    "verify_command":"test -f app.txt",
+                    "done_when":"app.txt exists.",
+                },
+                {
+                    "key":"final_tests",
+                    "name":"final tests",
+                    "outcome":"Run the canonical final test manifest.",
+                    "owned_artifacts":[".opencode-v2/TEST_CHECKS.json"],
+                    "launch_deps":["app"],
+                    "contract_deps":["app"],
+                    "verify_deps":[],
+                    "acceptance_ids":["A003"],
+                    "complexity":"S",
+                    "repeated_operations":1,
+                    "deep_reasoning":False,
+                    "role":"test-builder",
+                    "verify_command":structured_plan.RUN_CHECKS_COMMAND,
+                    "done_when":"canonical final tests pass.",
+                },
+            ],
+        }
+
+    def make_project(self, base: Path) -> Path:
+        project=base/"project"
+        ctrl=project/".opencode-v2"
+        ctrl.mkdir(parents=True)
+        (ctrl/"ACCEPTANCE.md").write_text(
+            "# Acceptance Contract\n"
+            "- [ ] A001: app artifact exists.\n"
+            "- [ ] A002: app behavior is correct.\n"
+            "- [ ] A003: final tests pass.\n"
+        )
+        (ctrl/"IMPLEMENTATION_PLAN.structured.json").write_text(
+            json.dumps(self.base_plan())
+        )
+        return project
+
+    def test_missing_must_id_fails_closed_with_whole_plan_repair(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=self.make_project(Path(td))
+            ok,errors=structured_plan.compile_plan(project)
+            self.assertFalse(ok)
+            coverage=[e for e in errors if e.get("code")=="acceptance-coverage"]
+            self.assertEqual(len(coverage),1)
+            self.assertIn("missing=A002",coverage[0]["message"])
+            repair=json.loads(
+                (project/".opencode-v2/IMPLEMENTATION_PLAN.repair.json").read_text()
+            )
+            self.assertTrue(repair["whole_plan"])
+            self.assertEqual(repair["affected_keys"],[])
+
+    def test_existing_leaf_can_absorb_missing_must_without_key_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=self.make_project(Path(td))
+            path=project/".opencode-v2/IMPLEMENTATION_PLAN.structured.json"
+            plan=json.loads(path.read_text())
+            plan["leaves"][1]["acceptance_ids"]=["A002","A003"]
+            path.write_text(json.dumps(plan))
+            ok,errors=structured_plan.compile_plan(project)
+            self.assertTrue(ok,errors)
+            mapping=json.loads(
+                (project/".opencode-v2/IMPLEMENTATION_PLAN.structured-map.json").read_text()
+            )
+            self.assertEqual(set(mapping["key_to_id"]),{"app","final_tests"})
+
 
 class RuntimePlanRepairTests(unittest.TestCase):
     def test_runtime_repair_requires_a_changed_affected_leaf(self):

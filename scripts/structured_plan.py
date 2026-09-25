@@ -30,6 +30,7 @@ ROLE_ALLOWLIST = {
 WRITE_ROLES = ROLE_ALLOWLIST - {"tester"}
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 ACC_RE = re.compile(r"^A\d{3}$")
+ACCEPTANCE_MUST_RE = re.compile(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$")
 PATH_RE = re.compile(r"^[^\s`]+$")
 TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
 TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
@@ -364,6 +365,55 @@ def compile_plan(project: Path):
         return False,errors
 
     leaves,errors=normalize_document(raw)
+    if errors:
+        write_repair(repair,errors,source="structured-compiler")
+        atomic_write_text(guard_err,"\n".join(x["message"] for x in errors)+"\n")
+        return False,errors
+
+    acceptance_path=ctrl/"ACCEPTANCE.md"
+    try:
+        acceptance_text=acceptance_path.read_text(encoding="utf-8")
+    except (FileNotFoundError,UnicodeDecodeError) as exc:
+        errors=[{
+            "key":"",
+            "code":"acceptance-contract",
+            "message":f"acceptance contract unreadable for structured-plan coverage: {exc}",
+        }]
+    else:
+        must_ids=ACCEPTANCE_MUST_RE.findall(acceptance_text)
+        if not must_ids:
+            errors=[{
+                "key":"",
+                "code":"acceptance-coverage",
+                "message":"acceptance contract contains no exact MUST IDs for structured-plan coverage",
+            }]
+        elif len(must_ids)!=len(set(must_ids)):
+            errors=[{
+                "key":"",
+                "code":"acceptance-coverage",
+                "message":"acceptance contract contains duplicate MUST IDs",
+            }]
+        else:
+            planned_ids={aid for leaf in leaves for aid in leaf["acceptance_ids"]}
+            must_set=set(must_ids)
+            missing=sorted(must_set-planned_ids)
+            extra=sorted(planned_ids-must_set)
+            errors=[]
+            if missing or extra:
+                detail=[]
+                if missing:
+                    detail.append("missing="+",".join(missing))
+                if extra:
+                    detail.append("extra="+",".join(extra))
+                errors=[{
+                    "key":"",
+                    "code":"acceptance-coverage",
+                    "message":(
+                        "structured plan acceptance_ids must cover every and only MUST Axxx IDs; "
+                        + " ".join(detail)
+                        + ". Repair existing leaves without weakening MUSTs or violating per-leaf task-shape limits."
+                    ),
+                }]
     if errors:
         write_repair(repair,errors,source="structured-compiler")
         atomic_write_text(guard_err,"\n".join(x["message"] for x in errors)+"\n")
