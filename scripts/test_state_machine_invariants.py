@@ -355,6 +355,60 @@ class VersionSkewZeroWorkRecoveryTests(unittest.TestCase):
             (False,"version-skew-recovery-meaningful-execution-present"),
         )
 
+    def test_infrastructure_abort_repairs_preclaimed_successor_race(self):
+        reason="child_compaction count=2; limit=1"
+        entry={
+            "automatic_limit":2,
+            "count":4,
+            "sessions":["s1","s2","s3","dispatch:next:D001"],
+            "failure_history":[
+                {"attempt":1,"classification":"infrastructure","reason":"infra1"},
+                {"attempt":2,"classification":"infrastructure","reason":"infra2"},
+                {
+                    "attempt":3,
+                    "classification":"infrastructure",
+                    "reason":reason,
+                    "session":"s3",
+                },
+            ],
+            "infrastructure_retry_grants":2,
+            "infrastructure_failures":[
+                {
+                    "timestamp":"2026-09-25T00:00:00Z","grant":1,
+                    "source":"supervisor","kind":"runtime-cancel",
+                    "session":"s1","evidence":"durable-partial-state-preserved",
+                    "reason":"infra1",
+                },
+                {
+                    "timestamp":"2026-09-25T00:01:00Z","grant":1,
+                    "source":"supervisor","kind":"runtime-cancel",
+                    "session":"s2","evidence":"durable-partial-state-preserved",
+                    "reason":"infra2",
+                },
+            ],
+        }
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor","deliverables":{"D001":entry},
+        }))
+        self.assertFalse(control_state.attempt_state(entry)["valid"])
+        with mock.patch.object(supervisor,"ready_info",return_value={}):
+            ok,detail=supervisor.record_infrastructure_abort(
+                "s3","D001",reason,"supervisor-compaction-retire"
+            )
+        self.assertEqual(
+            (ok,detail),(True,"granted-preclaimed-successor-recovery")
+        )
+        repaired=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ]["D001"]
+        state=control_state.attempt_state(repaired)
+        self.assertTrue(state["valid"])
+        self.assertEqual(repaired["count"],4)
+        self.assertEqual(repaired["infrastructure_retry_grants"],3)
+        self.assertEqual(len(repaired["failure_history"]),3)
+        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+        self.assertEqual(repaired["infrastructure_failures"][-1]["session"],"s3")
+
 
 class SandboxWrapperHistoryRecoveryTests(unittest.TestCase):
     def setUp(self):

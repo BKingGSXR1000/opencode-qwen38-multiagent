@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,base64,contextlib,hashlib,json,os,re,shlex,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
+import argparse,base64,contextlib,copy,hashlib,json,os,re,shlex,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
@@ -7796,6 +7796,13 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
 
     A supervisor/runtime cancellation is infrastructure even when useful
     partial state already exists. Preserve that state and resume from it.
+
+    If a successor dispatch placeholder was preclaimed before this terminal
+    session was reconciled, the ordinary ledger projection can be temporarily
+    invalid. Recover only that exact one-successor race, and only when adding
+    this session's infrastructure grant (plus its session-bound failure row
+    when absent) makes the projected ledger valid and the successor placeholder
+    reusable.
     """
     if not did or ready_info(did): return False,"already-complete-or-unknown"
     leaf=(load_manifest().get("leaves") or {}).get(did)
@@ -7805,34 +7812,121 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
         (paths and any((Path(PROJECT)/path).exists() for path in paths))
         or progress.exists()
     )
+    race_recovered=False
+    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
     with dispatch_lock:
         with attempt_lock():
             data=load_attempts()
             entry=(data.get("deliverables") or {}).get(did)
-            if not isinstance(entry,dict) or sid not in entry.get("sessions",[]):
+            sessions=entry.get("sessions",[]) if isinstance(entry,dict) else []
+            if not isinstance(entry,dict) or sid not in sessions:
                 return False,"session-not-in-ledger"
-            state=attempt_state(entry)
-            if not state["valid"]: return False,"attempt-ledger-invalid"
             failures=entry.setdefault("infrastructure_failures",[])
+            if not isinstance(failures,list):
+                return False,"attempt-ledger-invalid"
             if any(isinstance(item,dict) and item.get("session")==sid for item in failures):
                 return False,"already-recorded"
-            if state["infrastructure_retry_grants"] >= MAX_INFRASTRUCTURE_RETRY_GRANTS:
-                return False,"infrastructure-retry-limit"
-            failures.append({
-                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
-                "grant":1,
-                "source":"supervisor",
-                "kind":kind,
-                "session":sid,
-                "evidence":("durable-partial-state-preserved" if durable_present
-                            else "no-owned-artifact-or-progress"),
-                "reason":reason,
-            })
-            entry["infrastructure_retry_grants"]=state["infrastructure_retry_grants"]+1
-            save_attempts(data)
+
+            state=attempt_state(entry)
+            if not state["valid"]:
+                # Narrow recovery for: terminal attempt N is being classified
+                # after attempt N+1 has already been reserved but not
+                # materialized. Never repair an arbitrary invalid ledger.
+                try:
+                    count=int(entry.get("count") or 0)
+                    matches=[i+1 for i,value in enumerate(sessions) if value==sid]
+                    grants=int(entry.get("infrastructure_retry_grants") or 0)
+                except (TypeError,ValueError):
+                    return False,"attempt-ledger-invalid"
+                current=sessions[-1] if sessions and isinstance(sessions[-1],str) else ""
+                if (
+                    len(matches)!=1
+                    or matches[0] != count-1
+                    or len(sessions) != count
+                    or not current.startswith("dispatch:")
+                    or grants >= MAX_INFRASTRUCTURE_RETRY_GRANTS
+                ):
+                    return False,"attempt-ledger-invalid"
+
+                trial=copy.deepcopy(entry)
+                history=trial.setdefault("failure_history",[])
+                if not isinstance(history,list):
+                    return False,"attempt-ledger-invalid"
+                attempt=matches[0]
+                rows=[
+                    item for item in history
+                    if isinstance(item,dict)
+                    and int(item.get("attempt") or 0)==attempt
+                ]
+                if len(rows)>1:
+                    return False,"attempt-ledger-invalid"
+                if rows:
+                    row=rows[0]
+                    if (
+                        row.get("classification")!="infrastructure"
+                        or row.get("session") not in (None,sid)
+                        or str(row.get("reason") or "")!=str(reason or "")
+                    ):
+                        return False,"attempt-ledger-invalid"
+                    row.setdefault("session",sid)
+                else:
+                    history.append({
+                        "attempt":attempt,
+                        "classification":"infrastructure",
+                        "reason":reason,
+                        "timestamp":timestamp,
+                        "source":"supervisor",
+                        "session":sid,
+                    })
+
+                trial_failures=trial.setdefault("infrastructure_failures",[])
+                trial_failures.append({
+                    "timestamp":timestamp,
+                    "grant":1,
+                    "source":"supervisor",
+                    "kind":kind,
+                    "session":sid,
+                    "evidence":("durable-partial-state-preserved" if durable_present
+                                else "no-owned-artifact-or-progress"),
+                    "reason":reason,
+                })
+                trial["infrastructure_retry_grants"]=grants+1
+                projected=attempt_state(trial)
+                if not (
+                    projected.get("valid")
+                    and projected.get("unmaterialized_dispatch_reusable")
+                ):
+                    return False,"attempt-ledger-invalid"
+                data["deliverables"][did]=trial
+                save_attempts(data)
+                race_recovered=True
+            else:
+                if state["infrastructure_retry_grants"] >= MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                    return False,"infrastructure-retry-limit"
+                failures.append({
+                    "timestamp":timestamp,
+                    "grant":1,
+                    "source":"supervisor",
+                    "kind":kind,
+                    "session":sid,
+                    "evidence":("durable-partial-state-preserved" if durable_present
+                                else "no-owned-artifact-or-progress"),
+                    "reason":reason,
+                })
+                entry["infrastructure_retry_grants"]=state["infrastructure_retry_grants"]+1
+                save_attempts(data)
+    if race_recovered:
+        log(
+            f"INFRASTRUCTURE_PRECLAIM_RACE_RECOVERY session={sid} "
+            f"deliverable={did} kind={kind} grant=1 reason={reason}"
+        )
+        csv(
+            "INFRASTRUCTURE_PRECLAIM_RACE_RECOVERY",sid,"supervisor",
+            f"{did} {kind} grant=1 reason={reason}",
+        )
     log(f"INFRASTRUCTURE_RETRY_GRANT session={sid} deliverable={did} kind={kind} grant=1 reason={reason}")
     csv("INFRASTRUCTURE_RETRY_GRANT",sid,"supervisor",f"{did} {kind} grant=1 reason={reason}")
-    return True,"granted"
+    return True,("granted-preclaimed-successor-recovery" if race_recovered else "granted")
 
 def record_compaction_infrastructure_failure(sid,did):
     """Compatibility wrapper for a failed beta compaction template."""
