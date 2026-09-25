@@ -1917,6 +1917,139 @@ class VerificationSemanticsTests(unittest.TestCase):
             fingerprints,
         )
 
+    def test_historical_python_cache_entry_in_baseline_is_ignored(self):
+        supervisor.write_ownership_baseline("D001")
+        path=supervisor.ownership_baseline_path("D001")
+        data=json.loads(path.read_text())
+        data["files"]["reference/__pycache__/reference.cpython-314.pyc"]="old"
+        path.write_text(json.dumps(data))
+        self.assertEqual(supervisor.ownership_violations("D001","s1"),[])
+
+    def test_sibling_ownership_survives_supervisor_restart_window(self):
+        supervisor.write_ownership_baseline("D001")
+        (self.project/"b.txt").write_text("changed by D002\n")
+
+        class FakeCursor:
+            def __init__(self,owner):
+                self.owner=owner
+            def fetchall(self):
+                return [("s2",500)]
+        class FakeConnection:
+            def __init__(self):
+                self.params=None
+            def execute(self,_query,params):
+                self.params=params
+                return FakeCursor(self)
+            def close(self):
+                pass
+
+        con=FakeConnection()
+        with mock.patch.object(
+            supervisor,"session_window",return_value=(1000,2000)
+        ), mock.patch.object(
+            supervisor,"v1_runtime_enabled",return_value=True
+        ), mock.patch.object(
+            supervisor,"_v1_active_session_ids",return_value=set()
+        ), mock.patch.object(
+            supervisor,"db_connect",return_value=con
+        ), mock.patch.object(
+            supervisor,"_v1_session_terminal",return_value=True
+        ), mock.patch.object(
+            supervisor,"_v1_session_end_ms",return_value=1500
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",
+            side_effect=lambda sid: "DELIVERABLE: D002" if sid=="s2" else "",
+        ), mock.patch.object(
+            supervisor,"load_manifest",return_value={"leaves":self.leaves}
+        ), mock.patch.object(
+            supervisor,"session_explicitly_mutated_path",return_value=False
+        ):
+            self.assertEqual(supervisor.ownership_violations("D001","s1"),[])
+        self.assertEqual(con.params,(str(self.project),"s1"))
+
+    def test_false_ownership_recovery_finalizes_same_attempt_and_clears_unstarted_split(self):
+        supervisor.write_ownership_baseline("D001")
+        supervisor.write_execution_baseline("D001",1)
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        entry=attempts["deliverables"]["D001"]
+        entry["failure_history"]=[{
+            "attempt":1,
+            "classification":"genuine",
+            "reason":"ownership-violation:b.txt",
+            "session":"s1",
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:00:00Z",
+        }]
+        entry["split_required"]={
+            "generation":1,
+            "reason":"genuine-failure-threshold",
+            "timestamp":"2026-09-25T00:00:01Z",
+        }
+        (self.work/"attempts.json").write_text(json.dumps(attempts))
+        supervisor.atomic_write_json(
+            supervisor.split_request_path("D001"),
+            {"protocol":"v2-task-split-proposal-v2","parent_id":"D001","generation":1},
+        )
+        supervisor.atomic_write_json(
+            supervisor.split_status_path("D001"),
+            {
+                "owner":"supervisor","parent_id":"D001",
+                "generation":1,"state":"split-required",
+            },
+        )
+
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"durable_worker_execution",return_value=True
+        ), mock.patch.object(
+            supervisor,"worker_sandbox_has_fatal_violation",return_value=False
+        ):
+            ok,detail=supervisor.recover_false_ownership_finalize("D001")
+
+        self.assertTrue(ok,detail)
+        self.assertEqual(detail,"finalized")
+        self.assertTrue((self.work/"D001.ready").exists())
+        after=json.loads((self.work/"attempts.json").read_text())
+        entry=after["deliverables"]["D001"]
+        self.assertEqual(entry["failure_history"][0]["reason"],"ownership-violation:b.txt")
+        marker=entry["false_ownership_finalize_recovery"]
+        self.assertEqual(marker["state"],"finalized")
+        self.assertEqual(marker["attempt"],1)
+        self.assertEqual(marker["session"],"s1")
+        self.assertNotIn("split_required",entry)
+        self.assertFalse(supervisor.split_request_path("D001").exists())
+        self.assertFalse(supervisor.split_status_path("D001").exists())
+
+    def test_false_ownership_recovery_refuses_still_violating_session(self):
+        supervisor.write_ownership_baseline("D001")
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        entry=attempts["deliverables"]["D001"]
+        entry["failure_history"]=[{
+            "attempt":1,
+            "classification":"genuine",
+            "reason":"ownership-violation:evil.txt",
+            "session":"s1",
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:00:00Z",
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(attempts))
+        (self.project/"evil.txt").write_text("still foreign\n")
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"durable_worker_execution",return_value=True
+        ), mock.patch.object(
+            supervisor,"worker_sandbox_has_fatal_violation",return_value=False
+        ):
+            ok,detail=supervisor.recover_false_ownership_finalize("D001")
+        self.assertFalse(ok)
+        self.assertTrue(
+            detail.startswith("false-ownership-recovery-still-violating:evil.txt"),
+            detail,
+        )
+        self.assertFalse((self.work/"D001.ready").exists())
+
     def test_corrupt_verify_wait_fails_closed(self):
         (self.work/"D001.verify-wait.json").write_text("{broken")
         with self.assertRaises(state_io.StateCorruptionError):

@@ -3104,6 +3104,171 @@ def recover_denied_tool_finalize(did):
     return ok,detail
 
 
+
+FALSE_OWNERSHIP_FINALIZE_RECOVERY_PROTOCOL=(
+    "v2-false-concurrent-ownership-finalize-recovery-v1"
+)
+
+
+def recover_false_ownership_finalize(did):
+    """Re-run finalization when a terminal ownership failure is now disproven.
+
+    Historical failure rows remain intact. Recovery is allowed only for the
+    current terminal attempt, only when its recorded reason is ownership-based,
+    the worker made durable progress, no fatal sandbox violation exists, and
+    the current attribution logic finds zero ownership violations for that
+    exact session. An unstarted split-required state may be retired only after
+    successful finalization.
+    """
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-finalized"
+
+    project=Path(PROJECT)
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf.get("split_children"):
+        return False,"false-ownership-recovery-requires-executable-leaf"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"false-ownership-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"false-ownership-recovery-invalid-attempt-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count or not isinstance(sessions[-1],str)
+                or not sessions[-1] or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"false-ownership-recovery-session-mismatch"
+            sid=sessions[-1]
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict) and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1:
+                return False,"false-ownership-recovery-terminal-failure-missing"
+            failure=failures[0]
+            reason=str(failure.get("reason") or "")
+            if (
+                failure.get("classification")!="genuine"
+                or not reason.startswith("ownership-violation:")
+            ):
+                return False,"false-ownership-recovery-terminal-failure-mismatch"
+
+            split_status=load_split_status(did)
+            split_state=str(split_status.get("state") or "")
+            if split_state and split_state!="split-required":
+                return False,"false-ownership-recovery-split-already-started"
+            if split_proposal_path(did).exists() or split_transaction_path(did).exists():
+                return False,"false-ownership-recovery-split-already-started"
+
+            existing=entry.get("false_ownership_finalize_recovery")
+            if isinstance(existing,dict):
+                if (
+                    existing.get("protocol")!=FALSE_OWNERSHIP_FINALIZE_RECOVERY_PROTOCOL
+                    or int(existing.get("attempt") or 0)!=count
+                    or existing.get("session")!=sid
+                    or existing.get("historical_reason")!=reason
+                ):
+                    return False,"false-ownership-recovery-conflicting-marker"
+                if existing.get("state")=="finalized" and ready_info(did):
+                    return True,"already-finalized"
+                if existing.get("state") not in {"prepared","failed"}:
+                    return False,"false-ownership-recovery-marker-invalid"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"false-ownership-recovery-session-still-active"
+    if worker_sandbox_has_fatal_violation(project,did,sid):
+        return False,"false-ownership-recovery-fatal-sandbox-violation"
+    if not durable_worker_execution(did,sid):
+        return False,"false-ownership-recovery-no-durable-execution"
+
+    violations=ownership_violations(did,sid)
+    if violations:
+        return False,"false-ownership-recovery-still-violating:"+",".join(violations[:4])
+
+    baseline=ownership_baseline_path(did)
+    try:
+        baseline_sha=hashlib.sha256(baseline.read_bytes()).hexdigest()
+    except OSError:
+        return False,"false-ownership-recovery-baseline-unreadable"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"false-ownership-recovery-missing-ledger-entry"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"false-ownership-recovery-ledger-changed"
+            existing=entry.get("false_ownership_finalize_recovery")
+            if not isinstance(existing,dict):
+                entry["false_ownership_finalize_recovery"]={
+                    "protocol":FALSE_OWNERSHIP_FINALIZE_RECOVERY_PROTOCOL,
+                    "state":"prepared",
+                    "attempt":count,
+                    "session":sid,
+                    "historical_reason":reason,
+                    "ownership_baseline_sha256":baseline_sha,
+                    "prepared_at":time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                    ),
+                }
+                save_attempts(data)
+
+    ok,detail=post_session_finalize(did,sid)
+
+    if ok:
+        try:
+            if split_request_path(did).exists() or split_status_path(did).exists():
+                _archive_split_state_for_contract_repair(did)
+            _clear_split_request_state_for_contract_repair(did)
+            splitter_lock_path(did).unlink(missing_ok=True)
+        except Exception as exc:
+            ok=False
+            detail=f"false-ownership-recovery-split-clear-error-{type(exc).__name__}"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            marker=(
+                entry.get("false_ownership_finalize_recovery")
+                if isinstance(entry,dict) else None
+            )
+            if isinstance(marker,dict):
+                marker["state"]="finalized" if ok else "failed"
+                marker["result"]=detail
+                marker["finished_at"]=time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                )
+                if ok:
+                    entry.pop("split_required",None)
+                save_attempts(data)
+
+    event=(
+        "FALSE_OWNERSHIP_FINALIZE_RECOVERED"
+        if ok else "FALSE_OWNERSHIP_FINALIZE_RECOVERY_FAILED"
+    )
+    log(
+        f"{event} session={sid} deliverable={did} "
+        f"attempt={count} result={detail}"
+    )
+    csv(event,sid,"supervisor",f"{did} attempt={count} result={detail}")
+    return ok,detail
+
+
 VERSION_SKEW_ZERO_WORK_RECOVERY_PROTOCOL=(
     "v2-version-skew-zero-work-dispatch-recovery-v1"
 )
@@ -5617,6 +5782,236 @@ def reconcile_splits_once():
 
 
 
+OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER="runtime-ownership-attribution-repair"
+
+
+def failure_counts_as_genuine(item):
+    return bool(
+        isinstance(item,dict)
+        and item.get("classification")=="genuine"
+        and item.get("recovered_by")!=OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER
+    )
+
+
+def _ownership_failure_paths(reason):
+    text=str(reason or "")
+    for prefix in (
+        "ownership-violation:",
+        "ownership-violation-after-verify:",
+    ):
+        if text.startswith(prefix):
+            return [
+                item.strip() for item in text[len(prefix):].split(",")
+                if item.strip()
+            ]
+    return []
+
+
+def _archive_unclaimed_split_for_ownership_recovery(did):
+    paths=(
+        split_request_path(did),
+        split_proposal_path(did),
+        split_status_path(did),
+        split_transaction_path(did),
+        splitter_lock_path(did),
+    )
+    records={}
+    for path in paths:
+        try:
+            records[path.name]=path.read_text(errors="replace")
+        except OSError:
+            continue
+    if not records:
+        return ""
+    root=(
+        Path(PROJECT)/".opencode-v2"/"work"/
+        "ownership-attribution-recovery-history"
+    )
+    root.mkdir(parents=True,exist_ok=True)
+    stamp=f"{int(time.time()*1000)}-{did}"
+    out=root/f"{stamp}.json"
+    atomic_write_json(out,{
+        "owner":"supervisor",
+        "protocol":"v2-ownership-attribution-recovery-archive-v1",
+        "deliverable":did,
+        "records":records,
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    })
+    return str(out.relative_to(Path(PROJECT)))
+
+
+def recover_ownership_attribution_failures(dids):
+    """Recover only ownership failures proven false by durable attribution.
+
+    The original failure row and reason remain immutable evidence.  Recovery
+    adds a marker that excludes the row from genuine-failure/split counting.
+    Generated Python caches are self-proving ephemeral paths; all other paths
+    must belong to an overlapping sibling leaf and must not have been directly
+    targeted by the failed worker.
+    """
+    dids=list(dict.fromkeys(dids))
+    if not dids:
+        raise ValueError("no deliverables requested")
+    leaves=(load_manifest().get("leaves") or {})
+    proofs={}
+    for did in dids:
+        if did not in leaves or not executable_leaf(did):
+            raise ValueError(f"invalid executable deliverable {did!r}")
+        entry=(load_attempts().get("deliverables") or {}).get(did)
+        if not isinstance(entry,dict):
+            raise ValueError(f"missing attempt ledger entry for {did}")
+        if leaf_children(did):
+            raise ValueError(f"{did} already has split children")
+        status=load_split_status(did)
+        if status.get("state") not in {"","split-required"}:
+            raise ValueError(
+                f"{did} split state already progressed: {status.get('state')}"
+            )
+        if split_proposal_path(did).exists() or split_transaction_path(did).exists():
+            raise ValueError(f"{did} split transaction already progressed")
+
+        rows=[]
+        for item in entry.get("failure_history",[]) or []:
+            if not (
+                isinstance(item,dict)
+                and item.get("classification")=="genuine"
+                and item.get("recovered_by")!=OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER
+            ):
+                continue
+            paths=_ownership_failure_paths(item.get("reason"))
+            if not paths:
+                continue
+            sid=str(item.get("session") or "")
+            if not sid:
+                continue
+            status_map=v1_session_status_snapshot()
+            if isinstance(status_map.get(sid),dict) and status_map[sid].get("type")=="busy":
+                raise ValueError(f"{did} session still active: {sid}")
+            sibling=overlapping_other_owned_paths(sid,did)
+            def inside(path,roots):
+                return any(
+                    path==root or path.startswith(root.rstrip("/")+"/")
+                    for root in roots
+                )
+            path_proofs=[]
+            safe=True
+            for path in paths:
+                if generated_python_cache_path(path):
+                    path_proofs.append({"path":path,"proof":"generated-python-cache"})
+                    continue
+                if (
+                    sibling
+                    and inside(path,sibling)
+                    and not session_explicitly_mutated_path(sid,path)
+                ):
+                    path_proofs.append({"path":path,"proof":"overlapping-sibling-owned"})
+                    continue
+                safe=False
+                break
+            if not safe:
+                continue
+            attempt=int(item.get("attempt") or 0)
+            if attempt==int(entry.get("count") or 0):
+                residual=ownership_violations(did,sid)
+                if residual:
+                    continue
+            rows.append({
+                "attempt":attempt,
+                "session":sid,
+                "reason":item.get("reason"),
+                "paths":path_proofs,
+            })
+        if not rows:
+            raise ValueError(f"{did} has no provably false ownership failures")
+        proofs[did]=rows
+
+    archives={}
+    for did in dids:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        effective=sum(
+            1 for item in entry.get("failure_history",[]) or []
+            if failure_counts_as_genuine(item)
+            and int(item.get("attempt") or 0) not in {
+                int(row["attempt"]) for row in proofs[did]
+            }
+        )
+        if effective<2 and (
+            entry.get("split_required")
+            or split_request_path(did).exists()
+            or split_status_path(did).exists()
+        ):
+            archives[did]=_archive_unclaimed_split_for_ownership_recovery(did)
+
+    stamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            for did in dids:
+                entry=(data.get("deliverables") or {}).get(did)
+                if not isinstance(entry,dict):
+                    raise ValueError(f"missing attempt ledger entry for {did}")
+                by_attempt={
+                    int(item.get("attempt") or 0):item
+                    for item in entry.get("failure_history",[]) or []
+                    if isinstance(item,dict)
+                }
+                for proof in proofs[did]:
+                    row=by_attempt.get(int(proof["attempt"]))
+                    if not (
+                        isinstance(row,dict)
+                        and row.get("classification")=="genuine"
+                        and row.get("reason")==proof["reason"]
+                    ):
+                        raise StateCorruptionError(
+                            f"{did} ownership failure changed during recovery"
+                        )
+                    row["recovered_by"]=OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER
+                    row["recovered_at"]=stamp
+                    row["recovery_proof"]=proof["paths"]
+                recoveries=entry.setdefault("ownership_attribution_recoveries",[])
+                for proof in proofs[did]:
+                    if not any(
+                        isinstance(item,dict)
+                        and int(item.get("attempt") or 0)==int(proof["attempt"])
+                        for item in recoveries
+                    ):
+                        recoveries.append({
+                            "attempt":int(proof["attempt"]),
+                            "session":proof["session"],
+                            "original_reason":proof["reason"],
+                            "proof":proof["paths"],
+                            "source":"supervisor",
+                            "timestamp":stamp,
+                        })
+                effective=sum(
+                    1 for item in entry.get("failure_history",[]) or []
+                    if failure_counts_as_genuine(item)
+                )
+                if effective<2:
+                    entry.pop("split_required",None)
+            save_attempts(data)
+
+    for did in dids:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        effective=sum(
+            1 for item in entry.get("failure_history",[]) or []
+            if failure_counts_as_genuine(item)
+        )
+        if effective<2:
+            _clear_split_request_state_for_contract_repair(did)
+            splitter_lock_path(did).unlink(missing_ok=True)
+        for proof in proofs[did]:
+            log(
+                f"OWNERSHIP_ATTRIBUTION_RECOVERED deliverable={did} "
+                f"attempt={proof['attempt']} session={proof['session']}"
+            )
+            csv(
+                "OWNERSHIP_ATTRIBUTION_RECOVERED",proof["session"],
+                "supervisor",f"{did} attempt={proof['attempt']}"
+            )
+    return proofs,archives
+
+
 def record_leaf_failure(did, reason, classification="genuine", sid=None):
     """Record a terminal worker outcome against its immutable session attempt.
 
@@ -6880,9 +7275,8 @@ def overlapping_other_owned_paths(sid,did):
             con=db_connect()
             rows=con.execute(
                 "SELECT id,time_created FROM session "
-                "WHERE parent_id IS NOT NULL AND directory=? "
-                "AND time_created>=? AND id<>?",
-                (PROJECT,START_MS,sid),
+                "WHERE parent_id IS NOT NULL AND directory=? AND id<>?",
+                (PROJECT,sid),
             ).fetchall()
             con.close()
         except Exception:
@@ -6911,9 +7305,8 @@ def overlapping_other_owned_paths(sid,did):
         con=db_connect()
         rows=con.execute(
             "SELECT id,time_created,time_idle FROM session_v2 "
-            "WHERE parent_id IS NOT NULL AND directory=? "
-            "AND time_created>=? AND id<>?",
-            (PROJECT,START_MS,sid),
+            "WHERE parent_id IS NOT NULL AND directory=? AND id<>?",
+            (PROJECT,sid),
         ).fetchall()
         con.close()
     except Exception:
@@ -6977,6 +7370,13 @@ def ownership_violations(did,sid=""):
         baseline=json.loads(ownership_baseline_path(did).read_text())
         before=baseline.get("files") if baseline.get("owner")=="supervisor" else None
         if not isinstance(before,dict): return ["invalid ownership baseline"]
+        # Baselines written before the bytecode-cache exclusion may contain
+        # ephemeral .pyc/__pycache__ entries. Normalize those historical
+        # snapshots to the same durable-project domain as current fingerprints.
+        before={
+            path:digest for path,digest in before.items()
+            if not generated_python_cache_path(path)
+        }
     except FileNotFoundError:
         return []
     except Exception:
@@ -11357,7 +11757,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-nested-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-false-ownership-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-nested-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -11633,6 +12033,27 @@ def main():
         print(
             f"DENIED_TOOL_FINALIZE_RECOVERY_ALLOW "
             f"deliverable={args.recover_denied_tool_finalize} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_false_ownership_finalize:
+        if unknown or not args.project:
+            raise SystemExit(
+                "false-ownership finalize recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_false_ownership_finalize(
+            args.recover_false_ownership_finalize
+        )
+        if not ok:
+            raise SystemExit(
+                f"FALSE_OWNERSHIP_FINALIZE_RECOVERY_DENY "
+                f"deliverable={args.recover_false_ownership_finalize} "
+                f"reason={detail}"
+            )
+        print(
+            f"FALSE_OWNERSHIP_FINALIZE_RECOVERY_ALLOW "
+            f"deliverable={args.recover_false_ownership_finalize} "
             f"reason={detail}"
         )
         return
