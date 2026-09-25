@@ -43,6 +43,56 @@ class PlannerContractTests(unittest.TestCase):
         self.assertIn("bounded owned test/helper", role)
 
 
+class WorkerSandboxPythonSideEffectTests(unittest.TestCase):
+    def test_worker_and_verify_disable_python_bytecode_side_effects(self):
+        source = (
+            Path(__file__).resolve().parent / "worker_sandbox.py"
+        ).read_text()
+        self.assertGreaterEqual(
+            source.count('"--setenv","PYTHONDONTWRITEBYTECODE","1"'),
+            2,
+        )
+
+
+class ImplementationRetryGenerationTests(unittest.TestCase):
+    def test_preclaim_does_not_advance_generation_but_terminal_failure_does(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            work = project / ".opencode-v2/work"
+            work.mkdir(parents=True)
+            ledger = {
+                "owner": "supervisor",
+                "protocol": "v2-attempt-ledger-v1",
+                "deliverables": {
+                    "D001": {
+                        "count": 1,
+                        "sessions": ["ses-active"],
+                        "automatic_limit": 2,
+                    }
+                },
+            }
+            (work / "attempts.json").write_text(json.dumps(ledger))
+            self.assertEqual(controller.attempt_failure_generation(project, "D001"), 0)
+
+            ledger["deliverables"]["D001"]["failure_history"] = [
+                {
+                    "attempt": 1,
+                    "classification": "genuine",
+                    "reason": "verify-failed-1",
+                }
+            ]
+            (work / "attempts.json").write_text(json.dumps(ledger))
+            self.assertEqual(controller.attempt_failure_generation(project, "D001"), 1)
+
+    def test_retry_generation_changes_execution_id_without_changing_decision(self):
+        action = {"kind": "launch", "agent": "implementer", "deliverable": "D001"}
+        first = controller.execution_action_id("same-state", "ses-root", action, 0)
+        replay = controller.execution_action_id("same-state", "ses-root", action, 0)
+        retry = controller.execution_action_id("same-state", "ses-root", action, 1)
+        self.assertEqual(first, replay)
+        self.assertNotEqual(first, retry)
+
+
 class ExactProjectPathPermissionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

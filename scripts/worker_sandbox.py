@@ -900,6 +900,7 @@ def run_bash(project: Path, ctx, command: str):
     args.extend([
         "--chdir",str(project.resolve()),
         "--setenv","V2_WORKER_SANDBOX","1",
+        "--setenv","PYTHONDONTWRITEBYTECODE","1",
         "/bin/bash","-lc",command,
     ])
 
@@ -1022,6 +1023,7 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
     args.extend([
         "--chdir",str(project.resolve()),
         "--setenv","V2_WORKER_SANDBOX","verify",
+        "--setenv","PYTHONDONTWRITEBYTECODE","1",
         "/bin/bash","-euo","pipefail","-c",command,
     ])
 

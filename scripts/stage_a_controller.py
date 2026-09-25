@@ -227,14 +227,37 @@ def canonical_execution_action(action: dict) -> dict:
     return normalized
 
 
-def execution_action_id(state_version: str, root_session: str, action: dict) -> str:
+def execution_action_id(
+    state_version: str,
+    root_session: str,
+    action: dict,
+    dispatch_generation: int | None = None,
+) -> str:
     payload = {
         "state_version": str(state_version),
         "root_session": str(root_session),
         "action": canonical_execution_action(action),
     }
+    if dispatch_generation is not None:
+        payload["dispatch_generation"] = int(dispatch_generation)
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def attempt_failure_generation(project: Path, did: str) -> int:
+    path = project / ".opencode-v2" / "work" / "attempts.json"
+    if not path.exists():
+        return 0
+    data = load_json(path, "attempt ledger")
+    if data.get("owner") not in (None, "supervisor"):
+        raise ControllerError("attempt ledger owner is not supervisor")
+    entry = (data.get("deliverables") or {}).get(did) or {}
+    if not isinstance(entry, dict):
+        raise ControllerError(f"attempt ledger entry is not an object for {did}")
+    history = entry.get("failure_history") or []
+    if not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
+        raise ControllerError(f"attempt ledger failure history invalid for {did}")
+    return len(history)
 
 
 def attempt_snapshot(project: Path, did: str) -> dict:
@@ -1178,7 +1201,6 @@ def execute_first_implementation(
 
     root = resolve_root_session(project, base_url, explicit_root)
     canonical_action = canonical_execution_action(launch)
-    execution_id = execution_action_id(result["state_version"], root, canonical_action)
 
     with execution_lock(project):
         current = evaluate(project)
@@ -1189,6 +1211,11 @@ def execute_first_implementation(
             )
         if current["actions"] != result["actions"]:
             raise ControllerError("deterministic actions changed before dispatch")
+
+        dispatch_generation = attempt_failure_generation(project, did)
+        execution_id = execution_action_id(
+            result["state_version"], root, canonical_action, dispatch_generation
+        )
 
         ledger = load_execution_ledger(project)
         executions = ledger["executions"]
@@ -1220,6 +1247,7 @@ def execute_first_implementation(
             "state_version": result["state_version"],
             "root_session": root,
             "action": canonical_action,
+            "dispatch_generation": dispatch_generation,
             "transport": "prompt_async+SubtaskPart",
             "transport_may_have_been_attempted": True,
             "created_at_ms": int(time.time() * 1000),
