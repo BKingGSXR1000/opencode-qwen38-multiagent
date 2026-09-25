@@ -5863,7 +5863,8 @@ def recover_ownership_attribution_failures(dids):
         if leaf_children(did):
             raise ValueError(f"{did} already has split children")
         status=load_split_status(did)
-        if status.get("state") not in {"","split-required"}:
+        split_state=str(status.get("state") or "")
+        if split_state not in {"","split-required"}:
             raise ValueError(
                 f"{did} split state already progressed: {status.get('state')}"
             )

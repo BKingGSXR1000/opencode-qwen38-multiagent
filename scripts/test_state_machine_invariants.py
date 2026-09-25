@@ -2050,6 +2050,43 @@ class VerificationSemanticsTests(unittest.TestCase):
         )
         self.assertFalse((self.work/"D001.ready").exists())
 
+    def test_recovers_false_ownership_without_split_status(self):
+        self.ledger["deliverables"]["D001"]={
+            "count":1,
+            "sessions":["s1"],
+            "automatic_limit":3,
+            "failure_history":[{
+                "attempt":1,
+                "classification":"genuine",
+                "reason":"ownership-violation:b.txt",
+                "session":"s1",
+                "source":"supervisor",
+                "timestamp":"2026-09-25T00:01:00Z",
+            }],
+        }
+        self._write_ledger()
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"overlapping_other_owned_paths",return_value={"b.txt"}
+        ), mock.patch.object(
+            supervisor,"session_explicitly_mutated_path",return_value=False
+        ), mock.patch.object(
+            supervisor,"ownership_violations",return_value=[]
+        ):
+            proofs,archives=supervisor.recover_ownership_attribution_failures(
+                ["D001"]
+            )
+        self.assertEqual([row["attempt"] for row in proofs["D001"]],[1])
+        self.assertEqual(archives,{})
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ]["D001"]
+        self.assertEqual(
+            entry["failure_history"][0].get("recovered_by"),
+            supervisor.OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER,
+        )
+
     def test_recovers_proven_false_ownership_rows_and_clears_unclaimed_split(self):
         self.ledger["deliverables"]["D001"]={
             "count":2,
