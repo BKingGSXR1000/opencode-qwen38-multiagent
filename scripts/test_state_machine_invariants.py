@@ -250,6 +250,33 @@ class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
             })
             materialize.assert_not_called()
 
+    def test_busy_pre_restart_pending_child_is_not_an_orphan(self):
+        old_start=supervisor.START_MS
+        supervisor.START_MS=2000
+        try:
+            self.assertFalse(
+                supervisor.restart_orphan_candidate(
+                    "busy-child", {"busy-child"}, {"busy-child"}, 1000
+                )
+            )
+            self.assertTrue(
+                supervisor.restart_orphan_candidate(
+                    "lost-child", set(), {"lost-child"}, 1000
+                )
+            )
+            self.assertFalse(
+                supervisor.restart_orphan_candidate(
+                    "not-pending", set(), set(), 1000
+                )
+            )
+            self.assertFalse(
+                supervisor.restart_orphan_candidate(
+                    "new-child", set(), {"new-child"}, 3000
+                )
+            )
+        finally:
+            supervisor.START_MS=old_start
+
     def test_restart_orphan_is_infrastructure_not_genuine(self):
         sid="orphan"; did="D001"
         old_project=supervisor.PROJECT

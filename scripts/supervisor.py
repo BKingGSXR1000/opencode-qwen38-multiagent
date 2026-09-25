@@ -8243,6 +8243,15 @@ def reconcile_idle_implementation_session(sid,agent):
     post_finalize_seen.add(sid)
 
 
+def restart_orphan_candidate(sid, active_ids, pending_sessions, time_created):
+    """A pre-restart pending child is orphaned only if the live server lost it."""
+    return (
+        sid in pending_sessions
+        and int(time_created or 0) < START_MS
+        and sid not in set(active_ids or ())
+    )
+
+
 def reconcile_restart_orphaned_implementation_session(sid,agent):
     """Classify an in-flight child left behind by a restarted OpenCode server.
 
@@ -8404,8 +8413,9 @@ def persisted_reconcile_loop():
                         reconcile_idle_implementation_session(sid,agent)
                     elif (
                         agent in IMPLEMENTATION_AGENTS
-                        and sid in pending_sessions
-                        and int(time_created or 0) < START_MS
+                        and restart_orphan_candidate(
+                            sid, active, pending_sessions, time_created
+                        )
                     ):
                         reconcile_restart_orphaned_implementation_session(sid,agent)
             else:
