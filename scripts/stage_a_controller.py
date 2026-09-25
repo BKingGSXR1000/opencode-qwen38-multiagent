@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from acceptance_contract import must_acceptance_ids
 from deterministic_dispatch import select_actions
 
 POLL_DEFAULT = 0.5
@@ -708,16 +709,11 @@ def build_planner_subtask(action: dict) -> dict:
 
 
 def acceptance_must_ids(acceptance_text: str) -> list[str]:
-    result: list[str] = []
-    for raw in str(acceptance_text or "").splitlines():
-        line = raw.strip()
-        if not line.startswith("- [ ] ") or ":" not in line:
-            continue
-        candidate = line[len("- [ ] "):].split(":", 1)[0].strip()
-        if len(candidate) == 4 and candidate.startswith("A") and candidate[1:].isdigit():
-            if candidate in result:
-                raise ControllerError(f"duplicate acceptance MUST id: {candidate}")
-            result.append(candidate)
+    result = must_acceptance_ids(acceptance_text)
+    if len(result) != len(set(result)):
+        seen = set()
+        duplicate = next(item for item in result if item in seen or seen.add(item))
+        raise ControllerError(f"duplicate acceptance MUST id: {duplicate}")
     if not result:
         raise ControllerError("acceptance contract contains no exact MUST Axxx IDs")
     return result

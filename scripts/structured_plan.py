@@ -9,6 +9,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from acceptance_contract import must_acceptance_ids
 from state_io import atomic_write_text as state_atomic_write_text, atomic_write_json as state_atomic_write_json
 
 PROTOCOL = "v2-structured-plan-v1"
@@ -30,7 +31,6 @@ ROLE_ALLOWLIST = {
 WRITE_ROLES = ROLE_ALLOWLIST - {"tester"}
 KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 ACC_RE = re.compile(r"^A\d{3}$")
-ACCEPTANCE_MUST_RE = re.compile(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$")
 PATH_RE = re.compile(r"^[^\s`]+$")
 TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
 TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
@@ -380,7 +380,7 @@ def compile_plan(project: Path):
             "message":f"acceptance contract unreadable for structured-plan coverage: {exc}",
         }]
     else:
-        must_ids=ACCEPTANCE_MUST_RE.findall(acceptance_text)
+        must_ids=must_acceptance_ids(acceptance_text)
         if not must_ids:
             errors=[{
                 "key":"",

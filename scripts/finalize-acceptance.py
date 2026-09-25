@@ -2,13 +2,13 @@
 import argparse,hashlib,json,os,re,subprocess,sys,tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from acceptance_contract import must_acceptance_ids
 from leaf_contract import validate_verify_command
 from state_io import atomic_write_json
 from worker_sandbox import run_validator_bash, SandboxError
 
 PASS_PROTOCOL="v2-acceptance-pass-v1"
 REPORT_PROTOCOL="v2-acceptance-report-v1"
-MUST_RE=re.compile(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$")
 
 def fail(msg):
     print(f"ACCEPTANCE_GATE_FAIL: {msg}",file=sys.stderr)
@@ -58,7 +58,7 @@ def finalize(project: Path):
     pass_p.unlink(missing_ok=True)
     if not plan_p.exists(): fail("missing .opencode-v2/ACCEPTANCE.md")
     if not report_p.exists(): fail("missing .opencode-v2/acceptance-report.json")
-    plan=plan_p.read_text(errors="replace"); must=MUST_RE.findall(plan)
+    plan=plan_p.read_text(errors="replace"); must=must_acceptance_ids(plan)
     if not must: fail("acceptance contract contains no exact '- [ ] Axxx: ...' MUST checks")
     if len(must)!=len(set(must)): fail("duplicate MUST IDs in acceptance contract")
     report=load_json(report_p,"acceptance-report.json")
@@ -123,10 +123,10 @@ def selftest():
     base=Path.home()/".local/share/v2-worker-sandbox/selftest-finalizer"; base.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(dir=base) as td:
         project=Path(td); root=project/".opencode-v2"; root.mkdir()
-        (root/"ACCEPTANCE.md").write_text("# Acceptance Contract\nReference policy: none\n- [ ] A001: Works\n<!-- ACCEPTANCE_COMPLETE -->\n")
+        (root/"ACCEPTANCE.md").write_text("# Acceptance Contract\nReference policy: none\n## MUST checks\n- [ ] A001: Works\n## SHOULD checks\n- [ ] A002: Optional polish\n<!-- ACCEPTANCE_COMPLETE -->\n")
         (root/"acceptance-report.json").write_text(json.dumps({"protocol":REPORT_PROTOCOL,"result":"PASS","checks":[{"id":"A001","status":"PASS","evidence":"deterministic evidence","required_executable":True,"command":"test -e .opencode-v2/ACCEPTANCE.md","exit_code":0}]}))
         (root/"TEST_REPORT.json").write_text(json.dumps({"protocol":"v2-test-report-v1","status":"pass","checks_run":1,"checks_passed":1,"missing_required_files":[],"checks":[{"name":"x","command":"test -e .opencode-v2/ACCEPTANCE.md","exit_code":0,"timed_out":False}]}))
-        marker=finalize(project); assert marker["result"]=="PASS" and (root/"acceptance-pass.json").exists()
+        marker=finalize(project); assert marker["result"]=="PASS" and marker["must_checks"]==["A001"] and (root/"acceptance-pass.json").exists()
         data=json.loads((root/"TEST_REPORT.json").read_text()); data["checks"][0]["exit_code"]=1; (root/"TEST_REPORT.json").write_text(json.dumps(data))
         try: finalize(project); raise AssertionError("bad TEST_REPORT passed")
         except RuntimeError: pass

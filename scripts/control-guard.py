@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from acceptance_contract import must_acceptance_ids
 from state_io import atomic_write_text as state_atomic_write_text
 from leaf_contract import (
     WRITE_ROLES as SHARED_WRITE_ROLES,
@@ -542,10 +543,8 @@ def reference_policy(text: str):
     values=reference_policies(text)
     return values[0] if len(values)==1 else ""
 
-ACCEPTANCE_MUST_RE = re.compile(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$")
-
 def plan_acceptance_coverage_errors(leaves, acceptance_text: str):
-    must_ids=ACCEPTANCE_MUST_RE.findall(str(acceptance_text or ""))
+    must_ids=must_acceptance_ids(acceptance_text)
     if not must_ids:
         return ["acceptance contract has no exact MUST Axxx IDs for plan coverage"]
     if len(must_ids)!=len(set(must_ids)):
@@ -596,7 +595,7 @@ def validate_acceptance(project: Path, finalize=False):
             errors.append(
                 "internal Reference policy cannot require externally authoritative/reference truth"
             )
-        must_ids=re.findall(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$",text)
+        must_ids=must_acceptance_ids(text)
         if not must_ids:
             errors.append("no machine-readable MUST lines; use exact '- [ ] A001: description'")
         elif len(must_ids)!=len(set(must_ids)):

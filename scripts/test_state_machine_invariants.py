@@ -3,7 +3,7 @@ import hashlib,json,multiprocessing,runpy,subprocess,sys,tempfile,unittest
 from unittest import mock
 from pathlib import Path
 HERE=Path(__file__).resolve().parent; sys.path.insert(0,str(HERE))
-import control_state,leaf_contract,stage_a_controller,structured_plan,supervisor,state_io,worker_sandbox,watchdog_telemetry
+import acceptance_contract,control_state,leaf_contract,stage_a_controller,structured_plan,supervisor,state_io,worker_sandbox,watchdog_telemetry
 
 def ready_text(did,attempt=1,owner="supervisor",protocol=None,verify_command=""):
     protocol=protocol or control_state.LEAF_READY_PROTOCOL
@@ -26,6 +26,21 @@ def mark_phase_ready(project,artifact,marker):
         f"validated={control_state.PHASE_READY_VALIDATOR}\n"
         f"artifact_sha256={digest}\n"
     )
+
+class AcceptanceContractMustParsingTests(unittest.TestCase):
+    def test_should_a_ids_are_not_promoted_when_must_section_exists(self):
+        text=(
+            "# Acceptance Contract\n## MUST checks\n"
+            "- [ ] A001: required.\n- [ ] A002: required too.\n"
+            "## SHOULD checks\n- [ ] A003: optional.\n"
+        )
+        self.assertEqual(acceptance_contract.must_acceptance_ids(text),["A001","A002"])
+        self.assertEqual(stage_a_controller.acceptance_must_ids(text),["A001","A002"])
+
+    def test_legacy_contract_without_must_heading_remains_supported(self):
+        text="- [ ] A001: required.\n- [ ] A002: required too.\n"
+        self.assertEqual(acceptance_contract.must_acceptance_ids(text),["A001","A002"])
+
 
 class SharedLeafContractTests(unittest.TestCase):
     def test_role_semantics_fail_closed(self):
@@ -128,6 +143,21 @@ class StructuredPlanAcceptanceCoverageTests(unittest.TestCase):
             )
             self.assertEqual(set(mapping["key_to_id"]),{"app","final_tests"})
 
+    def test_should_ids_do_not_enter_structured_must_coverage(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=self.make_project(Path(td))
+            ctrl=project/".opencode-v2"
+            (ctrl/"ACCEPTANCE.md").write_text(
+                "# Acceptance Contract\n"
+                "## MUST checks\n"
+                "- [ ] A001: app artifact exists.\n"
+                "- [ ] A003: final tests pass.\n"
+                "## SHOULD checks\n"
+                "- [ ] A002: optional enhancement.\n"
+            )
+            ok,errors=structured_plan.compile_plan(project)
+            self.assertTrue(ok,errors)
+
 
 class ControlGuardAcceptanceCoverageTests(unittest.TestCase):
     @classmethod
@@ -159,6 +189,16 @@ class ControlGuardAcceptanceCoverageTests(unittest.TestCase):
         self.assertEqual(len(errors),1)
         self.assertIn("missing=A002",errors[0])
         self.assertIn("extra=A999",errors[0])
+
+    def test_should_ids_do_not_enter_guard_must_coverage(self):
+        leaves={"D001":{"acceptance_ids":["A001"]}}
+        acceptance=(
+            "## MUST checks\n- [ ] A001: required.\n"
+            "## SHOULD checks\n- [ ] A002: optional.\n"
+        )
+        self.assertEqual(
+            self.guard["plan_acceptance_coverage_errors"](leaves,acceptance),[]
+        )
 
 
 class RuntimePlanRepairTests(unittest.TestCase):
