@@ -4118,6 +4118,463 @@ def recover_historical_parent_contract_repair_resolution(did):
     return True,"resolved"
 
 
+NESTED_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL=(
+    "v2-nested-handoff-writer-verify-upgrade-v1"
+)
+
+
+def recover_nested_handoff_writer_verify(parent):
+    """Propagate a pre-invariant stale writer Verify through one nested split.
+
+    Current split validation requires the writing child after a progress handoff
+    to preserve the exact parent Verify. Historical transactions can predate
+    that invariant. If such a stale writer was recursively split before the
+    mismatch became observable, its terminal writer can exhaust against the
+    stale Verify and never reach parent finalization. This migration archives
+    both split generations, updates only Verify/Done-when on the two writer
+    contracts, and grants the exhausted terminal writer one ordinary
+    plan-contract replacement. Attempt/session history is never rewritten.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+    if split_depth(parent)!=0:
+        return False,"nested-writer-upgrade-requires-root-parent"
+
+    project=Path(PROJECT)
+    work=project/".opencode-v2"/"work"
+    guard_path=project/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
+
+    with splitter_state_lock(parent):
+        with dispatch_lock:
+            with attempt_lock():
+                outer_status=load_split_status(parent)
+                outer_txn=load_split_transaction(parent)
+                if outer_status.get("state")!="accepted":
+                    return False,"nested-writer-upgrade-outer-split-not-accepted"
+                if (
+                    outer_txn.get("state")!="committed"
+                    or outer_txn.get("parent_id")!=parent
+                    or len(outer_txn.get("children") or [])!=2
+                    or not isinstance(outer_txn.get("child_defs"),dict)
+                ):
+                    return False,"nested-writer-upgrade-outer-transaction-invalid"
+                outer_children=list(outer_txn["children"])
+                first_id,writer_id=outer_children
+                outer_defs=outer_txn["child_defs"]
+                first_def=outer_defs.get(first_id)
+                writer_def=outer_defs.get(writer_id)
+                if not isinstance(first_def,dict) or not isinstance(writer_def,dict):
+                    return False,"nested-writer-upgrade-outer-child-definition-missing"
+                if not first_def.get("split_handoff_only"):
+                    return False,"nested-writer-upgrade-outer-first-not-handoff"
+                if writer_def.get("split_handoff_only"):
+                    return False,"nested-writer-upgrade-outer-writer-is-handoff"
+                if writer_def.get("split_handoff_source")!=first_id:
+                    return False,"nested-writer-upgrade-outer-handoff-source-mismatch"
+
+                raw_manifest=load_json_object(
+                    guard_path,label="implementation manifest"
+                )
+                leaves=raw_manifest.get("leaves")
+                if not isinstance(leaves,dict):
+                    return False,"nested-writer-upgrade-manifest-invalid"
+                parent_leaf=leaves.get(parent)
+                live_first=leaves.get(first_id)
+                live_writer=leaves.get(writer_id)
+                if not all(isinstance(item,dict) for item in (
+                    parent_leaf,live_first,live_writer
+                )):
+                    return False,"nested-writer-upgrade-outer-live-leaf-missing"
+                if list(parent_leaf.get("split_children") or [])!=outer_children:
+                    return False,"nested-writer-upgrade-outer-active-children-mismatch"
+                if not ready_info(first_id):
+                    return False,"nested-writer-upgrade-outer-handoff-not-ready"
+                if ready_info(writer_id):
+                    return False,"nested-writer-upgrade-outer-writer-already-ready"
+
+                parent_owned=set(owned_artifact_paths(parent_leaf))
+                writer_owned=set(owned_artifact_paths(writer_def))
+                if not parent_owned or writer_owned!=parent_owned:
+                    return False,"nested-writer-upgrade-outer-writer-ownership-mismatch"
+                parent_verify=str(parent_leaf.get("verify_command") or "").strip()
+                stale_verify=str(writer_def.get("verify_command") or "").strip()
+                if not parent_verify or not stale_verify:
+                    return False,"nested-writer-upgrade-verify-missing"
+                if stale_verify==parent_verify:
+                    return False,"nested-writer-upgrade-outer-writer-already-current"
+                if validate_verify_command(parent_verify):
+                    return False,"nested-writer-upgrade-current-parent-verify-invalid"
+
+                nested_children=list(live_writer.get("split_children") or [])
+                if len(nested_children)!=2:
+                    return False,"nested-writer-upgrade-writer-not-recursively-split"
+                nested_first_id,nested_writer_id=nested_children
+                nested_status=load_split_status(writer_id)
+                nested_txn=load_split_transaction(writer_id)
+                if nested_status.get("state")!="accepted":
+                    return False,"nested-writer-upgrade-nested-split-not-accepted"
+                if (
+                    nested_txn.get("state")!="committed"
+                    or nested_txn.get("parent_id")!=writer_id
+                    or list(nested_txn.get("children") or [])!=nested_children
+                    or not isinstance(nested_txn.get("child_defs"),dict)
+                ):
+                    return False,"nested-writer-upgrade-nested-transaction-invalid"
+                nested_defs=nested_txn["child_defs"]
+                nested_first_def=nested_defs.get(nested_first_id)
+                nested_writer_def=nested_defs.get(nested_writer_id)
+                live_nested_first=leaves.get(nested_first_id)
+                live_nested_writer=leaves.get(nested_writer_id)
+                if not all(isinstance(item,dict) for item in (
+                    nested_first_def,nested_writer_def,
+                    live_nested_first,live_nested_writer,
+                )):
+                    return False,"nested-writer-upgrade-nested-child-definition-missing"
+                if not nested_first_def.get("split_handoff_only"):
+                    return False,"nested-writer-upgrade-nested-first-not-handoff"
+                if nested_writer_def.get("split_handoff_only"):
+                    return False,"nested-writer-upgrade-nested-writer-is-handoff"
+                if nested_writer_def.get("split_handoff_source")!=nested_first_id:
+                    return False,"nested-writer-upgrade-nested-handoff-source-mismatch"
+                if not ready_info(nested_first_id):
+                    return False,"nested-writer-upgrade-nested-handoff-not-ready"
+                if ready_info(nested_writer_id):
+                    return False,"nested-writer-upgrade-nested-writer-already-ready"
+                if set(owned_artifact_paths(nested_writer_def))!=writer_owned:
+                    return False,"nested-writer-upgrade-nested-writer-ownership-mismatch"
+                if str(nested_writer_def.get("verify_command") or "").strip()!=stale_verify:
+                    return False,"nested-writer-upgrade-nested-verify-not-inherited"
+
+                overlay=load_split_leaf_overlay()
+                parents=overlay.get("parents")
+                if not isinstance(parents,dict):
+                    return False,"nested-writer-upgrade-overlay-invalid"
+                outer_overlay=parents.get(parent)
+                nested_overlay=parents.get(writer_id)
+                if (
+                    not isinstance(outer_overlay,dict)
+                    or outer_overlay.get("transaction_id")!=outer_txn.get("transaction_id")
+                    or outer_overlay.get("child_defs")!=outer_defs
+                    or not isinstance(nested_overlay,dict)
+                    or nested_overlay.get("transaction_id")!=nested_txn.get("transaction_id")
+                    or nested_overlay.get("child_defs")!=nested_defs
+                ):
+                    return False,"nested-writer-upgrade-overlay-mismatch"
+
+                attempts=load_attempts()
+                entries=attempts.get("deliverables")
+                root_entry=entries.get(parent) if isinstance(entries,dict) else None
+                writer_entry=entries.get(writer_id) if isinstance(entries,dict) else None
+                terminal_entry=entries.get(nested_writer_id) if isinstance(entries,dict) else None
+                if not all(isinstance(item,dict) for item in (
+                    root_entry,writer_entry,terminal_entry
+                )):
+                    return False,"nested-writer-upgrade-attempt-ledger-missing"
+                terminal_state=attempt_state(terminal_entry)
+                if not terminal_state.get("valid"):
+                    return False,"nested-writer-upgrade-terminal-ledger-invalid"
+                terminal_count=int(terminal_entry.get("count") or 0)
+                if (
+                    terminal_count<1
+                    or terminal_count!=int(terminal_state.get("allowed_attempts") or 0)
+                ):
+                    return False,"nested-writer-upgrade-terminal-not-exhausted"
+                terminal_sessions=terminal_entry.get("sessions")
+                if (
+                    not isinstance(terminal_sessions,list)
+                    or len(terminal_sessions)!=terminal_count
+                    or not isinstance(terminal_sessions[-1],str)
+                    or not terminal_sessions[-1]
+                ):
+                    return False,"nested-writer-upgrade-terminal-session-mismatch"
+                terminal_sid=terminal_sessions[-1]
+                terminal_failures=[
+                    item for item in (terminal_entry.get("failure_history") or [])
+                    if isinstance(item,dict)
+                    and int(item.get("attempt") or 0)==terminal_count
+                ]
+                if len(terminal_failures)!=1 or not (
+                    terminal_failures[0].get("classification")=="genuine"
+                    and terminal_failures[0].get("reason")=="verify-failed-1"
+                ):
+                    return False,"nested-writer-upgrade-terminal-failure-mismatch"
+                terminal_evidence=load_supervisor_verify_evidence(
+                    nested_writer_id
+                ).get("latest") or {}
+                if not (
+                    isinstance(terminal_evidence,dict)
+                    and int(terminal_evidence.get("attempt") or 0)==terminal_count
+                    and terminal_evidence.get("session")==terminal_sid
+                    and terminal_evidence.get("executed") is True
+                    and terminal_evidence.get("result")=="verify-failed-1"
+                    and int(terminal_evidence.get("exit_code") or -1)==1
+                    and str(terminal_evidence.get("command") or "")==stale_verify
+                ):
+                    return False,"nested-writer-upgrade-terminal-verify-evidence-mismatch"
+
+                recoveries=root_entry.setdefault(
+                    "nested_handoff_writer_verify_upgrades",[]
+                )
+                if not isinstance(recoveries,list):
+                    return False,"nested-writer-upgrade-history-invalid"
+                if recoveries:
+                    return False,"nested-writer-upgrade-already-used"
+
+                old_sha=hashlib.sha256(stale_verify.encode()).hexdigest()
+                new_sha=hashlib.sha256(parent_verify.encode()).hexdigest()
+                terminal_revisions=terminal_entry.setdefault(
+                    "plan_contract_revisions",[]
+                )
+                if not isinstance(terminal_revisions,list):
+                    return False,"nested-writer-upgrade-terminal-revision-history-invalid"
+                if any(
+                    isinstance(row,dict)
+                    and row.get("source")=="supervisor-plan-contract-revision"
+                    and int(row.get("attempt") or 0)==terminal_count
+                    and row.get("current_verify_sha256")==new_sha
+                    for row in terminal_revisions
+                ):
+                    return False,"nested-writer-upgrade-terminal-credit-already-present"
+
+                outer_archive=_archive_split_state_for_contract_repair(parent)
+                nested_archive=_archive_split_state_for_contract_repair(writer_id)
+                if outer_archive is None or nested_archive is None:
+                    return False,"nested-writer-upgrade-archive-missing"
+
+                now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+                upgraded_outer_writer_def=dict(writer_def)
+                upgraded_outer_writer_def["verify_command"]=parent_verify
+                upgraded_outer_writer_def["done_when"]=str(
+                    parent_leaf.get("done_when") or writer_def.get("done_when") or ""
+                )
+                upgraded_live_writer=dict(live_writer)
+                upgraded_live_writer["verify_command"]=parent_verify
+                upgraded_live_writer["done_when"]=upgraded_outer_writer_def["done_when"]
+
+                upgraded_nested_writer_def=dict(nested_writer_def)
+                upgraded_nested_writer_def["verify_command"]=parent_verify
+                upgraded_nested_writer_def["done_when"]=upgraded_outer_writer_def["done_when"]
+                upgraded_live_nested_writer=dict(live_nested_writer)
+                upgraded_live_nested_writer["verify_command"]=parent_verify
+                upgraded_live_nested_writer["done_when"]=upgraded_outer_writer_def["done_when"]
+
+                new_outer_defs=dict(outer_defs)
+                new_outer_defs[writer_id]=upgraded_outer_writer_def
+                new_outer_generation=int(outer_txn.get("generation") or 1)+1
+                new_outer_txn_id=split_transaction_id(
+                    parent,new_outer_generation,new_outer_defs
+                )
+
+                new_nested_defs=dict(nested_defs)
+                new_nested_defs[nested_writer_id]=upgraded_nested_writer_def
+                new_nested_generation=int(nested_txn.get("generation") or 1)+1
+                new_nested_txn_id=split_transaction_id(
+                    writer_id,new_nested_generation,new_nested_defs
+                )
+
+                # The intermediate writer contract changed too. Record the
+                # revision at its current count for audit and for one bounded
+                # replacement should parent collapse later require execution.
+                writer_count=int(writer_entry.get("count") or 0)
+                writer_revisions=writer_entry.setdefault(
+                    "plan_contract_revisions",[]
+                )
+                if not isinstance(writer_revisions,list):
+                    return False,"nested-writer-upgrade-writer-revision-history-invalid"
+                if not any(
+                    isinstance(row,dict)
+                    and row.get("source")=="supervisor-plan-contract-revision"
+                    and int(row.get("attempt") or 0)==writer_count
+                    and row.get("current_verify_sha256")==new_sha
+                    for row in writer_revisions
+                ):
+                    writer_revisions.append({
+                        "attempt":writer_count,
+                        "source":"supervisor-plan-contract-revision",
+                        "previous_verify_sha256":old_sha,
+                        "current_verify_sha256":new_sha,
+                        "reason":"nested-handoff-writer-verify-upgrade",
+                        "timestamp":now,
+                    })
+
+                writer_projected=attempt_state(writer_entry)
+                if not writer_projected.get("valid"):
+                    return False,"nested-writer-upgrade-writer-revision-invalid"
+
+                terminal_revisions.append({
+                    "attempt":terminal_count,
+                    "source":"supervisor-plan-contract-revision",
+                    "previous_verify_sha256":old_sha,
+                    "current_verify_sha256":new_sha,
+                    "reason":"nested-handoff-writer-verify-upgrade",
+                    "timestamp":now,
+                })
+                terminal_projected=attempt_state(terminal_entry)
+                if (
+                    not terminal_projected.get("valid")
+                    or int(terminal_projected.get("plan_contract_retry_grants") or 0)<1
+                    or int(terminal_projected.get("allowed_attempts") or 0)<=terminal_count
+                ):
+                    return False,"nested-writer-upgrade-terminal-replacement-credit-invalid"
+
+                recovery={
+                    "protocol":NESTED_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL,
+                    "state":"prepared",
+                    "writer":writer_id,
+                    "terminal_writer":nested_writer_id,
+                    "terminal_attempt":terminal_count,
+                    "previous_verify_sha256":old_sha,
+                    "current_verify_sha256":new_sha,
+                    "outer_prior_transaction_id":outer_txn.get("transaction_id"),
+                    "outer_replacement_transaction_id":new_outer_txn_id,
+                    "nested_prior_transaction_id":nested_txn.get("transaction_id"),
+                    "nested_replacement_transaction_id":new_nested_txn_id,
+                    "outer_archive":str(outer_archive.relative_to(project)),
+                    "nested_archive":str(nested_archive.relative_to(project)),
+                    "prepared_at":now,
+                }
+                recoveries.append(recovery)
+                save_attempts(attempts)
+
+                leaves[writer_id]=upgraded_live_writer
+                leaves[nested_writer_id]=upgraded_live_nested_writer
+                raw_manifest["leaves"]=leaves
+                atomic_write_json(guard_path,raw_manifest)
+
+                parents[parent]={
+                    **outer_overlay,
+                    "child_defs":new_outer_defs,
+                    "transaction_id":new_outer_txn_id,
+                    "timestamp":now,
+                }
+                parents[writer_id]={
+                    **nested_overlay,
+                    "child_defs":new_nested_defs,
+                    "transaction_id":new_nested_txn_id,
+                    "timestamp":now,
+                }
+                overlay["parents"]=parents
+                save_split_leaf_overlay(overlay)
+
+                new_outer_txn={
+                    **outer_txn,
+                    "generation":new_outer_generation,
+                    "child_defs":new_outer_defs,
+                    "transaction_id":new_outer_txn_id,
+                    "prepared_at":now,
+                    "committed_at":now,
+                    "replaces_transaction_id":outer_txn.get("transaction_id"),
+                    "replacement_reason":"nested-handoff-writer-verify-upgrade",
+                }
+                new_nested_txn={
+                    **nested_txn,
+                    "generation":new_nested_generation,
+                    "child_defs":new_nested_defs,
+                    "transaction_id":new_nested_txn_id,
+                    "prepared_at":now,
+                    "committed_at":now,
+                    "replaces_transaction_id":nested_txn.get("transaction_id"),
+                    "replacement_reason":"nested-handoff-writer-verify-upgrade",
+                }
+                atomic_write_json(split_transaction_path(parent),new_outer_txn)
+                atomic_write_json(split_transaction_path(writer_id),new_nested_txn)
+
+                atomic_write_text(
+                    work/f"{writer_id}.scope.md",
+                    render_split_child_scope(
+                        writer_id,parent,upgraded_outer_writer_def,parent_leaf
+                    ),
+                )
+                atomic_write_text(
+                    work/f"{nested_writer_id}.scope.md",
+                    render_split_child_scope(
+                        nested_writer_id,writer_id,
+                        upgraded_nested_writer_def,upgraded_live_writer
+                    ),
+                )
+
+                for status,new_generation,new_txn_id in (
+                    (outer_status,new_outer_generation,new_outer_txn_id),
+                    (nested_status,new_nested_generation,new_nested_txn_id),
+                ):
+                    status["generation"]=new_generation
+                    status["transaction_id"]=new_txn_id
+                    status["timestamp"]=now
+                    status["nested_handoff_writer_verify_upgrade"]={
+                        "protocol":NESTED_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL,
+                        "previous_verify_sha256":old_sha,
+                        "current_verify_sha256":new_sha,
+                        "terminal_writer":nested_writer_id,
+                    }
+                atomic_write_json(split_status_path(parent),outer_status)
+                atomic_write_json(split_status_path(writer_id),nested_status)
+
+                history_path=split_history_path()
+                history=load_json_object(
+                    history_path,
+                    default_missing={
+                        "owner":"supervisor",
+                        "protocol":SPLIT_PROPOSAL_PROTOCOL,
+                        "splits":[],
+                    },
+                    label="split history",
+                )
+                splits=history.get("splits")
+                if not isinstance(splits,list):
+                    raise StateCorruptionError("split history splits must be an array")
+                splits.extend([
+                    {
+                        "parent":parent,
+                        "children":outer_children,
+                        "transaction_id":new_outer_txn_id,
+                        "replaces_transaction_id":outer_txn.get("transaction_id"),
+                        "timestamp":now,
+                        "source":"supervisor-nested-handoff-writer-verify-upgrade",
+                    },
+                    {
+                        "parent":writer_id,
+                        "children":nested_children,
+                        "transaction_id":new_nested_txn_id,
+                        "replaces_transaction_id":nested_txn.get("transaction_id"),
+                        "timestamp":now,
+                        "source":"supervisor-nested-handoff-writer-verify-upgrade",
+                    },
+                ])
+                history["splits"]=splits
+                atomic_write_json(history_path,history)
+
+                # Commit the audit record only after every active projection
+                # points at the replacement contracts.
+                attempts=load_attempts()
+                root_entry=(attempts.get("deliverables") or {}).get(parent)
+                rows=(
+                    root_entry.get("nested_handoff_writer_verify_upgrades")
+                    if isinstance(root_entry,dict) else None
+                )
+                target=rows[-1] if isinstance(rows,list) and rows else None
+                if not isinstance(target,dict):
+                    raise StateCorruptionError(
+                        f"{parent} nested writer upgrade record disappeared"
+                    )
+                target["state"]="committed"
+                target["committed_at"]=time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                )
+                save_attempts(attempts)
+
+    log(
+        f"NESTED_HANDOFF_WRITER_VERIFY_UPGRADED parent={parent} "
+        f"writer={writer_id} terminal={nested_writer_id} "
+        f"old={old_sha} new={new_sha}"
+    )
+    csv(
+        "NESTED_HANDOFF_WRITER_VERIFY_UPGRADED","", "supervisor",
+        f"{parent} writer={writer_id} terminal={nested_writer_id} "
+        f"old={old_sha} new={new_sha}",
+    )
+    return True,"nested-writer-contract-replacement-ready"
+
+
 LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL=(
     "v2-legacy-handoff-writer-verify-upgrade-v1"
 )
@@ -10585,7 +11042,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-nested-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -10992,6 +11449,27 @@ def main():
         print(
             f"LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_ALLOW "
             f"parent={args.recover_legacy_handoff_writer_verify} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_nested_handoff_writer_verify:
+        if unknown or not args.project:
+            raise SystemExit(
+                "nested handoff writer Verify recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_nested_handoff_writer_verify(
+            args.recover_nested_handoff_writer_verify
+        )
+        if not ok:
+            raise SystemExit(
+                f"NESTED_HANDOFF_WRITER_VERIFY_UPGRADE_DENY "
+                f"parent={args.recover_nested_handoff_writer_verify} "
+                f"reason={detail}"
+            )
+        print(
+            f"NESTED_HANDOFF_WRITER_VERIFY_UPGRADE_ALLOW "
+            f"parent={args.recover_nested_handoff_writer_verify} "
             f"reason={detail}"
         )
         return
