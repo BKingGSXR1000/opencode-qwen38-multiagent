@@ -6135,24 +6135,46 @@ def normalized_state_snapshot(project):
     active_count=len(active_sessions)
     try:
         attempt_data=load_attempts()
-        reserved_count=reserved_dispatch_slot_count(attempt_data)
+        reserved_ids=reserved_dispatch_deliverables(attempt_data)
+        native_pending_ids=unclassified_native_attempt_deliverables(attempt_data)
+        reserved_count=len(reserved_ids)
+        latent_ids=native_pending_ids-active_ids
+        latent_count=len(latent_ids)
     except Exception as exc:
         attempt_data={"deliverables":{}}
+        reserved_ids=set()
+        native_pending_ids=set()
+        latent_ids=set()
         reserved_count=MAX_CONCURRENT_IMPLEMENTATION_WORKERS
+        latent_count=0
         scheduler_error=scheduler_error or f"{type(exc).__name__}: {exc}"
-    occupied=min(MAX_CONCURRENT_IMPLEMENTATION_WORKERS,active_count+reserved_count)
+    inflight_ids=active_ids | reserved_ids | native_pending_ids
+    occupied=min(
+        MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
+        active_count+reserved_count+latent_count,
+    )
     data["scheduler"]={
         "max_concurrent_workers":MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
         "active_workers":active_count,
         "reserved_workers":reserved_count,
+        "pending_workers":latent_count,
         "occupied_worker_slots":occupied,
-        "available_worker_slots":0 if scheduler_error else max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active_count-reserved_count),
+        "available_worker_slots":(
+            0 if scheduler_error else max(
+                0,
+                MAX_CONCURRENT_IMPLEMENTATION_WORKERS
+                -active_count-reserved_count-latent_count,
+            )
+        ),
         "active_deliverables":sorted(active_ids),
+        "reserved_deliverables":sorted(reserved_ids),
+        "pending_deliverables":sorted(latent_ids),
         "error":scheduler_error,
     }
-    for did in active_ids:
+    for did in inflight_ids:
         if isinstance(leaves.get(did),dict):
             leaves[did]["running"]=True
+            leaves[did]["reserved"]=did in reserved_ids
             leaves[did]["eligible"]=False
 
     for did,leaf in leaves.items():
@@ -6173,7 +6195,7 @@ def normalized_state_snapshot(project):
         leaf=leaves.get(did) if isinstance(leaves.get(did),dict) else {}
         # New13 regression: control_state emitted attempt_limit_reached for
         # leaves whose own canonical flag was false (often attempts=0).
-        if did in active_ids:
+        if did in inflight_ids:
             note_state_blocker_exempt_active(did,item.get("reason",""))
             continue
         if (
@@ -6210,14 +6232,15 @@ def normalized_state_snapshot(project):
     )
 
     if data.get("resume_phase")=="execution-blocked":
-        if not clean and (active_ids or eligible_exists):
+        if not clean and (inflight_ids or eligible_exists):
             data["resume_phase"]="execution"
-        elif (active_ids or eligible_exists) and local_blockers_only:
+        elif (inflight_ids or eligible_exists) and local_blockers_only:
             data["resume_phase"]="execution"
             log(
                 "STATE_LOCAL_BLOCKER_CONTINUE "
                 f"blockers={','.join(str(x.get('deliverable') or '') for x in clean)} "
                 f"active={','.join(sorted(active_ids)) or 'none'} "
+                f"reserved={','.join(sorted(reserved_ids)) or 'none'} "
                 f"eligible={str(bool(eligible_exists)).lower()}"
             )
 
@@ -8828,6 +8851,62 @@ def reserved_dispatch_deliverables(data=None):
             result.add(did)
     return result
 
+
+def unclassified_native_attempt_deliverables(data=None):
+    """Native current attempts with no terminal classification are still in flight.
+
+    The OpenCode status endpoint can lag session materialization by a short
+    interval. During that gap the durable attempt ledger is authoritative:
+    once a dispatch placeholder has been replaced by a native session id, that
+    Dxxx must not be launched again until the same attempt is finalized or
+    receives a terminal failure row.
+    """
+    data=load_attempts() if data is None else data
+    entries=data.get("deliverables") if isinstance(data,dict) else None
+    if not isinstance(entries,dict):
+        raise StateCorruptionError("attempt ledger deliverables must be an object")
+    result=set()
+    for did,entry in entries.items():
+        if not isinstance(entry,dict):
+            continue
+        state=attempt_state(entry)
+        if not state.get("valid"):
+            continue
+        try:
+            count=int(entry.get("count") or 0)
+        except (TypeError,ValueError):
+            continue
+        sessions=entry.get("sessions")
+        if (
+            count<1 or not isinstance(sessions,list) or len(sessions)<count
+            or not isinstance(sessions[count-1],str)
+        ):
+            continue
+        current=sessions[count-1]
+        if not current or current.startswith("dispatch:"):
+            continue
+        # A durable ready marker proves this native attempt already completed,
+        # even if dependency changes later make ready_info() return false.
+        if (
+            PROJECT
+            and (Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready").exists()
+        ):
+            continue
+        classified=False
+        for item in entry.get("failure_history",[]) or []:
+            if not isinstance(item,dict):
+                continue
+            try:
+                if int(item.get("attempt") or 0)==count:
+                    classified=True
+                    break
+            except (TypeError,ValueError):
+                continue
+        if not classified:
+            result.add(did)
+    return result
+
+
 def reserved_dispatch_slot_count(data=None):
     return len(reserved_dispatch_deliverables(data))
 
@@ -8839,9 +8918,15 @@ def scheduler_lock():
         yield
 
 def available_implementation_slots(data=None, strict=False):
-    active=len(active_implementation_sessions(strict=strict))
+    sessions=active_implementation_sessions(strict=strict)
+    active=len(sessions)
+    active_ids=set(active_implementation_deliverables(sessions))
     reserved=reserved_dispatch_slot_count(data)
-    return max(0,MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved)
+    latent=len(unclassified_native_attempt_deliverables(data)-active_ids)
+    return max(
+        0,
+        MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved-latent,
+    )
 # V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER END
 
 def preclaim_attempt(agent,text,dispatch_token):
@@ -8855,6 +8940,14 @@ def preclaim_attempt(agent,text,dispatch_token):
         with scheduler_lock():
             data=load_attempts()
             existing_slot=did in reserved_dispatch_deliverables(data)
+            native_inflight=did in unclassified_native_attempt_deliverables(data)
+            if agent in IMPLEMENTATION_AGENTS and native_inflight:
+                entry=(data.get("deliverables") or {}).get(did,{})
+                try:
+                    n=int(entry.get("count") or 0)
+                except (TypeError,ValueError):
+                    n=0
+                return "denied",did,"deliverable_attempt_inflight",n
             if (
                 agent in IMPLEMENTATION_AGENTS
                 and not existing_slot

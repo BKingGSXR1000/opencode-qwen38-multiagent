@@ -3674,6 +3674,102 @@ class AtomicSchedulerReservationTests(unittest.TestCase):
         ledger=json.loads((self.project/".opencode-v2/work/attempts.json").read_text())
         self.assertEqual(supervisor.reserved_dispatch_slot_count(ledger),3)
 
+    def test_native_unclassified_attempt_blocks_second_preclaim_when_status_lags(self):
+        data={
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "count":1,
+                    "sessions":["session-one"],
+                    "automatic_limit":2,
+                }
+            },
+        }
+        path=self.project/".opencode-v2/work/attempts.json"
+        path.write_text(json.dumps(data))
+        old_validate=supervisor.validate_dispatch
+        old_active=supervisor.active_implementation_sessions
+        old_own=supervisor.write_ownership_baseline
+        old_exec=supervisor.ensure_execution_baseline
+        old_split=supervisor.recursive_split_enabled
+        try:
+            supervisor.validate_dispatch=lambda _agent,text: (text,"")
+            supervisor.active_implementation_sessions=lambda strict=False: []
+            supervisor.write_ownership_baseline=lambda _did: None
+            supervisor.ensure_execution_baseline=lambda _did,_attempt: None
+            supervisor.recursive_split_enabled=lambda: False
+            self.assertEqual(
+                supervisor.unclassified_native_attempt_deliverables(data),
+                {"D001"},
+            )
+            result=supervisor.preclaim_attempt(
+                "implementer","D001","second-token"
+            )
+        finally:
+            supervisor.validate_dispatch=old_validate
+            supervisor.active_implementation_sessions=old_active
+            supervisor.write_ownership_baseline=old_own
+            supervisor.ensure_execution_baseline=old_exec
+            supervisor.recursive_split_enabled=old_split
+        self.assertEqual(
+            result,
+            ("denied","D001","deliverable_attempt_inflight",1),
+        )
+        after=json.loads(path.read_text())
+        entry=after["deliverables"]["D001"]
+        self.assertEqual(entry["count"],1)
+        self.assertEqual(entry["sessions"],["session-one"])
+
+    def test_normalized_state_marks_status_lag_native_attempt_inflight(self):
+        data={
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "count":1,
+                    "sessions":["session-one"],
+                    "automatic_limit":2,
+                }
+            },
+        }
+        (self.project/".opencode-v2/work/attempts.json").write_text(
+            json.dumps(data)
+        )
+        base={
+            "leaves":{
+                "D001":{
+                    "eligible":True,
+                    "attempt_limit_reached":True,
+                    "role":"implementer",
+                }
+            },
+            "execution_blockers":[{
+                "deliverable":"D001",
+                "reason":"attempt_limit_reached",
+            }],
+            "resume_phase":"execution-blocked",
+            "acceptance":{"complete":False},
+            "plan":{"complete":True},
+        }
+        with mock.patch.object(
+            supervisor,"state_snapshot",return_value=base
+        ), mock.patch.object(
+            supervisor,"active_implementation_sessions",return_value=[]
+        ), mock.patch.object(
+            supervisor,"apply_root_continuation_block",
+            side_effect=lambda value:value
+        ):
+            result=supervisor.normalized_state_snapshot(str(self.project))
+        leaf=result["leaves"]["D001"]
+        sched=result["scheduler"]
+        self.assertTrue(leaf["running"])
+        self.assertFalse(leaf["eligible"])
+        self.assertFalse(leaf.get("reserved",False))
+        self.assertEqual(sched["pending_workers"],1)
+        self.assertEqual(sched["pending_deliverables"],["D001"])
+        self.assertEqual(sched["available_worker_slots"],2)
+        self.assertEqual(result["execution_blockers"],[])
+        self.assertEqual(result["resume_phase"],"execution")
+
     def test_scheduler_database_failure_denies_new_reservation_fail_closed(self):
         old_validate=supervisor.validate_dispatch
         old_active=supervisor.active_implementation_sessions

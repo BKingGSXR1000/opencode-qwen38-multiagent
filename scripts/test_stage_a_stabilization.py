@@ -403,6 +403,98 @@ class ImplementationRetryGenerationTests(unittest.TestCase):
         self.assertNotEqual(first, retry)
 
 
+class ImplementationLogicalDispatchIdempotencyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.work=self.project/".opencode-v2/work"
+        self.work.mkdir(parents=True)
+        self.root="ses-root"
+        self.action={"kind":"launch","agent":"feature-builder","deliverable":"D001"}
+        self.result={"state_version":"state-b","actions":[self.action]}
+        self.prior_id=controller.execution_action_id(
+            "state-a",self.root,self.action,0
+        )
+        controller.save_execution_ledger(self.project,{
+            "owner":"stage-a-controller",
+            "protocol":controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions":{
+                self.prior_id:{
+                    "execution_id":self.prior_id,
+                    "state_version":"state-a",
+                    "root_session":self.root,
+                    "action":self.action,
+                    "dispatch_generation":0,
+                    "transport":"prompt_async+SubtaskPart",
+                    "transport_may_have_been_attempted":True,
+                    "created_at_ms":1000,
+                    "baseline_attempt":{"count":0,"sessions":[]},
+                    "baseline_child_ids":[],
+                }
+            },
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_attempts(self,count,sessions):
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{"automatic_limit":2,"count":count,"sessions":sessions}
+            },
+        }))
+
+    def test_state_version_churn_reconciles_prior_logical_dispatch(self):
+        self._write_attempts(1,["ses-child"])
+        child={"id":"ses-child","parentID":self.root,"agent":"feature-builder"}
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=self.result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(controller,"http_json") as http:
+            receipt=controller.execute_first_implementation(
+                self.project,"http://127.0.0.1:1",self.result,self.root
+            )
+        self.assertTrue(receipt["replay_suppressed"])
+        self.assertEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(
+            receipt["reconciliation"],
+            {"kind":"bound-native-child","sessions":["ses-child"]},
+        )
+        http.assert_not_called()
+        self.assertEqual(
+            len(controller.load_execution_ledger(self.project)["executions"]),1
+        )
+
+    def test_unmaterialized_prior_logical_dispatch_waits_without_post(self):
+        self._write_attempts(0,[])
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=self.result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[]
+        ), mock.patch.object(controller,"http_json") as http:
+            with self.assertRaisesRegex(
+                controller.ControllerError,
+                "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING",
+            ):
+                controller.execute_first_implementation(
+                    self.project,"http://127.0.0.1:1",self.result,self.root
+                )
+        http.assert_not_called()
+        self.assertEqual(
+            len(controller.load_execution_ledger(self.project)["executions"]),1
+        )
+
+
 class ExactProjectPathPermissionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

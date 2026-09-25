@@ -254,6 +254,46 @@ def execution_action_id(
     return hashlib.sha256(raw).hexdigest()
 
 
+def prior_logical_implementation_intents(
+    executions: dict,
+    current_execution_id: str,
+    root_session: str,
+    action: dict,
+    dispatch_generation: int,
+) -> list[dict]:
+    """Return prior intents for the same logical implementation attempt.
+
+    state_version is deliberately excluded. The deterministic projection can
+    advance while a just-posted native child is still materializing; that
+    projection churn must not turn one logical attempt into a second dispatch.
+    A genuine retry is distinguished by dispatch_generation, which advances
+    only after terminal failure history is durable.
+    """
+    canonical = canonical_execution_action(action)
+    matches = []
+    for execution_id, intent in executions.items():
+        if execution_id == current_execution_id or not isinstance(intent, dict):
+            continue
+        if str(intent.get("root_session") or "") != str(root_session):
+            continue
+        if intent.get("action") != canonical:
+            continue
+        try:
+            generation = int(intent.get("dispatch_generation") or 0)
+        except (TypeError, ValueError):
+            continue
+        if generation != int(dispatch_generation):
+            continue
+        if not intent.get("transport_may_have_been_attempted"):
+            continue
+        matches.append(intent)
+    matches.sort(
+        key=lambda item: int(item.get("created_at_ms") or 0),
+        reverse=True,
+    )
+    return matches
+
+
 def attempt_failure_generation(project: Path, did: str) -> int:
     path = project / ".opencode-v2" / "work" / "attempts.json"
     if not path.exists():
@@ -1768,6 +1808,31 @@ def execute_first_implementation(
                 "AMBIGUOUS_EXECUTION replay forbidden: "
                 f"execution_id={execution_id} state_version={result['state_version']} "
                 f"deliverable={did} no preclaim/child evidence observed"
+            )
+
+        prior_intents = prior_logical_implementation_intents(
+            executions,
+            execution_id,
+            root,
+            canonical_action,
+            dispatch_generation,
+        )
+        if prior_intents:
+            attempts = attempt_snapshot(project, did)
+            children = child_snapshot(project, base_url, root)
+            for prior in prior_intents:
+                attempts = bind_unbound_native_child(
+                    project, base_url, prior, did, agent, attempts, children
+                )
+                evidence = reconcile_execution_evidence(
+                    prior, attempts, children
+                )
+                if evidence:
+                    return replay_receipt(prior, evidence)
+            raise ControllerError(
+                "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING "
+                f"deliverable={did} generation={dispatch_generation} "
+                f"prior_execution_id={prior_intents[0].get('execution_id','')}"
             )
 
         ensure_root_idle(project, base_url, root)

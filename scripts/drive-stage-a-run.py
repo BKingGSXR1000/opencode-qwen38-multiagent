@@ -36,6 +36,7 @@ def transient_controller_race(exc: BaseException) -> bool:
             "transport root is not idle",
             "state changed before dispatch:",
             "deterministic actions changed before dispatch",
+            "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING",
         )
     )
 
@@ -146,6 +147,7 @@ def selftest() -> None:
         "transport root is not idle",
         "state changed before dispatch: selected=a current=b",
         "deterministic actions changed before dispatch",
+        "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING deliverable=D001 generation=0",
     ):
         if not transient_controller_race(controller.ControllerError(message)):
             raise DriverError(f"transient controller race was not recognized: {message}")
