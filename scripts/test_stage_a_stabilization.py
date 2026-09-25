@@ -220,6 +220,27 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
                 self.assertIn("A no-op rewrite of identical\ncontent does not satisfy this gate", role)
 
 
+    def test_runtime_prompt_forbids_manual_sandbox_wrapping(self):
+        manifest={
+            "leaves":{
+                "D001":{
+                    "owned_artifact_paths":["owned.txt"],
+                    "owned_artifacts":"`owned.txt`",
+                    "complexity":"S",
+                }
+            }
+        }
+        with mock.patch.object(supervisor,"load_manifest",return_value=manifest):
+            prompt=supervisor.implementation_runtime_prompt(
+                "D001","implementer"
+            )
+        self.assertIn(
+            "Never invoke worker_sandbox.py, run-bash, bubblewrap, or any sandbox wrapper",
+            prompt,
+        )
+        self.assertIn("the runtime wraps bash automatically",prompt)
+
+
 class WorkerSandboxPythonSideEffectTests(unittest.TestCase):
     def test_worker_and_verify_disable_python_bytecode_side_effects(self):
         source = (

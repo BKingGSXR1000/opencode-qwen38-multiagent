@@ -682,6 +682,9 @@ def implementation_runtime_prompt(did,agent):
             "unbounded discovery.\n"
             "3. After the first owned-artifact change, inspect only direct dependencies needed "
             "to complete it, run the exact Verify command, and repair only owned artifacts.\n"
+            "4. Call the bash tool with ONLY the intended shell command. Never invoke "
+            "worker_sandbox.py, run-bash, bubblewrap, or any sandbox wrapper yourself; "
+            "the runtime wraps bash automatically.\n"
             "The Early Write Gate below is a ceiling, not a target."
         )
         base=base+implementer_direct_write
