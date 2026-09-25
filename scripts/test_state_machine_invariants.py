@@ -1672,6 +1672,24 @@ class VerificationSemanticsTests(unittest.TestCase):
         command=self.leaves[did]["verify_command"]
         (self.work/f"{did}.ready").write_text(ready_text(did,attempt,verify_command=command))
 
+    def _functional_correction(self,did,command,stdout_json):
+        correction="test functional execution correction"
+        (self.work/f"{did}.execution-contract-correction.json").write_text(
+            json.dumps({
+                "owner":"supervisor",
+                "protocol":"v2-external-execution-contract-correction-v1",
+                "deliverable":did,
+                "correction":correction,
+                "correction_sha256":hashlib.sha256(
+                    correction.encode("utf-8")
+                ).hexdigest(),
+                "functional_diagnostic":{
+                    "command":command,
+                    "stdout_json":stdout_json,
+                },
+            })
+        )
+
     def test_contract_dep_is_hard_dispatch_barrier_until_ready(self):
         self.leaves["D001"]["contract_deps"]=["D002"]
         self._write_manifest()
@@ -1711,6 +1729,54 @@ class VerificationSemanticsTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(detail,"verify-failed-1")
         self.assertFalse(control_state.ready_info(self.project,"D001"))
+
+    def test_functional_diagnostic_blocks_empty_json_output(self):
+        self._functional_correction(
+            "D001",
+            "printf ''",
+            {
+                "required_tokens":["Io","Europa","Ganymede","Callisto"],
+                "required_key_substring_groups":[
+                    ["offset","arcsec"],["order","side"],["occlu"],["shadow"],
+                ],
+            },
+        )
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"functional-diagnostic-empty-json-output")
+        self.assertFalse(control_state.ready_info(self.project,"D001"))
+        evidence=json.loads(
+            (self.work/"D001.functional-diagnostic-evidence.json").read_text()
+        )
+        self.assertEqual(evidence["result"],detail)
+
+    def test_functional_diagnostic_allows_matching_json_output(self):
+        payload=(
+            '{"moons":{'
+            '"Io":{"offset_arcsec":1,"side":"leading","occluded":false,'
+            '"transit_shadow":false},'
+            '"Europa":{},"Ganymede":{},"Callisto":{}}}'
+        )
+        self._functional_correction(
+            "D001",
+            "printf '%s\\n' '"+payload+"'",
+            {
+                "required_tokens":["Io","Europa","Ganymede","Callisto"],
+                "required_key_substring_groups":[
+                    ["offset","arcsec"],["order","side"],["occlu"],["shadow"],
+                ],
+            },
+        )
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertTrue(ok,detail)
+        self.assertEqual(detail,"finalized")
+        self.assertTrue(control_state.ready_info(self.project,"D001"))
+        evidence=json.loads(
+            (self.work/"D001.functional-diagnostic-evidence.json").read_text()
+        )
+        self.assertEqual(evidence["result"],"functional-verified")
 
     def test_verify_evidence_preserves_fail_then_pass_for_same_attempt_session(self):
         command=self.leaves["D001"]["verify_command"]

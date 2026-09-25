@@ -6462,6 +6462,176 @@ def run_verify_fail_closed(command,runner=subprocess.run,session=""):
     return checked,"verified"
 
 
+def execution_contract_correction_path(did):
+    return (
+        Path(PROJECT)/".opencode-v2"/"work"/
+        f"{did}.execution-contract-correction.json"
+    )
+
+
+def load_supervisor_execution_contract_correction(did):
+    """Load a supervisor-authored execution correction including diagnostic policy."""
+    path=execution_contract_correction_path(did)
+    try:
+        data=json.loads(path.read_text())
+    except (OSError,json.JSONDecodeError):
+        return {}
+    if not isinstance(data,dict):
+        return {}
+    correction=data.get("correction")
+    digest=data.get("correction_sha256")
+    if (
+        data.get("owner")!="supervisor"
+        or data.get("protocol")!="v2-external-execution-contract-correction-v1"
+        or data.get("deliverable")!=did
+        or not isinstance(correction,str)
+        or not correction.strip()
+        or not isinstance(digest,str)
+        or digest!=hashlib.sha256(correction.encode("utf-8")).hexdigest()
+    ):
+        return {}
+    return data
+
+
+def functional_diagnostic_evidence_path(did):
+    return (
+        Path(PROJECT)/".opencode-v2"/"work"/
+        f"{did}.functional-diagnostic-evidence.json"
+    )
+
+
+def _functional_json_tokens(value,keys,tokens):
+    if isinstance(value,dict):
+        for key,item in value.items():
+            text=str(key)
+            keys.append(text.lower())
+            tokens.add(text.lower())
+            _functional_json_tokens(item,keys,tokens)
+    elif isinstance(value,list):
+        for item in value:
+            _functional_json_tokens(item,keys,tokens)
+    elif isinstance(value,str):
+        tokens.add(value.lower())
+
+
+def persist_functional_diagnostic_evidence(did,sid,command,checked,result,error=""):
+    item={
+        "owner":"supervisor",
+        "protocol":"v2-functional-diagnostic-evidence-v1",
+        "deliverable":did,
+        "session":str(sid or ""),
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        "command":str(command or "")[:3000],
+        "executed":checked is not None,
+        "exit_code":(
+            int(getattr(checked,"returncode"))
+            if checked is not None and getattr(checked,"returncode",None) is not None
+            else None
+        ),
+        "result":str(result or "")[:1000],
+        "stdout":_bounded_process_text(getattr(checked,"stdout",None)),
+        "stderr":_bounded_process_text(getattr(checked,"stderr",None)),
+        "error":str(error or "")[:1000],
+    }
+    atomic_write_json(functional_diagnostic_evidence_path(did),item)
+    return item
+
+
+def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
+    """Run an optional supervisor-owned functional gate after canonical Verify.
+
+    The gate is deliberately separate from the immutable leaf Verify command.
+    It is allowed only when carried by a hash-valid supervisor execution
+    correction and must be read-only across project artifacts.
+    """
+    correction=load_supervisor_execution_contract_correction(did)
+    diagnostic=correction.get("functional_diagnostic")
+    if not isinstance(diagnostic,dict):
+        return True,"functional-diagnostic-not-required"
+
+    command=str(diagnostic.get("command") or "").strip()
+    if not command:
+        return False,"functional-diagnostic-contract-invalid:missing-command"
+    errors=validate_verify_command(command)
+    if errors:
+        return False,"functional-diagnostic-command-unsafe:"+errors[0]
+
+    before=project_fingerprints()
+    try:
+        checked,detail=run_verify_fail_closed(command,runner=runner,session="")
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        result=f"functional-diagnostic-error-{type(exc).__name__}"
+        persist_functional_diagnostic_evidence(
+            did,sid,command,None,result,error=str(exc)
+        )
+        return False,result
+    after=project_fingerprints()
+    changed=sorted(
+        path for path in _paths_changed(before,after)
+        if not supervisor_dynamic_control_path(path)
+    )
+    if changed:
+        result="functional-diagnostic-mutated-project:"+",".join(changed[:4])
+        persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+        return False,result
+    if detail!="verified":
+        result="functional-diagnostic-"+detail
+        persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+        return False,result
+
+    contract=diagnostic.get("stdout_json")
+    if isinstance(contract,dict):
+        raw=str(getattr(checked,"stdout","") or "")
+        if not raw.strip():
+            result="functional-diagnostic-empty-json-output"
+            persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+            return False,result
+        try:
+            parsed=json.loads(raw)
+        except json.JSONDecodeError as exc:
+            result="functional-diagnostic-invalid-json-output"
+            persist_functional_diagnostic_evidence(
+                did,sid,command,checked,result,error=str(exc)
+            )
+            return False,result
+        keys=[]
+        tokens=set()
+        _functional_json_tokens(parsed,keys,tokens)
+        missing_tokens=[
+            str(value) for value in diagnostic["stdout_json"].get(
+                "required_tokens",[]
+            )
+            if str(value).lower() not in tokens
+        ]
+        if missing_tokens:
+            result=(
+                "functional-diagnostic-json-missing-tokens:"+
+                ",".join(missing_tokens[:8])
+            )
+            persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+            return False,result
+        for group in contract.get("required_key_substring_groups",[]):
+            if not isinstance(group,list) or not group:
+                continue
+            choices=[str(value).lower() for value in group if str(value)]
+            if choices and not any(
+                any(choice in key for choice in choices) for key in keys
+            ):
+                result=(
+                    "functional-diagnostic-json-missing-key-group:"+
+                    "|".join(choices[:8])
+                )
+                persist_functional_diagnostic_evidence(
+                    did,sid,command,checked,result
+                )
+                return False,result
+
+    persist_functional_diagnostic_evidence(
+        did,sid,command,checked,"functional-verified"
+    )
+    return True,"functional-verified"
+
+
 def ownership_baseline_path(did):
     return Path(PROJECT)/".opencode-v2/work"/f"{did}.ownership-baseline.json"
 
@@ -7643,6 +7813,13 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
         except WorkerSandboxError as exc:
             clear_verify_wait(did)
             return False,"verify-report-commit-failed:"+str(exc)
+
+    functional_ok,functional_detail=run_supervisor_functional_diagnostic(
+        did,sid=sid,runner=runner
+    )
+    if not functional_ok:
+        clear_verify_wait(did)
+        return False,functional_detail
 
     ok,detail=supervisor_finalize_ready(did,command)
     if ok:
