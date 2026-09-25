@@ -3432,6 +3432,78 @@ vllm:kv_cache_usage_perc{model_name="qwen"} 0.42
         )
         self.assertEqual(supervisor.HARD_REASONING_CHARS,20000)
 
+    def test_visible_shared_decode_extends_no_tool_age_but_stays_finite(self):
+        snapshot={
+            "metrics_available":True,
+            "running":2,
+            "waiting":0,
+            "backend_progress_age":1.0,
+            "prompt_progress_age":99.0,
+            "generation_progress_age":1.0,
+            "gpu_util":95.0,
+        }
+        d=watchdog_telemetry.visible_watchdog_decision(
+            121,snapshot,base_seconds=120
+        )
+        self.assertFalse(d["abort"])
+        self.assertEqual(
+            d["limit"],
+            watchdog_telemetry.VISIBLE_SHARED_EXTENSION_SECONDS,
+        )
+        d=watchdog_telemetry.visible_watchdog_decision(
+            watchdog_telemetry.VISIBLE_SHARED_EXTENSION_SECONDS,
+            snapshot,base_seconds=120
+        )
+        self.assertTrue(d["abort"])
+        self.assertIn("shared", "shared")
+        self.assertIn("visible-extension-exhausted",d["reason"])
+
+    def test_visible_exclusive_decode_gets_stronger_bounded_extension(self):
+        snapshot={
+            "metrics_available":True,
+            "running":1,
+            "waiting":0,
+            "backend_progress_age":1.0,
+            "prompt_progress_age":99.0,
+            "generation_progress_age":1.0,
+            "gpu_util":95.0,
+        }
+        d=watchdog_telemetry.visible_watchdog_decision(
+            299,snapshot,base_seconds=120
+        )
+        self.assertFalse(d["abort"])
+        self.assertEqual(
+            d["limit"],
+            watchdog_telemetry.VISIBLE_EXCLUSIVE_EXTENSION_SECONDS,
+        )
+        d=watchdog_telemetry.visible_watchdog_decision(
+            watchdog_telemetry.VISIBLE_EXCLUSIVE_EXTENSION_SECONDS,
+            snapshot,base_seconds=120
+        )
+        self.assertTrue(d["abort"])
+
+    def test_visible_idle_or_unknown_backend_keeps_120_second_fail_safe(self):
+        idle={
+            "metrics_available":True,
+            "running":0,
+            "waiting":0,
+            "backend_progress_age":999.0,
+            "prompt_progress_age":999.0,
+            "generation_progress_age":999.0,
+            "gpu_util":0.0,
+        }
+        d=watchdog_telemetry.visible_watchdog_decision(
+            120,idle,base_seconds=120
+        )
+        self.assertTrue(d["abort"])
+        self.assertEqual(d["limit"],120)
+        self.assertEqual(d["reason"],"backend-not-progressing")
+        d=watchdog_telemetry.visible_watchdog_decision(
+            120,{"metrics_available":False},base_seconds=120
+        )
+        self.assertTrue(d["abort"])
+        self.assertEqual(d["reason"],"backend-telemetry-unavailable")
+
     def test_backend_phase_distinguishes_prefill_and_decode(self):
         prefill={
             "metrics_available":True,"running":1,"waiting":0,

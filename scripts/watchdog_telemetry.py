@@ -14,6 +14,9 @@ INVISIBLE_BASE_SECONDS = 600
 INVISIBLE_SHARED_EXTENSION_SECONDS = 900
 INVISIBLE_EXCLUSIVE_EXTENSION_SECONDS = 1800
 INVISIBLE_QUEUE_EXTENSION_SECONDS = 1200
+VISIBLE_BASE_SECONDS = 120
+VISIBLE_SHARED_EXTENSION_SECONDS = 300
+VISIBLE_EXCLUSIVE_EXTENSION_SECONDS = 600
 BACKEND_PROGRESS_FRESH_SECONDS = 15
 GPU_BUSY_PERCENT = 15.0
 
@@ -265,6 +268,50 @@ def invisible_watchdog_decision(elapsed: float, snapshot: dict[str,Any]) -> dict
         if elapsed < INVISIBLE_SHARED_EXTENSION_SECONDS:
             return result
         result.update(abort=True,reason=f"unattributed-gpu-extension-exhausted-{INVISIBLE_SHARED_EXTENSION_SECONDS}s")
+        return result
+    result.update(abort=True,reason="backend-not-progressing")
+    return result
+
+
+def visible_watchdog_decision(
+    elapsed: float,
+    snapshot: dict[str,Any],
+    base_seconds: float=VISIBLE_BASE_SECONDS,
+) -> dict[str,Any]:
+    """Bound visible no-SSE pauses using fresh backend progress.
+
+    Tool-call argument generation can produce no reasoning/text SSE deltas for
+    longer than the normal visible watchdog even while vLLM is actively
+    decoding. Global backend progress may extend that deadline, but only for a
+    finite interval because it cannot prove which concurrent request advanced.
+    """
+    elapsed=max(0.0,float(elapsed))
+    base=max(1.0,float(base_seconds))
+    phase=backend_phase(snapshot)
+    result={"abort":False,"phase":phase,"limit":base,"reason":""}
+    if elapsed < base:
+        return result
+    if not snapshot or not snapshot.get("metrics_available"):
+        result.update(abort=True,reason="backend-telemetry-unavailable")
+        return result
+    running=int(snapshot.get("running") or 0)
+    healthy=phase in {
+        "backend-token-progress","backend-prefill","backend-decode",
+        "backend-mixed-prefill-decode",
+    }
+    if healthy and running>0:
+        limit=(
+            VISIBLE_EXCLUSIVE_EXTENSION_SECONDS
+            if running==1
+            else VISIBLE_SHARED_EXTENSION_SECONDS
+        )
+        result["limit"]=limit
+        if elapsed < limit:
+            return result
+        result.update(
+            abort=True,
+            reason=f"healthy-backend-visible-extension-exhausted-{limit}s",
+        )
         return result
     result.update(abort=True,reason="backend-not-progressing")
     return result
