@@ -3416,6 +3416,22 @@ vllm:kv_cache_usage_perc{model_name="qwen"} 0.42
         self.assertEqual(d["phase"],"backend-idle")
 
 
+    def test_active_implementation_reasoning_allows_nine_k_but_remains_bounded(self):
+        state={
+            "reasoning":9000,
+            "text":0,
+            "tool_running":False,
+        }
+        self.assertEqual(
+            supervisor.event_watchdog_reason("integrator",state),""
+        )
+        state["reasoning"]=supervisor.HARD_REASONING_CHARS
+        self.assertEqual(
+            supervisor.event_watchdog_reason("integrator",state),
+            f"sse_reasoning_chars={supervisor.HARD_REASONING_CHARS}",
+        )
+        self.assertEqual(supervisor.HARD_REASONING_CHARS,20000)
+
     def test_backend_phase_distinguishes_prefill_and_decode(self):
         prefill={
             "metrics_available":True,"running":1,"waiting":0,
