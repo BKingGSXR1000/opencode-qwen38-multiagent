@@ -542,6 +542,37 @@ def reference_policy(text: str):
     values=reference_policies(text)
     return values[0] if len(values)==1 else ""
 
+ACCEPTANCE_MUST_RE = re.compile(r"(?m)^- \[ \] (A\d{3}):\s+\S.*$")
+
+def plan_acceptance_coverage_errors(leaves, acceptance_text: str):
+    must_ids=ACCEPTANCE_MUST_RE.findall(str(acceptance_text or ""))
+    if not must_ids:
+        return ["acceptance contract has no exact MUST Axxx IDs for plan coverage"]
+    if len(must_ids)!=len(set(must_ids)):
+        return ["acceptance contract has duplicate MUST Axxx IDs for plan coverage"]
+    planned=set()
+    for did,leaf in (leaves or {}).items():
+        if not isinstance(leaf,dict):
+            return [f"{did}: plan leaf is not an object for acceptance coverage"]
+        ids=leaf.get("acceptance_ids") or []
+        if not isinstance(ids,list):
+            return [f"{did}: acceptance_ids is not an array for acceptance coverage"]
+        planned.update(str(aid) for aid in ids)
+    must=set(must_ids)
+    missing=sorted(must-planned)
+    extra=sorted(planned-must)
+    if not missing and not extra:
+        return []
+    detail=[]
+    if missing:
+        detail.append("missing="+",".join(missing))
+    if extra:
+        detail.append("extra="+",".join(extra))
+    return [
+        "plan acceptance_ids must cover every and only MUST Axxx IDs; "
+        + " ".join(detail)
+    ]
+
 def validate_acceptance(project: Path, finalize=False):
     ctrl = project / ".opencode-v2"
     path = ctrl / "ACCEPTANCE.md"
@@ -723,9 +754,12 @@ def validate_plan(project: Path, finalize=False):
         errors.extend(ownership_overlap_errors(leaves))
         acceptance = ctrl / "ACCEPTANCE.md"
         try:
-            policy = reference_policy(acceptance.read_text(errors="replace"))
-        except OSError:
-            policy = ""
+            acceptance_text = acceptance.read_text(errors="replace")
+        except OSError as exc:
+            acceptance_text = ""
+            errors.append(f"ACCEPTANCE.md unavailable for plan coverage: {exc}")
+        policy = reference_policy(acceptance_text)
+        errors.extend(plan_acceptance_coverage_errors(leaves, acceptance_text))
         if policy == "internal":
             for did, leaf in leaves.items():
                 if leaf.get("role") != "probe-builder":

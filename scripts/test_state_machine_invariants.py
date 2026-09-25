@@ -129,6 +129,38 @@ class StructuredPlanAcceptanceCoverageTests(unittest.TestCase):
             self.assertEqual(set(mapping["key_to_id"]),{"app","final_tests"})
 
 
+class ControlGuardAcceptanceCoverageTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.guard=runpy.run_path(str(HERE/"control-guard.py"))
+
+    def test_exact_plan_acceptance_coverage_passes(self):
+        leaves={
+            "D001":{"acceptance_ids":["A001"]},
+            "D002":{"acceptance_ids":["A002"]},
+        }
+        acceptance=(
+            "- [ ] A001: first must.\n"
+            "- [ ] A002: second must.\n"
+        )
+        self.assertEqual(
+            self.guard["plan_acceptance_coverage_errors"](leaves,acceptance),[]
+        )
+
+    def test_missing_and_extra_plan_acceptance_ids_fail_closed(self):
+        leaves={
+            "D001":{"acceptance_ids":["A001","A999"]},
+        }
+        acceptance=(
+            "- [ ] A001: first must.\n"
+            "- [ ] A002: second must.\n"
+        )
+        errors=self.guard["plan_acceptance_coverage_errors"](leaves,acceptance)
+        self.assertEqual(len(errors),1)
+        self.assertIn("missing=A002",errors[0])
+        self.assertIn("extra=A999",errors[0])
+
+
 class RuntimePlanRepairTests(unittest.TestCase):
     def test_runtime_repair_requires_a_changed_affected_leaf(self):
         guard=runpy.run_path(str(HERE/"control-guard.py"))
