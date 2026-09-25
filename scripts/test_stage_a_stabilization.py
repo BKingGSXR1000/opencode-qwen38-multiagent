@@ -290,6 +290,87 @@ class TerminalSemanticChildTests(unittest.TestCase):
         self.assertTrue(receipt["replay_suppressed"])
 
 
+class SemanticInfrastructureRetryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name)
+        self.root = "ses-root"
+        self.action = {
+            "kind": "launch",
+            "agent": "acceptance-validator",
+            "mode": "final",
+        }
+        self.result = {"state_version": "state-a", "actions": [self.action]}
+        self.execution_id = controller.execution_action_id(
+            "state-a", self.root, self.action
+        )
+        controller.save_execution_ledger(self.project, {
+            "owner": "stage-a-controller",
+            "protocol": controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions": {
+                self.execution_id: {
+                    "execution_id": self.execution_id,
+                    "state_version": "state-a",
+                    "root_session": self.root,
+                    "action": self.action,
+                    "semantic_generation": 0,
+                    "created_at_ms": int((time.time() - 30) * 1000),
+                    "baseline_child_ids": [],
+                }
+            },
+        })
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_terminal_semantic_child_can_receive_one_auditable_infrastructure_retry(self):
+        child = {
+            "id": "ses-validator-old",
+            "parentID": self.root,
+            "agent": "acceptance-validator",
+        }
+        with mock.patch.object(controller, "evaluate", return_value=self.result), \
+             mock.patch.object(controller, "child_snapshot", return_value=[child]), \
+             mock.patch.object(controller, "semantic_child_may_still_transition", return_value=False):
+            receipt = controller.authorize_semantic_infrastructure_retry(
+                self.project,
+                "http://127.0.0.1:1",
+                self.execution_id,
+                "validator scratch was read-only",
+            )
+        self.assertEqual(receipt["next_generation"], 1)
+        self.assertFalse(receipt["idempotent"])
+        ledger = controller.load_execution_ledger(self.project)
+        grant = ledger["executions"][self.execution_id]["semantic_infrastructure_retry"]
+        self.assertEqual(grant["source"], "operator-controller")
+        self.assertEqual(grant["child_sessions"], ["ses-validator-old"])
+        generation, next_id = controller.semantic_execution_slot(
+            ledger, "state-a", self.root, self.action
+        )
+        self.assertEqual(generation, 1)
+        self.assertEqual(next_id, receipt["next_execution_id"])
+        self.assertNotEqual(next_id, self.execution_id)
+
+    def test_active_semantic_child_cannot_receive_infrastructure_retry(self):
+        child = {
+            "id": "ses-validator-live",
+            "parentID": self.root,
+            "agent": "acceptance-validator",
+        }
+        with mock.patch.object(controller, "evaluate", return_value=self.result), \
+             mock.patch.object(controller, "child_snapshot", return_value=[child]), \
+             mock.patch.object(controller, "semantic_child_may_still_transition", return_value=True):
+            with self.assertRaisesRegex(
+                controller.ControllerError, "while child may still transition"
+            ):
+                controller.authorize_semantic_infrastructure_retry(
+                    self.project,
+                    "http://127.0.0.1:1",
+                    self.execution_id,
+                    "should not be accepted",
+                )
+
+
 class DecisionStateVersionTests(unittest.TestCase):
     def base_snapshot(self):
         return {

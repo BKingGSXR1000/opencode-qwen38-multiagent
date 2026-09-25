@@ -20,6 +20,8 @@ from deterministic_dispatch import select_actions
 
 POLL_DEFAULT = 0.5
 SEMANTIC_TERMINAL_GRACE_SECONDS = 10.0
+MAX_SEMANTIC_INFRASTRUCTURE_RETRIES = 2
+SEMANTIC_RETRY_PROTOCOL = "v2-semantic-infrastructure-retry-v1"
 HARNESS_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
@@ -755,6 +757,155 @@ def semantic_child_may_still_transition(
     return age < SEMANTIC_TERMINAL_GRACE_SECONDS
 
 
+def semantic_execution_slot(
+    ledger: dict, state_version: str, root: str, canonical_action: dict
+) -> tuple[int, str]:
+    """Return the current semantic execution generation and its idempotency key."""
+    executions = ledger.get("executions") if isinstance(ledger, dict) else {}
+    if not isinstance(executions, dict):
+        raise ControllerError("execution ledger executions is not an object")
+    generation = 0
+    while True:
+        execution_id = execution_action_id(
+            state_version,
+            root,
+            canonical_action,
+            None if generation == 0 else generation,
+        )
+        intent = executions.get(execution_id)
+        if intent is None:
+            return generation, execution_id
+        if not isinstance(intent, dict):
+            raise ControllerError(f"execution ledger entry invalid: {execution_id}")
+        if (
+            intent.get("action") != canonical_action
+            or str(intent.get("state_version") or "") != str(state_version)
+            or str(intent.get("root_session") or "") != str(root)
+        ):
+            raise ControllerError(f"semantic execution ledger mismatch: {execution_id}")
+        try:
+            recorded_generation = int(intent.get("semantic_generation") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ControllerError(
+                f"semantic execution generation invalid: {execution_id}"
+            ) from exc
+        if recorded_generation != generation:
+            raise ControllerError(
+                f"semantic execution generation mismatch: {execution_id}"
+            )
+        grant = intent.get("semantic_infrastructure_retry")
+        if not grant:
+            return generation, execution_id
+        if not isinstance(grant, dict) or grant.get("protocol") != SEMANTIC_RETRY_PROTOCOL:
+            raise ControllerError(f"semantic retry grant invalid: {execution_id}")
+        try:
+            next_generation = int(grant.get("next_generation"))
+        except (TypeError, ValueError) as exc:
+            raise ControllerError(f"semantic retry generation invalid: {execution_id}") from exc
+        if next_generation != generation + 1:
+            raise ControllerError(f"semantic retry generation is not contiguous: {execution_id}")
+        if next_generation > MAX_SEMANTIC_INFRASTRUCTURE_RETRIES:
+            raise ControllerError("semantic infrastructure retry limit exceeded")
+        generation = next_generation
+
+
+def authorize_semantic_infrastructure_retry(
+    project: Path,
+    base_url: str,
+    execution_id: str,
+    reason: str,
+) -> dict:
+    """Authorize one explicit retry for a proven terminal semantic child."""
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ControllerError("semantic infrastructure retry requires a reason")
+    if len(reason) > 500:
+        raise ControllerError("semantic infrastructure retry reason is too long")
+
+    with execution_lock(project):
+        ledger = load_execution_ledger(project)
+        intent = ledger["executions"].get(execution_id)
+        if not isinstance(intent, dict):
+            raise ControllerError(f"unknown execution_id={execution_id}")
+        action = intent.get("action") or {}
+        canonical_action = canonical_execution_action(action)
+        if (str(canonical_action.get("agent") or ""), str(canonical_action.get("mode") or "")) not in SEMANTIC_PROMPTS:
+            raise ControllerError("infrastructure retry authorization is semantic-only")
+        root = str(intent.get("root_session") or "")
+        if not root:
+            raise ControllerError(f"execution intent incomplete: {execution_id}")
+
+        evidence = semantic_reconcile_evidence(
+            intent, child_snapshot(project, base_url, root)
+        )
+        if not evidence:
+            raise ControllerError(
+                "semantic infrastructure retry requires native child evidence"
+            )
+        if semantic_child_may_still_transition(project, base_url, intent, evidence):
+            raise ControllerError(
+                "semantic infrastructure retry forbidden while child may still transition"
+            )
+
+        current = evaluate(project)
+        if (
+            current.get("state_version") != intent.get("state_version")
+            or current.get("actions") != [canonical_action]
+        ):
+            raise ControllerError(
+                "semantic infrastructure retry requires the same current deterministic action"
+            )
+
+        try:
+            generation = int(intent.get("semantic_generation") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ControllerError("semantic execution generation is invalid") from exc
+        if generation >= MAX_SEMANTIC_INFRASTRUCTURE_RETRIES:
+            raise ControllerError("semantic infrastructure retry limit reached")
+
+        existing_grant = intent.get("semantic_infrastructure_retry")
+        if existing_grant:
+            if (
+                isinstance(existing_grant, dict)
+                and existing_grant.get("protocol") == SEMANTIC_RETRY_PROTOCOL
+                and existing_grant.get("reason") == reason
+            ):
+                return {
+                    "protocol": SEMANTIC_RETRY_PROTOCOL,
+                    "execution_id": execution_id,
+                    "next_generation": existing_grant.get("next_generation"),
+                    "idempotent": True,
+                }
+            raise ControllerError("semantic infrastructure retry already authorized")
+
+        next_generation = generation + 1
+        next_id = execution_action_id(
+            str(intent["state_version"]),
+            root,
+            canonical_action,
+            next_generation,
+        )
+        if next_id in ledger["executions"]:
+            raise ControllerError("next semantic retry execution already exists")
+
+        intent["semantic_infrastructure_retry"] = {
+            "protocol": SEMANTIC_RETRY_PROTOCOL,
+            "source": "operator-controller",
+            "reason": reason,
+            "authorized_at_ms": int(time.time() * 1000),
+            "child_sessions": list(evidence.get("sessions") or []),
+            "next_generation": next_generation,
+        }
+        save_execution_ledger(project, ledger)
+        return {
+            "protocol": SEMANTIC_RETRY_PROTOCOL,
+            "execution_id": execution_id,
+            "next_generation": next_generation,
+            "next_execution_id": next_id,
+            "idempotent": False,
+        }
+
+
 def final_tests_reconcile_evidence(project: Path, intent: dict) -> dict | None:
     """Return evidence only for the exact report recorded by this executor."""
     expected = str(intent.get("test_report_sha256") or "")
@@ -920,7 +1071,6 @@ def execute_first_semantic(
         )
     part = build_semantic_subtask(canonical_action)
     root = resolve_root_session(project, base_url, explicit_root)
-    execution_id = execution_action_id(result["state_version"], root, canonical_action)
 
     with execution_lock(project):
         current = evaluate(project)
@@ -932,6 +1082,9 @@ def execute_first_semantic(
         if current["actions"] != result["actions"]:
             raise ControllerError("deterministic actions changed before dispatch")
         ledger = load_execution_ledger(project)
+        semantic_generation, execution_id = semantic_execution_slot(
+            ledger, result["state_version"], root, canonical_action
+        )
         executions = ledger["executions"]
         existing = executions.get(execution_id)
         if existing is not None:
@@ -962,6 +1115,7 @@ def execute_first_semantic(
             "state_version": result["state_version"],
             "root_session": root,
             "action": canonical_action,
+            "semantic_generation": semantic_generation,
             "transport": "prompt_async+SubtaskPart",
             "transport_may_have_been_attempted": True,
             "created_at_ms": int(time.time() * 1000),
@@ -1759,6 +1913,8 @@ def main() -> int:
     ap.add_argument("--execute-first-semantic", action="store_true")
     ap.add_argument("--execute-first-final-tests", action="store_true")
     ap.add_argument("--reconcile-execution", default="")
+    ap.add_argument("--authorize-semantic-infrastructure-retry", default="")
+    ap.add_argument("--reason", default="")
     ap.add_argument("--base-url", default=os.environ.get("V2_OPENCODE_BASE_URL", ""))
     ap.add_argument("--root-session", default="")
     ap.add_argument("--selftest", action="store_true")
@@ -1774,6 +1930,27 @@ def main() -> int:
     project = ns.project.resolve()
     if not project.is_dir():
         raise ControllerError(f"project does not exist: {project}")
+
+    if ns.authorize_semantic_infrastructure_retry:
+        if (
+            ns.once or ns.watch or ns.execute_first_implementation
+            or ns.execute_first_task_splitter or ns.execute_first_planner
+            or ns.execute_first_semantic or ns.execute_first_final_tests
+            or ns.reconcile_execution
+        ):
+            ap.error("--authorize-semantic-infrastructure-retry is standalone")
+        if not ns.base_url:
+            ap.error("--authorize-semantic-infrastructure-retry requires --base-url")
+        receipt = authorize_semantic_infrastructure_retry(
+            project,
+            ns.base_url,
+            ns.authorize_semantic_infrastructure_retry,
+            ns.reason,
+        )
+        print(json.dumps(receipt, sort_keys=True, indent=2))
+        return 0
+    if ns.reason:
+        ap.error("--reason requires --authorize-semantic-infrastructure-retry")
 
     if ns.reconcile_execution:
         if (ns.once or ns.watch or ns.execute_first_implementation
