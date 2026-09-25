@@ -410,6 +410,86 @@ class VersionSkewZeroWorkRecoveryTests(unittest.TestCase):
         self.assertEqual(repaired["infrastructure_failures"][-1]["session"],"s3")
 
 
+class V2612OperatorRetryCompatibilityTests(unittest.TestCase):
+    def entry(self):
+        return {
+            "automatic_limit":2,
+            "count":5,
+            "sessions":["s1","s2","s3","s4","s5"],
+            "failure_history":[
+                {"attempt":1,"classification":"infrastructure","reason":"infra1"},
+                {"attempt":2,"classification":"infrastructure","reason":"infra2"},
+                {"attempt":3,"classification":"infrastructure","reason":"infra3"},
+                {"attempt":4,"classification":"genuine","reason":"false-old-failure"},
+            ],
+            "infrastructure_retry_grants":3,
+            "infrastructure_failures":[
+                {
+                    "timestamp":"2026-09-25T00:00:00Z","grant":1,
+                    "source":"supervisor","kind":"runtime-cancel",
+                    "session":"s1","evidence":"durable-partial-state-preserved",
+                    "reason":"infra1",
+                },
+                {
+                    "timestamp":"2026-09-25T00:01:00Z","grant":1,
+                    "source":"supervisor","kind":"runtime-cancel",
+                    "session":"s2","evidence":"durable-partial-state-preserved",
+                    "reason":"infra2",
+                },
+                {
+                    "timestamp":"2026-09-25T00:02:00Z","grant":1,
+                    "source":"supervisor","kind":"runtime-cancel",
+                    "session":"s3","evidence":"durable-partial-state-preserved",
+                    "reason":"infra3",
+                },
+            ],
+            "operator_retry_grants":1,
+            "operator_overrides":[{
+                "timestamp":"2026-09-25T00:03:00Z",
+                "grant":1,
+                "source":"operator-cli",
+                "reason":"restore retry lost to fixed harness failure",
+            }],
+        }
+
+    def test_repaired_infrastructure_ledger_accepts_auditable_unused_operator_grant(self):
+        state=control_state.attempt_state(self.entry())
+        self.assertTrue(state["valid"],state)
+        self.assertTrue(state["v2612_infrastructure_repair"])
+        self.assertEqual(state["allowed_attempts"],6)
+        self.assertEqual(state["operator_retry_grants"],1)
+        self.assertEqual(state["operator_grants_remaining"],1)
+        self.assertFalse(state["operator_authorized_attempt"])
+
+    def test_repaired_infrastructure_ledger_accepts_reserved_operator_attempt(self):
+        entry=self.entry()
+        entry["failure_history"].append(
+            {"attempt":5,"classification":"genuine","reason":"functional-failed"}
+        )
+        entry["count"]=6
+        entry["sessions"].append("s6")
+        entry["operator_retry_attempts"]=[{
+            "sequence":6,
+            "session":"s6",
+            "state":"reserved",
+            "consumes_operator_grant":False,
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:04:00Z",
+        }]
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"],state)
+        self.assertEqual(state["allowed_attempts"],6)
+        self.assertEqual(state["operator_grants_reserved"],1)
+        self.assertEqual(state["operator_grants_remaining"],0)
+        self.assertTrue(state["operator_authorized_attempt"])
+
+    def test_repaired_infrastructure_ledger_rejects_unaudited_operator_override(self):
+        entry=self.entry()
+        entry["operator_overrides"][0]["source"]="model"
+        state=control_state.attempt_state(entry)
+        self.assertFalse(state["valid"],state)
+
+
 class SandboxWrapperHistoryRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()

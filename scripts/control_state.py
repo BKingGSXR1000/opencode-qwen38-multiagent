@@ -577,10 +577,31 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     if max_infra and infra_grants > max_infra:
         return state
 
-    # Never use this repair to bypass human/operator accounting.
-    if int(entry.get("operator_retry_grants") or 0) != 0:
+    # Human/operator accounting may coexist with an already-proven repaired
+    # infrastructure ledger, but it must pass the same auditable invariants as
+    # the canonical path.  Do not let this compatibility shim synthesize or
+    # forgive an operator grant.
+    try:
+        operator_grants = int(entry.get("operator_retry_grants") or 0)
+    except (TypeError,ValueError):
         return state
-    if entry.get("operator_overrides"):
+    if operator_grants < 0:
+        return state
+    overrides = entry.get("operator_overrides") or []
+    if not isinstance(overrides,list):
+        return state
+    override_grants=0
+    for override in overrides:
+        if not isinstance(override,dict) or override.get("source")!="operator-cli":
+            return state
+        try:
+            grant=int(override.get("grant") or 0)
+        except (TypeError,ValueError):
+            return state
+        if grant!=1 or not override.get("timestamp") or not override.get("reason"):
+            return state
+        override_grants+=grant
+    if override_grants != operator_grants:
         return state
 
     sessions = entry.get("sessions")
@@ -661,25 +682,24 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     if external_contract_history != external_contract_credits:
         return state
 
-    allowed = (
-        automatic_limit
-        + infra_grants
+    non_operator_credits=(
+        infra_grants
         + plan_contract_credits
         + context_delivery_credits
         + external_contract_credits
         + bad_plan_credits
     )
-    if count > allowed:
-        return state
+    non_operator_ceiling=automatic_limit+non_operator_credits
 
-    # Historical preclaim code could write a non-consuming operator reservation
-    # for a dispatch that was actually covered by supervisor-only replacement
-    # credits. Permit only that exact harmless shape; any real human/operator
-    # accounting still fails closed above.
     operator_attempts=entry.get("operator_retry_attempts") or []
     if not isinstance(operator_attempts,list):
         return state
     seen_operator_sequences=set()
+    operator_record_count=0
+    consumed_operator_attempts=0
+    reserved_operator_attempts=0
+    aborted_operator_attempts=0
+    blocked_operator_attempts=0
     for item in operator_attempts:
         if not isinstance(item,dict):
             return state
@@ -688,13 +708,16 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         except (TypeError,ValueError):
             return state
         session=item.get("session")
+        status=item.get("state")
         if (
             sequence<=automatic_limit
-            or sequence>allowed
             or sequence in seen_operator_sequences
             or item.get("source")!="supervisor"
-            or item.get("state")!="reserved"
-            or item.get("consumes_operator_grant") is not False
+            or status not in {
+                "reserved","consumed","infrastructure_abort",
+                "infrastructure_blocked","plan_contract_replacement",
+                "bad_plan_replacement",
+            }
             or not isinstance(session,str)
             or not session
             or sequence>len(sessions)
@@ -702,6 +725,68 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         ):
             return state
         seen_operator_sequences.add(sequence)
+
+        # Historical preclaim code could write a non-consuming reservation for
+        # a sequence already covered by supervisor-only credits. Keep accepting
+        # only that harmless exact shape without charging a human grant.
+        if sequence<=non_operator_ceiling:
+            if (
+                status!="reserved"
+                or item.get("consumes_operator_grant") is not False
+            ):
+                return state
+            continue
+
+        operator_record_count+=1
+        if status=="consumed":
+            if item.get("consumes_operator_grant") is not True:
+                return state
+            consumed_operator_attempts+=1
+        elif status=="reserved":
+            if item.get("consumes_operator_grant") is not False:
+                return state
+            reserved_operator_attempts+=1
+        elif status=="infrastructure_abort":
+            if (
+                item.get("consumes_operator_grant") is not False
+                or not item.get("outcome")
+            ):
+                return state
+            aborted_operator_attempts+=1
+        else:
+            if (
+                item.get("consumes_operator_grant") is not False
+                or not item.get("outcome")
+            ):
+                return state
+            blocked_operator_attempts+=1
+
+    operator_dispatches=max(0,count-non_operator_ceiling)
+    legacy_operator_used=max(0,operator_dispatches-operator_record_count)
+    operator_used=legacy_operator_used+consumed_operator_attempts
+    operator_remaining=(
+        operator_grants
+        - operator_used
+        - reserved_operator_attempts
+        - blocked_operator_attempts
+    )
+    allowed=(
+        non_operator_ceiling
+        + operator_grants
+        + aborted_operator_attempts
+    )
+    if (
+        operator_record_count>operator_dispatches
+        or (
+            consumed_operator_attempts
+            + reserved_operator_attempts
+            + blocked_operator_attempts
+        )>operator_grants
+        or aborted_operator_attempts>MAX_OPERATOR_INFRASTRUCTURE_ABORTS
+        or operator_remaining<0
+        or count>allowed
+    ):
+        return state
 
     # At most one current dispatch may be unclassified while it is still live.
     if count - len(history) not in (0, 1):
@@ -726,6 +811,13 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
             ),
         ),
         "infrastructure_retry_grants": infra_grants,
+        "operator_retry_grants": operator_grants,
+        "operator_grants_used": operator_used,
+        "operator_grants_reserved": reserved_operator_attempts,
+        "operator_grants_remaining": operator_remaining,
+        "operator_infrastructure_aborted": aborted_operator_attempts,
+        "operator_infrastructure_blocked": blocked_operator_attempts,
+        "operator_authorized_attempt": operator_dispatches>0,
         "plan_contract_retry_grants": plan_contract_credits,
         "context_delivery_retry_grants": context_delivery_credits,
         "external_contract_retry_grants": external_contract_credits,
