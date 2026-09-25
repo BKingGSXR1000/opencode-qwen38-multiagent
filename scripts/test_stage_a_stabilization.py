@@ -251,6 +251,89 @@ class WorkerSandboxPythonSideEffectTests(unittest.TestCase):
             2,
         )
 
+    def test_manual_sandbox_wrapper_is_denied_but_exact_reflection_is_unwrapped(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            (project/".opencode-v2/work").mkdir(parents=True)
+            ctx={
+                "worker":True,
+                "did":"D001",
+                "session":"ses-1",
+                "agent":"implementer",
+                "owned":["owned.txt"],
+            }
+            malformed=(
+                "python3 '/tmp/worker_sandbox.py' 'run-bash' "
+                "'--project' '/tmp/project"
+            )
+            with mock.patch.object(
+                worker_sandbox,"resolve_worker",return_value=ctx
+            ):
+                with self.assertRaisesRegex(
+                    worker_sandbox.SandboxError,
+                    "manual sandbox wrapper forbidden",
+                ):
+                    worker_sandbox.hook_guard(
+                        project,"ses-1","call-1","implementer","bash",
+                        {"command":malformed},
+                    )
+
+                ordinary=worker_sandbox.hook_guard(
+                    project,"ses-1","call-2","implementer","bash",
+                    {"command":"printf ok"},
+                )
+                self.assertEqual(ordinary["action"],"replace-bash")
+
+                reflected=worker_sandbox.replacement_command(
+                    project,ctx,"printf ok"
+                )
+                collapsed=worker_sandbox.hook_guard(
+                    project,"ses-1","call-3","implementer","bash",
+                    {"command":reflected},
+                )
+                self.assertEqual(collapsed["action"],"replace-bash")
+                self.assertEqual(
+                    collapsed["command"],
+                    worker_sandbox.replacement_command(project,ctx,"printf ok"),
+                )
+
+            violation=worker_sandbox.violation_path(
+                project,"D001","ses-1"
+            )
+            rows=[
+                json.loads(line)
+                for line in violation.read_text().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(rows[-1]["kind"],"manual-sandbox-wrapper")
+            self.assertFalse(
+                worker_sandbox.has_fatal_violation(
+                    project,"D001","ses-1"
+                )
+            )
+
+
+class WorkerSandboxPluginHistoryTests(unittest.TestCase):
+    def test_plugin_restores_original_bash_command_after_sandbox_rewrite(self):
+        plugin=(
+            Path(__file__).resolve().parent.parent
+            / "xdg/config/opencode/plugins/v2-bounded-subagent.js"
+        ).read_text()
+        before=plugin.index('captureOriginalSandboxCommand(event, output);')
+        guard=plugin.index('guardWorkerMutation(directory, event, output);',before)
+        after_hook=plugin.index('"tool.execute.after": async (event, output) => {')
+        restore=plugin.index('restoreOriginalSandboxCommand(event, output);',after_hook)
+        self.assertLess(before,guard)
+        self.assertGreater(restore,after_hook)
+        self.assertIn(
+            'if (key) originalSandboxCommands.set(key, args.command);',
+            plugin,
+        )
+        self.assertIn(
+            'args.command = original;',
+            plugin,
+        )
+
 
 class ImplementationRetryGenerationTests(unittest.TestCase):
     def test_preclaim_does_not_advance_generation_but_terminal_failure_does(self):

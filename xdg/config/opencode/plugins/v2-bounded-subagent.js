@@ -11,6 +11,7 @@ const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
 const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
 const deterministicTransportProbeRoots = new Set();
 const deterministicTransportToolProbeCalls = new Set();
+const originalSandboxCommands = new Map();
 const DETERMINISTIC_TRANSPORT_TOOL_TARGET = ".opencode-v2/transport-tool-target.txt";
 
 function isDeterministicTransportToolRead(args) {
@@ -75,6 +76,32 @@ function hookSessionID(event) {
 
 function hookCallID(event) {
   return String(event?.callID || event?.callId || event?.id || "");
+}
+
+function sandboxCommandKey(event) {
+  const sessionID = hookSessionID(event);
+  const callID = hookCallID(event);
+  return sessionID && callID ? `${sessionID}:${callID}` : "";
+}
+
+function captureOriginalSandboxCommand(event, output) {
+  const tool = String(event?.tool || "");
+  if (tool !== "bash" && tool !== "shell") return;
+  const args = hookArgs(event, output);
+  if (typeof args?.command !== "string") return;
+  const key = sandboxCommandKey(event);
+  if (key) originalSandboxCommands.set(key, args.command);
+}
+
+function restoreOriginalSandboxCommand(event, output) {
+  const key = sandboxCommandKey(event);
+  if (!key || !originalSandboxCommands.has(key)) return;
+  const original = originalSandboxCommands.get(key);
+  originalSandboxCommands.delete(key);
+  const args = hookArgs(event, output);
+  if (args && typeof args === "object") {
+    args.command = original;
+  }
 }
 
 function implementationDispatchToken(event, did) {
@@ -490,7 +517,14 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
       guardSplitterToolBoundary(directory, event, output);
       guardProgressHandoff(directory, event, output);
       await guardEarlyWrite(directory, event, output, compatApi);
-      guardWorkerMutation(directory, event, output);
+      captureOriginalSandboxCommand(event, output);
+      try {
+        guardWorkerMutation(directory, event, output);
+      } catch (error) {
+        const key = sandboxCommandKey(event);
+        if (key) originalSandboxCommands.delete(key);
+        throw error;
+      }
 
       if (event.tool !== "subagent" && event.tool !== "task") return;
 
@@ -570,6 +604,7 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
     },
 
     "tool.execute.after": async (event, output) => {
+      restoreOriginalSandboxCommand(event, output);
       const result = event?.result || output;
 
       const probeKey = `${hookSessionID(event)}:${hookCallID(event)}`;

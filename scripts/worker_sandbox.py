@@ -407,6 +407,7 @@ DENIED_PREEXECUTION_VIOLATION_KINDS={
     "direct-tool-outside-ownership",
     "direct-tool-symlink-ownership",
     "forbidden-code-mode",
+    "manual-sandbox-wrapper",
 }
 
 
@@ -1251,6 +1252,32 @@ def normalize_worker_bash_command(project: Path, ctx, command: str):
     return current
 
 
+def command_invokes_manual_sandbox_wrapper(command: str):
+    """Detect a worker trying to invoke sandbox machinery itself."""
+    text=str(command or "")
+    try:
+        parts=shlex.split(text,posix=True)
+    except ValueError:
+        lowered=text.lower()
+        return bool(
+            ("worker_sandbox.py" in lowered and "run-bash" in lowered)
+            or re.search(r"(^|[;&|()\s])(?:bwrap|bubblewrap)(?=$|[;&|()\s])",lowered)
+        )
+
+    lowered=[str(part).lower() for part in parts]
+    for index,part in enumerate(parts):
+        base=Path(part).name.lower()
+        if base in {"bwrap","bubblewrap"}:
+            return True
+        if base!="worker_sandbox.py":
+            continue
+        prev=Path(parts[index-1]).name.lower() if index>0 else ""
+        following=lowered[index+1:index+5]
+        if index==0 or prev.startswith("python") or "run-bash" in following:
+            return True
+    return False
+
+
 def normalize_validator_bash_command(project: Path, session: str, command: str):
     """Collapse reflected canonical validator wrappers back to one layer."""
     current=str(command)
@@ -1324,6 +1351,15 @@ def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str,
         if not isinstance(command,str) or not command.strip():
             raise SandboxError("bash command missing")
         command=normalize_worker_bash_command(project,ctx,command)
+        if command_invokes_manual_sandbox_wrapper(command):
+            record_violation(
+                project,ctx,"manual-sandbox-wrapper",
+                {"tool":tool,"command":command[:2000]},
+            )
+            raise SandboxError(
+                f"WORKER_FIREWALL_DENY {ctx['did']} manual sandbox wrapper forbidden; "
+                "call bash with only the intended shell command"
+            )
         return {
             "action":"replace-bash",
             "worker":True,
