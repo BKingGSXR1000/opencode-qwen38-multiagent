@@ -48,7 +48,8 @@ mkdir -p "$ROOT/logs"
 python3 "$ROOT/scripts/bootstrap-stage-a-project.py" --project "$PROJECT" --task-file "$TASK_FILE" >/dev/null
 
 http_status(){
-  curl -sS -o /dev/null -w '%{http_code}' -G "$1" --data-urlencode "directory=$PROJECT" 2>/dev/null || true
+  curl -sS --connect-timeout 1 --max-time 2 -o /dev/null -w '%{http_code}' -G "$1" \
+    --data-urlencode "directory=$PROJECT" 2>/dev/null || true
 }
 
 [[ "$(http_status "$BASE_URL/session/status")" != "200" ]] || {

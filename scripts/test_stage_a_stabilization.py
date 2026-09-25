@@ -23,6 +23,13 @@ OWNED = ".opencode-v2/ACCEPTANCE.md"
 RULES = [("*", "deny"), (OWNED, "allow")]
 
 
+class LauncherReadinessTimeoutTests(unittest.TestCase):
+    def test_stage_a_launcher_bounds_status_probe(self):
+        text = Path(__file__).with_name("start-stage-a-run.sh").read_text()
+        self.assertIn("--connect-timeout 1 --max-time 2", text)
+        self.assertIn('http_status(){', text)
+
+
 class ExactProjectPathPermissionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
