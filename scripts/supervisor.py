@@ -7,6 +7,7 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
                            MAX_CONTEXT_DELIVERY_RETRY_GRANTS,
+                           MAX_EXTERNAL_CONTRACT_RETRY_GRANTS,
                            MAX_UNMATERIALIZED_DISPATCH_REPLAYS,
                            MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
                            RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
@@ -600,7 +601,10 @@ def implementation_prompt(did):
         f"DELIVERABLE: {did}\n"
         f"Read .opencode-v2/query/leaves/{did}-context.json exactly once for this session; "
         "it is the complete authoritative deliverable contract. Do not read "
-        ".opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope.\n"
+        ".opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope. "
+        "If supervisor_execution_correction is non-empty, it overrides conflicting "
+        "execution details in outcome/current_progress/split_scope but never ownership, "
+        "Verify, dependencies, Done-when, or Acceptance.\n"
         f"Read .opencode-v2/work/{did}.progress.md if present.\n"
         "Inspect your owned project artifacts as they currently exist.\n"
         "Continue from actual filesystem state and execute the deliverable."
@@ -3800,6 +3804,197 @@ def recover_context_delivery_failure(did):
         f"{did} attempt={count} truncated={evidence['truncated_context_reads']} "
         f"progress_denials={evidence['progress_read_denials']} "
         f"gate_denials={evidence['write_required_denials']}",
+    )
+    return True,"recovered"
+
+
+EXTERNAL_EXECUTION_CONTRACT_CORRECTION_PROTOCOL=(
+    "v2-external-execution-contract-correction-v1"
+)
+EXTERNAL_EXECUTION_CONTRACT_RECOVERY_PROTOCOL=(
+    "v2-external-execution-contract-recovery-v1"
+)
+
+
+def recover_external_execution_contract(did,correction_file):
+    """Replace one exhausted attempt whose external execution contract was wrong."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    if acceptance_reference_policy()!="external-required":
+        return False,"external-contract-recovery-reference-policy-mismatch"
+
+    try:
+        spec=load_json_object(
+            Path(correction_file),label="external execution contract correction"
+        )
+    except Exception as exc:
+        return False,f"external-contract-recovery-correction-unreadable:{exc}"
+    allowed={
+        "protocol","deliverable","correction","authoritative_sources","evidence"
+    }
+    if set(spec)!=allowed:
+        return False,"external-contract-recovery-correction-fields"
+    if (
+        spec.get("protocol")!=EXTERNAL_EXECUTION_CONTRACT_CORRECTION_PROTOCOL
+        or spec.get("deliverable")!=did
+    ):
+        return False,"external-contract-recovery-correction-identity"
+    correction=str(spec.get("correction") or "").strip()
+    if len(correction)<80 or len(correction)>8000:
+        return False,"external-contract-recovery-correction-length"
+    sources=spec.get("authoritative_sources")
+    if (
+        not isinstance(sources,list) or not sources or len(sources)>8
+        or any(
+            not isinstance(item,str) or not item.startswith("https://")
+            for item in sources
+        )
+    ):
+        return False,"external-contract-recovery-sources-invalid"
+    evidence=spec.get("evidence")
+    if not isinstance(evidence,dict) or not evidence:
+        return False,"external-contract-recovery-evidence-missing"
+    correction_sha=hashlib.sha256(correction.encode("utf-8")).hexdigest()
+
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"external-contract-recovery-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"external-contract-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"external-contract-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str) or not sessions[-1]
+            ):
+                return False,"external-contract-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("external_execution_contract_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"external-contract-recovery-history-invalid"
+            if len(prior)>=MAX_EXTERNAL_CONTRACT_RETRY_GRANTS:
+                if any(
+                    isinstance(item,dict)
+                    and int(item.get("attempt") or 0)==count
+                    and item.get("session")==sid
+                    and item.get("correction_sha256")==correction_sha
+                    for item in prior
+                ):
+                    return True,"already-recovered"
+                return False,"external-contract-recovery-limit"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-1"
+            ):
+                return False,"external-contract-recovery-terminal-failure-mismatch"
+            if count < int(state.get("allowed_attempts") or 0):
+                return False,"external-contract-recovery-not-exhausted"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"external-contract-recovery-session-still-active"
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")=="verify-failed-1"
+        and int(verify.get("exit_code") or -1)==1
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"external-contract-recovery-verify-evidence-mismatch"
+
+    correction_path=(
+        Path(PROJECT)/".opencode-v2"/"work"/
+        f"{did}.execution-contract-correction.json"
+    )
+    correction_payload={
+        "owner":"supervisor",
+        "protocol":EXTERNAL_EXECUTION_CONTRACT_CORRECTION_PROTOCOL,
+        "deliverable":did,
+        "correction":correction,
+        "authoritative_sources":sources,
+        "evidence":evidence,
+        "correction_sha256":correction_sha,
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    }
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"external-contract-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"external-contract-recovery-ledger-changed"
+            prior=entry.setdefault("external_execution_contract_recoveries",[])
+            if prior:
+                return False,"external-contract-recovery-limit"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or failures[0].get("classification")!="genuine":
+                return False,"external-contract-recovery-failure-changed"
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]=str(failure.get("reason") or "")
+            failure["classification"]="bad-plan"
+            failure["reason"]=(
+                "external-execution-contract-invalid "
+                f"correction_sha256={correction_sha}"
+            )
+            failure["reclassified_by"]="runtime-external-execution-contract-repair"
+            prior.append({
+                "protocol":EXTERNAL_EXECUTION_CONTRACT_RECOVERY_PROTOCOL,
+                "source":"supervisor-external-contract-repair",
+                "grant":1,
+                "attempt":count,
+                "session":sid,
+                "correction_sha256":correction_sha,
+                "correction_path":str(correction_path.relative_to(Path(PROJECT))),
+                "authoritative_sources":sources,
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            })
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(projected.get("external_contract_retry_grants") or 0)!=1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"external-contract-recovery-projected-ledger-invalid"
+            atomic_write_json(correction_path,correction_payload)
+            save_attempts(data)
+
+    log(
+        f"EXTERNAL_EXECUTION_CONTRACT_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} correction_sha256={correction_sha}"
+    )
+    csv(
+        "EXTERNAL_EXECUTION_CONTRACT_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} correction_sha256={correction_sha}",
     )
     return True,"recovered"
 
@@ -7571,6 +7766,7 @@ def supervisor_replacement_ceiling(state):
         + int(state.get("bad_plan_retry_grants") or 0)
         + int(state.get("plan_contract_retry_grants") or 0)
         + int(state.get("context_delivery_retry_grants") or 0)
+        + int(state.get("external_contract_retry_grants") or 0)
     )
 
 
@@ -10389,7 +10585,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -10729,6 +10925,29 @@ def main():
         print(
             f"CONTEXT_DELIVERY_RECOVERY_ALLOW "
             f"deliverable={args.recover_context_delivery_failure} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_external_execution_contract:
+        if unknown or not args.project or not args.correction_file:
+            raise SystemExit(
+                "external execution-contract recovery requires "
+                "--project --correction-file"
+            )
+        PROJECT=args.project
+        ok,detail=recover_external_execution_contract(
+            args.recover_external_execution_contract,
+            args.correction_file,
+        )
+        if not ok:
+            raise SystemExit(
+                f"EXTERNAL_EXECUTION_CONTRACT_RECOVERY_DENY "
+                f"deliverable={args.recover_external_execution_contract} "
+                f"reason={detail}"
+            )
+        print(
+            f"EXTERNAL_EXECUTION_CONTRACT_RECOVERY_ALLOW "
+            f"deliverable={args.recover_external_execution_contract} "
             f"reason={detail}"
         )
         return

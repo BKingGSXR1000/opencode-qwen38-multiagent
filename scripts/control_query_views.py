@@ -198,6 +198,38 @@ def _as_string_list(raw):
     return [str(item) for item in raw if isinstance(item, (str, int, float))]
 
 
+def _execution_contract_correction(project, did):
+    path=(
+        Path(project)/".opencode-v2"/"work"/
+        f"{did}.execution-contract-correction.json"
+    )
+    try:
+        data=json.loads(path.read_text())
+    except (OSError,json.JSONDecodeError):
+        return {}
+    if not isinstance(data,dict):
+        return {}
+    if (
+        data.get("owner")!="supervisor"
+        or data.get("protocol")!="v2-external-execution-contract-correction-v1"
+        or data.get("deliverable")!=did
+        or not isinstance(data.get("correction"),str)
+        or not data["correction"].strip()
+        or not isinstance(data.get("correction_sha256"),str)
+        or data.get("correction_sha256")!=hashlib.sha256(
+            data["correction"].encode("utf-8")
+        ).hexdigest()
+    ):
+        return {}
+    return {
+        "protocol":data["protocol"],
+        "correction":data["correction"],
+        "authoritative_sources":_as_string_list(data.get("authoritative_sources")),
+        "evidence":data.get("evidence") if isinstance(data.get("evidence"),dict) else {},
+        "correction_sha256":data["correction_sha256"],
+    }
+
+
 def build_leaf_contexts(project, manifest):
     # Project canonical leaf contracts into compact worker-readable packets.
     project = Path(project)
@@ -269,6 +301,8 @@ def build_leaf_contexts(project, manifest):
             "split_handoff_only": bool(leaf.get("split_handoff_only")),
             "split_handoff_source": str(leaf.get("split_handoff_source") or ""),
             "current_progress": current_progress,
+            "supervisor_execution_correction":
+                _execution_contract_correction(project,did),
         }
 
         if ".opencode-v2/TEST_CHECKS.json" in packet["owned_artifact_paths"]:

@@ -900,6 +900,174 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
             abort.assert_called_once()
 
 
+class ExternalExecutionContractRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        (self.ctrl/"ACCEPTANCE.md").write_text(
+            "# Acceptance\n\nReference policy: external-required\n"
+        )
+        self.verify="test -s owned.txt"
+        self.leaf={
+            "id":"D001","name":"external fixture",
+            "outcome":"capture external fixture",
+            "owned_artifacts":"`owned.txt`",
+            "owned_artifact_paths":["owned.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":self.verify,"role":"implementer",
+            "done_when":"owned exists","acceptance_ids":["A001"],
+            "parallel":"none","split_children":[],"complexity":"S",
+        }
+        manifest={
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.leaf},
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(
+            json.dumps(manifest)
+        )
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{"D001":{
+                "automatic_limit":3,
+                "count":3,
+                "sessions":["s1","s2","s3"],
+                "failure_history":[
+                    {"attempt":1,"classification":"genuine",
+                     "reason":"verify-failed-1"},
+                    {"attempt":2,"classification":"genuine",
+                     "reason":"verify-failed-1"},
+                    {"attempt":3,"classification":"genuine",
+                     "reason":"verify-failed-1"},
+                ],
+            }},
+        }))
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"still incomplete\n"
+        })()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001","s3",self.verify,checked,"verify-failed-1"
+        )
+        self.correction=self.project/"correction.json"
+        self.correction_text=(
+            "Authoritative external API documentation and a live probe prove "
+            "the inherited query parameter names are invalid. Use COMMAND, "
+            "EPHEM_TYPE=VECTORS, explicit CENTER, START_TIME/STOP_TIME/STEP_SIZE, "
+            "TIME_TYPE, REF_SYSTEM, OUT_UNITS, VEC_TABLE and VEC_CORR. Preserve "
+            "the canonical owned artifacts and exact Verify."
+        )
+        self.correction.write_text(json.dumps({
+            "protocol":
+                supervisor.EXTERNAL_EXECUTION_CONTRACT_CORRECTION_PROTOCOL,
+            "deliverable":"D001",
+            "correction":self.correction_text,
+            "authoritative_sources":[
+                "https://ssd-api.jpl.nasa.gov/doc/horizons.html"
+            ],
+            "evidence":{"live_probe":"HTTP 200 with non-error vectors"},
+        }))
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def test_reclassifies_terminal_external_contract_and_injects_correction(self):
+        initial=json.loads((self.work/"attempts.json").read_text())
+        self.assertEqual(
+            control_state.attempt_state(
+                initial["deliverables"]["D001"]
+            )["allowed_attempts"],
+            3,
+        )
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ):
+            self.assertEqual(
+                supervisor.recover_external_execution_contract(
+                    "D001",str(self.correction)
+                ),
+                (True,"recovered"),
+            )
+
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        self.assertEqual(entry["count"],3)
+        latest=entry["failure_history"][-1]
+        self.assertEqual(latest["classification"],"bad-plan")
+        self.assertEqual(
+            latest["reclassified_by"],
+            "runtime-external-execution-contract-repair",
+        )
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["external_contract_retry_grants"],1)
+        self.assertEqual(state["allowed_attempts"],4)
+
+        correction_path=(
+            self.work/"D001.execution-contract-correction.json"
+        )
+        correction=json.loads(correction_path.read_text())
+        self.assertEqual(correction["owner"],"supervisor")
+        self.assertEqual(
+            correction["correction_sha256"],
+            hashlib.sha256(self.correction_text.encode()).hexdigest(),
+        )
+
+        import control_query_views
+        manifest=json.loads(
+            (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text()
+        )
+        packet=control_query_views.build_leaf_contexts(
+            self.project,manifest
+        )["D001"]
+        projected=packet["supervisor_execution_correction"]
+        self.assertEqual(projected["correction"],self.correction_text)
+        self.assertEqual(
+            projected["authoritative_sources"],
+            ["https://ssd-api.jpl.nasa.gov/doc/horizons.html"],
+        )
+
+        status,sequence=supervisor.claim_attempt(
+            "dispatch:external-contract-credit","D001"
+        )
+        self.assertEqual((status,sequence),("claimed",4))
+        data=json.loads((self.work/"attempts.json").read_text())
+        self.assertFalse(
+            data["deliverables"]["D001"].get("operator_retry_attempts")
+        )
+
+    def test_recovery_is_bounded_and_requires_external_policy(self):
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ):
+            self.assertEqual(
+                supervisor.recover_external_execution_contract(
+                    "D001",str(self.correction)
+                ),
+                (True,"recovered"),
+            )
+            self.assertEqual(
+                supervisor.recover_external_execution_contract(
+                    "D001",str(self.correction)
+                ),
+                (True,"already-recovered"),
+            )
+        (self.ctrl/"ACCEPTANCE.md").write_text(
+            "# Acceptance\n\nReference policy: internal\n"
+        )
+        self.assertEqual(
+            supervisor.recover_external_execution_contract(
+                "D001",str(self.correction)
+            ),
+            (False,"external-contract-recovery-reference-policy-mismatch"),
+        )
+
+
 class HistoricalParentContractRepairResolutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()

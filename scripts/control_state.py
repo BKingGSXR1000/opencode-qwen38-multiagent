@@ -21,6 +21,9 @@ MAX_INFRASTRUCTURE_RETRY_GRANTS = 3
 # that the worker's authoritative context was mechanically truncated/blocked
 # and that the resulting attempt was reclassified as infrastructure.
 MAX_CONTEXT_DELIVERY_RETRY_GRANTS = 1
+# One replacement may be granted when an external-reference execution contract
+# is proven wrong by an auditable supervisor correction.
+MAX_EXTERNAL_CONTRACT_RETRY_GRANTS = 1
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS = MAX_INFRASTRUCTURE_RETRY_GRANTS
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # A human authorization may survive one *proven, pre-execution* runtime abort.
@@ -279,6 +282,54 @@ def _context_delivery_recovery_credit_count(entry, count):
     return min(len(recovered),MAX_CONTEXT_DELIVERY_RETRY_GRANTS)
 
 
+def _external_contract_recovery_credit_count(entry, count):
+    if not isinstance(entry,dict):
+        return 0
+    rows=entry.get("external_execution_contract_recoveries") or []
+    history=entry.get("failure_history") or []
+    if not isinstance(rows,list) or not isinstance(history,list):
+        return 0
+    recovered=set()
+    for row in rows:
+        if not isinstance(row,dict):
+            continue
+        try:
+            grant=int(row.get("grant") or 0)
+            attempt=int(row.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        digest=str(row.get("correction_sha256") or "")
+        session=row.get("session")
+        if (
+            row.get("source")!="supervisor-external-contract-repair"
+            or grant!=1
+            or not (1 <= attempt <= count)
+            or not isinstance(session,str) or not session
+            or len(digest)!=64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            continue
+        matched=False
+        for item in history:
+            if not isinstance(item,dict):
+                continue
+            try:
+                failure_attempt=int(item.get("attempt") or 0)
+            except (TypeError,ValueError):
+                continue
+            if (
+                failure_attempt==attempt
+                and item.get("classification")=="bad-plan"
+                and item.get("reclassified_by")==
+                    "runtime-external-execution-contract-repair"
+            ):
+                matched=True
+                break
+        if matched:
+            recovered.add(attempt)
+    return min(len(recovered),MAX_EXTERNAL_CONTRACT_RETRY_GRANTS)
+
+
 def _parent_contract_repair_credit_count(entry, count):
     if not isinstance(entry,dict):
         return 0
@@ -381,11 +432,13 @@ def _attempt_state_v2612_original(entry):
     # operator reservation.
     plan_contract_credits=_plan_contract_revision_credit_count(entry,count)
     context_delivery_credits=_context_delivery_recovery_credit_count(entry,count)
+    external_contract_credits=_external_contract_recovery_credit_count(entry,count)
     bad_plan_credits=_parent_contract_repair_credit_count(entry,count)
     non_operator_credits=(
         infrastructure_grants
         + plan_contract_credits
         + context_delivery_credits
+        + external_contract_credits
         + bad_plan_credits
     )
 
@@ -494,6 +547,7 @@ def _attempt_state_v2612_original(entry):
         "bad_plan_retry_grants": bad_plan_credits,
         "plan_contract_retry_grants": plan_contract_credits,
         "context_delivery_retry_grants": context_delivery_credits,
+        "external_contract_retry_grants": external_contract_credits,
     }
 
 # V2.6.12 INFRASTRUCTURE LEDGER REPAIR BEGIN
@@ -573,9 +627,17 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     )
     infra_history=len(infrastructure_rows)-context_delivery_history
     genuine_failures = classifications.count("genuine")
-    bad_plan_history = classifications.count("bad-plan")
+    external_contract_history=sum(
+        1 for item in history
+        if isinstance(item,dict)
+        and item.get("classification")=="bad-plan"
+        and item.get("reclassified_by")==
+            "runtime-external-execution-contract-repair"
+    )
+    bad_plan_history = classifications.count("bad-plan")-external_contract_history
     plan_contract_credits = _plan_contract_revision_credit_count(entry,count)
     context_delivery_credits = _context_delivery_recovery_credit_count(entry,count)
+    external_contract_credits = _external_contract_recovery_credit_count(entry,count)
     bad_plan_credits = _parent_contract_repair_credit_count(entry,count)
     # record_infrastructure_abort writes the grant immediately before the
     # matching infrastructure failure-history row, so at most one grant may be
@@ -588,6 +650,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         automatic_limit
         + plan_contract_credits
         + context_delivery_credits
+        + external_contract_credits
         + bad_plan_credits
     ):
         return state
@@ -595,12 +658,15 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     # resolution; otherwise this compatibility path must stay fail-closed.
     if bad_plan_history != bad_plan_credits:
         return state
+    if external_contract_history != external_contract_credits:
+        return state
 
     allowed = (
         automatic_limit
         + infra_grants
         + plan_contract_credits
         + context_delivery_credits
+        + external_contract_credits
         + bad_plan_credits
     )
     if count > allowed:
@@ -654,6 +720,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
                 - infra_grants
                 - plan_contract_credits
                 - context_delivery_credits
+                - external_contract_credits
                 - bad_plan_credits,
                 automatic_limit,
             ),
@@ -661,6 +728,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         "infrastructure_retry_grants": infra_grants,
         "plan_contract_retry_grants": plan_contract_credits,
         "context_delivery_retry_grants": context_delivery_credits,
+        "external_contract_retry_grants": external_contract_credits,
         "bad_plan_retry_grants": bad_plan_credits,
         "allowed_attempts": allowed,
         # Keep the canonical ordering: infrastructure credits are consumed
