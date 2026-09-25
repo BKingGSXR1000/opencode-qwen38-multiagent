@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 
 from state_io import atomic_write_text
+from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
@@ -212,6 +213,14 @@ def build_leaf_contexts(project, manifest):
             continue
 
         acceptance_ids = _as_string_list(leaf.get("acceptance_ids"))
+        verify_deps = _as_string_list(leaf.get("verify_deps"))
+        verify_dependency_artifacts = {}
+        for dep in verify_deps:
+            dep_leaf = leaves.get(dep)
+            if isinstance(dep_leaf, dict):
+                verify_dependency_artifacts[dep] = _as_string_list(
+                    dep_leaf.get("owned_artifact_paths")
+                )
         parent_id = str(leaf.get("parent") or "")
         parent_leaf = leaves.get(parent_id) if parent_id else None
         parent_acceptance_ids = _as_string_list(
@@ -236,7 +245,8 @@ def build_leaf_contexts(project, manifest):
             "owned_artifact_paths": _as_string_list(leaf.get("owned_artifact_paths")),
             "launch_deps": _as_string_list(leaf.get("launch_deps")),
             "contract_deps": _as_string_list(leaf.get("contract_deps")),
-            "verify_deps": _as_string_list(leaf.get("verify_deps")),
+            "verify_deps": verify_deps,
+            "verify_dependency_artifacts": verify_dependency_artifacts,
             "acceptance_ids": acceptance_ids,
             "reference_policy": acceptance["reference_policy"],
             "acceptance_musts": [
@@ -259,6 +269,12 @@ def build_leaf_contexts(project, manifest):
             "split_handoff_source": str(leaf.get("split_handoff_source") or ""),
             "current_progress": current_progress,
         }
+
+        if ".opencode-v2/TEST_CHECKS.json" in packet["owned_artifact_paths"]:
+            packet["test_checks_contract"] = {
+                "runner": RUN_CHECKS_COMMAND,
+                "schema": TEST_CHECKS_SCHEMA,
+            }
 
         if "-" in did:
             scope_path = project / ".opencode-v2" / "work" / f"{did}.scope.md"

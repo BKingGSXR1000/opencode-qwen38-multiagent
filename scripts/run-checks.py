@@ -4,32 +4,9 @@ from pathlib import Path, PurePosixPath
 from control_state import IMPLEMENTATION_PLAN_SCAFFOLD
 from leaf_contract import validate_verify_command
 from state_io import atomic_write_text
+from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 
 HARNESS_ROOT=Path(__file__).resolve().parents[1]
-RUN_CHECKS_COMMAND=".opencode-v2/bin/run-checks"
-
-TEST_CHECKS_SCHEMA={
-    "$schema":"https://json-schema.org/draft/2020-12/schema",
-    "title":"V2 TEST_CHECKS.json",
-    "type":"object",
-    "additionalProperties":False,
-    "required":["checks"],
-    "properties":{
-        "checks":{
-            "type":"array","minItems":1,
-            "items":{
-                "type":"object","additionalProperties":False,
-                "required":["name","command"],
-                "properties":{
-                    "name":{"type":"string","minLength":1},
-                    "command":{"type":"string","minLength":1},
-                    "timeout_seconds":{"type":"integer","minimum":1},
-                },
-            },
-        },
-        "required_files":{"type":"array","items":{"type":"string","minLength":1}},
-    },
-}
 
 def atomic_write(path,text): atomic_write_text(path,text)
 def slug(s): return re.sub(r"[^A-Za-z0-9._-]+","-",s).strip("-") or "check"

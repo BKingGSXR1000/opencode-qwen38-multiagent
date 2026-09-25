@@ -43,6 +43,48 @@ class PlannerContractTests(unittest.TestCase):
         self.assertIn("bounded owned test/helper", role)
 
 
+class FinalTestLeafContextTests(unittest.TestCase):
+    def test_final_test_packet_contains_shared_schema_and_verify_dependency_artifacts(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td)
+            ctrl = project / ".opencode-v2"
+            ctrl.mkdir()
+            (ctrl / "ACCEPTANCE.md").write_text(
+                "Reference policy: internal\n\n"
+                "- [ ] A020: final unittest command passes.\n"
+            )
+            manifest = {
+                "leaves": {
+                    "D007": {
+                        "owned_artifact_paths": [".opencode-v2/probes/stdlib_check.py"],
+                        "verify_deps": [],
+                        "acceptance_ids": ["A019"],
+                    },
+                    "D008": {
+                        "owned_artifact_paths": [".opencode-v2/TEST_CHECKS.json"],
+                        "verify_deps": ["D007"],
+                        "acceptance_ids": ["A020"],
+                        "verify_command": ".opencode-v2/bin/run-checks",
+                    },
+                }
+            }
+            contexts = control_query_views.build_leaf_contexts(project, manifest)
+            final = contexts["D008"]
+            self.assertEqual(
+                final["test_checks_contract"]["schema"],
+                control_query_views.TEST_CHECKS_SCHEMA,
+            )
+            self.assertEqual(
+                final["test_checks_contract"]["runner"],
+                ".opencode-v2/bin/run-checks",
+            )
+            self.assertEqual(
+                final["verify_dependency_artifacts"]["D007"],
+                [".opencode-v2/probes/stdlib_check.py"],
+            )
+            self.assertNotIn("test_checks_contract", contexts["D007"])
+
+
 class DirectOwnedWritePromptTests(unittest.TestCase):
     def test_write_capable_roles_match_runtime_direct_write_gate(self):
         agents = (
