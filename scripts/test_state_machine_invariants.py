@@ -807,6 +807,59 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
         self.assertEqual(evidence["progress_baseline"],self.progress_baseline)
         self.assertEqual(len(evidence["context_output_sha256"]),64)
 
+    def test_progress_read_marks_even_in_first_parallel_tool_batch(self):
+        progress=str(self.work/"D001.progress.md")
+        prompt="DELIVERABLE: D001\n"
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value=prompt
+        ), mock.patch.object(
+            supervisor,"persisted_completed_tool_turns",return_value=0
+        ), mock.patch.object(
+            supervisor,"attempt_sequence_for_session",return_value=7
+        ), mock.patch.object(
+            supervisor,"persisted_implementation_progress_read_seen",
+            return_value=False
+        ):
+            state,detail=supervisor.implementation_direct_write_gate_state(
+                self.sid,"read",{"filePath":progress}
+            )
+        self.assertEqual(state,"implementation-progress-read-once")
+        self.assertIn("next_tool=direct-owned-artifact-write",detail)
+        marker=supervisor.implementation_progress_read_marker("D001",7)
+        self.assertTrue(marker.is_file())
+        payload=json.loads(marker.read_text())
+        self.assertEqual(payload["source"],"current-tool-preexecution")
+
+    def test_completed_progress_read_reconciles_missing_marker(self):
+        progress=str(self.work/"D001.progress.md")
+        records=[{"id":"m-progress","data":{"role":"assistant"}}]
+        parts=[{"type":"tool","tool":"read","state":{
+            "status":"completed",
+            "input":{"filePath":progress},
+            "output":"progress body",
+        }}]
+        with mock.patch.object(
+            supervisor,"_v1_message_records",return_value=records
+        ), mock.patch.object(
+            supervisor,"_v1_message_parts",return_value=parts
+        ):
+            self.assertTrue(
+                supervisor.reconcile_implementation_progress_read_marker(
+                    self.sid,"D001",7
+                )
+            )
+        marker=supervisor.implementation_progress_read_marker("D001",7)
+        self.assertTrue(marker.is_file())
+        payload=json.loads(marker.read_text())
+        self.assertEqual(
+            payload["source"],"persisted-completed-read-reconciliation"
+        )
+        self.assertFalse(
+            supervisor.implementation_progress_read_available("D001",7)
+        )
+
     def test_progress_read_is_one_shot_and_hard_deadline_is_reachable(self):
         progress=str(self.work/"D001.progress.md")
         prompt="DELIVERABLE: D001\n"

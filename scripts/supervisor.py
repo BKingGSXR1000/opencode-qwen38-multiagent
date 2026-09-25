@@ -6517,6 +6517,65 @@ def implementation_progress_read_available(did,attempt):
     )
 
 
+def write_implementation_progress_read_marker(did,attempt,sid,source):
+    marker=implementation_progress_read_marker(did,attempt)
+    atomic_write_json(marker,{
+        "owner":"supervisor",
+        "protocol":"v2-implementation-progress-read-once-v1",
+        "deliverable":did,
+        "attempt":int(attempt),
+        "session":sid,
+        "path":f".opencode-v2/work/{did}.progress.md",
+        "source":source,
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    })
+    return marker
+
+
+def persisted_implementation_progress_read_seen(sid,did):
+    progress_rel=f".opencode-v2/work/{did}.progress.md"
+    try:
+        records=_v1_message_records(sid)
+    except Exception:
+        records=[]
+    for record in records:
+        if record.get("data",{}).get("role")!="assistant":
+            continue
+        for part in _v1_message_parts(record["id"]):
+            if part.get("type")!="tool" or str(part.get("tool") or "")!="read":
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            if str(state.get("status") or "").lower()!="completed":
+                continue
+            raw=state.get("input")
+            if isinstance(raw,dict):
+                tool_args=raw
+            elif isinstance(raw,str):
+                try:
+                    tool_args=json.loads(raw)
+                except Exception:
+                    tool_args={}
+            else:
+                tool_args={}
+            if _tool_targets_exact_project_path("read",tool_args,progress_rel):
+                return True
+    return False
+
+
+def reconcile_implementation_progress_read_marker(sid,did,attempt):
+    marker=implementation_progress_read_marker(did,attempt)
+    if marker.exists():
+        return True
+    if int(attempt or 0)<1:
+        return False
+    if not persisted_implementation_progress_read_seen(sid,did):
+        return False
+    write_implementation_progress_read_marker(
+        did,attempt,sid,"persisted-completed-read-reconciliation"
+    )
+    return True
+
+
 def implementation_direct_write_gate_state(sid,tool="",args=None):
     """After context inspection, steer implementation leaves to an owned write.
 
@@ -6532,15 +6591,33 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     if not did or not isinstance(leaf,dict) or not owned_artifact_paths(leaf):
         return "na","not-owned-artifact-implementation"
+    attempt=attempt_sequence_for_session(sid,did)
+    if not attempt:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+
+    progress_rel=f".opencode-v2/work/{did}.progress.md"
+    reconcile_implementation_progress_read_marker(sid,did,attempt)
+    progress_available=implementation_progress_read_available(did,attempt)
+    if (
+        progress_available
+        and tool=="read"
+        and _tool_targets_exact_project_path(tool,args,progress_rel)
+    ):
+        write_implementation_progress_read_marker(
+            did,attempt,sid,"current-tool-preexecution"
+        )
+        turns=persisted_completed_tool_turns(sid)
+        return "implementation-progress-read-once",(
+            f"implementation_direct_write completed_tool_turns={turns} "
+            f"allowed_once=read {progress_rel} next_tool=direct-owned-artifact-write"
+        )
+
     turns=persisted_completed_tool_turns(sid)
     if turns < 1:
         return "allow",f"implementation_direct_write completed_tool_turns={turns} required=1"
     if ready_info(did):
         return "satisfied","implementation leaf-ready"
-    attempt=attempt_sequence_for_session(sid,did)
-    if not attempt:
-        entry=(load_attempts().get("deliverables") or {}).get(did,{})
-        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
     changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
     if changed:
         return "satisfied",f"implementation owned-artifact-delta attempt={attempt}"
@@ -6548,28 +6625,6 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
         return "implementation-write-only",(
             f"implementation_direct_write completed_tool_turns={turns} "
             f"owned_artifact_write={did}"
-        )
-
-    progress_rel=f".opencode-v2/work/{did}.progress.md"
-    progress_available=implementation_progress_read_available(did,attempt)
-    if (
-        progress_available
-        and tool=="read"
-        and _tool_targets_exact_project_path(tool,args,progress_rel)
-    ):
-        marker=implementation_progress_read_marker(did,attempt)
-        atomic_write_json(marker,{
-            "owner":"supervisor",
-            "protocol":"v2-implementation-progress-read-once-v1",
-            "deliverable":did,
-            "attempt":int(attempt),
-            "session":sid,
-            "path":progress_rel,
-            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
-        })
-        return "implementation-progress-read-once",(
-            f"implementation_direct_write completed_tool_turns={turns} "
-            f"allowed_once=read {progress_rel} next_tool=direct-owned-artifact-write"
         )
 
     progress_hint=(
