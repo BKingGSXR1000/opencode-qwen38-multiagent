@@ -81,6 +81,25 @@ INTERNAL_EXTERNAL_REFERENCE_RE = re.compile(
     re.I,
 )
 
+def internal_external_reference_violation(text: str) -> bool:
+    """Ignore explicit negative statements while preserving positive requirements."""
+    normalized=re.sub(r"\s+"," ",str(text or ""))
+    for clause in re.split(r"[.;]+", normalized):
+        match=INTERNAL_EXTERNAL_REFERENCE_RE.search(clause)
+        if not match:
+            continue
+        prefix=clause[:match.start()]
+        suffix=clause[match.end():]
+        negatives=list(re.finditer(r"\b(?:no|without)\b",prefix,re.I))
+        if negatives:
+            tail=prefix[negatives[-1].end():]
+            if not re.search(r"\b(?:but|however|yet)\b",tail,re.I) and re.search(
+                r"\b(?:required|needed|used|consulted|relied\s+upon)\b",suffix,re.I
+            ):
+                continue
+        return True
+    return False
+
 FORBIDDEN_WRITE_ROLES = {
     "investigator",
     "reviewer",
@@ -591,7 +610,7 @@ def validate_acceptance(project: Path, finalize=False):
             errors.append(
                 "Reference policy must appear exactly once: none|internal|external-required"
             )
-        if policy == "internal" and INTERNAL_EXTERNAL_REFERENCE_RE.search(text):
+        if policy == "internal" and internal_external_reference_violation(text):
             errors.append(
                 "internal Reference policy cannot require externally authoritative/reference truth"
             )
@@ -766,7 +785,7 @@ def validate_plan(project: Path, finalize=False):
                 section = " ".join(str(leaf.get(k, "")) for k in (
                     "name", "owned_artifacts", "verify_command", "done_when"
                 ))
-                if INTERNAL_EXTERNAL_REFERENCE_RE.search(section):
+                if internal_external_reference_violation(section):
                     errors.append(
                         f"{did}: internal Reference policy forbids an externally authoritative/reference probe"
                     )

@@ -200,6 +200,18 @@ class ControlGuardAcceptanceCoverageTests(unittest.TestCase):
             self.guard["plan_acceptance_coverage_errors"](leaves,acceptance),[]
         )
 
+    def test_internal_reference_guard_distinguishes_negation_from_requirement(self):
+        check=self.guard["internal_external_reference_violation"]
+        self.assertFalse(check(
+            "No external reference, network, or externally maintained source is required."
+        ))
+        self.assertTrue(check(
+            "An externally maintained source is required for the expected truth."
+        ))
+        self.assertTrue(check(
+            "No local fixture is needed, but an externally maintained source is required."
+        ))
+
 
 class RuntimePlanRepairTests(unittest.TestCase):
     def test_runtime_repair_requires_a_changed_affected_leaf(self):

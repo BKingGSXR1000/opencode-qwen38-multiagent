@@ -15,7 +15,7 @@ from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
-CONTROL_POLICY_EPOCH = "v2-control-policy-20260925-must-section-v5"
+CONTROL_POLICY_EPOCH = "v2-control-policy-20260925-internal-negation-v6"
 MAX_DECISION_CHARS = 6000
 MAX_PROGRESS_CHARS = 4000
 DID_RE = re.compile(r"^D\d{3}(?:-[AB](?:[12])?)?$")
