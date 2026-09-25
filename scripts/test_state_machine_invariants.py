@@ -1314,7 +1314,8 @@ class NativeChildBindingAndRestartRecoveryTests(unittest.TestCase):
                 "opencode-server-restart",
             )
             failure.assert_called_once_with(
-                did,"opencode-server-restart-incomplete-session","infrastructure"
+                did,"opencode-server-restart-incomplete-session","infrastructure",
+                sid=sid,
             )
             release.assert_called_once()
             cleanup.assert_called_once_with(sid)
@@ -3267,6 +3268,84 @@ class AtomicSchedulerReservationTests(unittest.TestCase):
         self.assertEqual(result[0],"claimed",result)
         ledger=json.loads((self.project/".opencode-v2/work/attempts.json").read_text())
         self.assertEqual(supervisor.reserved_dispatch_slot_count(ledger),3)
+
+
+    def test_terminal_failure_binds_to_session_attempt_after_newer_preclaim(self):
+        ledger={
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "automatic_limit":2,
+                    "count":2,
+                    "sessions":["session-one","session-two"],
+                    "infrastructure_retry_grants":1,
+                    "infrastructure_failures":[{
+                        "grant":1,
+                        "source":"supervisor",
+                        "kind":"runtime-cancel",
+                        "session":"session-one",
+                        "evidence":"no-owned-artifact-or-progress",
+                        "reason":"runtime-cancel",
+                    }],
+                }
+            },
+        }
+        path=self.project/".opencode-v2/work/attempts.json"
+        path.write_text(json.dumps(ledger))
+        self.assertEqual(
+            supervisor.record_leaf_failure(
+                "D001","runtime-cancel","infrastructure",
+                sid="session-one",
+            ),
+            (True,"infrastructure"),
+        )
+        entry=json.loads(path.read_text())["deliverables"]["D001"]
+        self.assertEqual(
+            entry["failure_history"],
+            [{
+                "attempt":1,
+                "classification":"infrastructure",
+                "reason":"runtime-cancel",
+                "timestamp":entry["failure_history"][0]["timestamp"],
+                "source":"supervisor",
+                "session":"session-one",
+            }],
+        )
+        self.assertFalse(any(
+            row.get("attempt")==2
+            for row in entry["failure_history"]
+            if isinstance(row,dict)
+        ))
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["count"],2)
+        self.assertEqual(state["allowed_attempts"],3)
+        self.assertIn("session-two",supervisor.pending_ledger_session_ids())
+
+    def test_session_bound_failure_rejects_unknown_or_duplicate_binding(self):
+        path=self.project/".opencode-v2/work/attempts.json"
+        path.write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "automatic_limit":2,
+                    "count":2,
+                    "sessions":["same","same"],
+                }
+            },
+        }))
+        self.assertEqual(
+            supervisor.record_leaf_failure(
+                "D001","verify-failed-1","genuine",sid="same"
+            ),
+            (False,"session-attempt-binding-invalid"),
+        )
+        self.assertEqual(
+            supervisor.record_leaf_failure(
+                "D001","verify-failed-1","genuine",sid="missing"
+            ),
+            (False,"session-attempt-binding-invalid"),
+        )
 
 
 

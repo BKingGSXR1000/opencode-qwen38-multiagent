@@ -5615,8 +5615,14 @@ def reconcile_splits_once():
 
 
 
-def record_leaf_failure(did, reason, classification="genuine"):
-    """Record a terminal worker outcome; the split-required edge is durable in the ledger."""
+def record_leaf_failure(did, reason, classification="genuine", sid=None):
+    """Record a terminal worker outcome against its immutable session attempt.
+
+    A newer dispatch may be preclaimed before an older terminal session is
+    reconciled. Never classify that newer mutable count as the older session's
+    failure. Callers without a concrete session retain current-count behavior
+    for deterministic/unit-test state transitions.
+    """
     if classification not in {"genuine","infrastructure","bad-plan"}:
         raise ValueError("invalid failure classification")
     split_needed=False
@@ -5627,19 +5633,36 @@ def record_leaf_failure(did, reason, classification="genuine"):
             if not isinstance(entry,dict):
                 return False,"missing-ledger-entry"
             history=entry.setdefault("failure_history",[])
-            attempt=int(entry.get("count") or 0)
+            if sid:
+                sessions=entry.get("sessions")
+                if not isinstance(sessions,list):
+                    return False,"session-attempt-binding-invalid"
+                matches=[
+                    i+1 for i,value in enumerate(sessions)
+                    if value==sid
+                ]
+                if len(matches)!=1:
+                    return False,"session-attempt-binding-invalid"
+                attempt=matches[0]
+            else:
+                attempt=int(entry.get("count") or 0)
+            if attempt < 1:
+                return False,"invalid-attempt"
             already=any(
                 isinstance(x,dict) and x.get("attempt")==attempt
                 for x in history
             )
             if not already:
-                history.append({
+                row={
                     "attempt":attempt,
                     "classification":classification,
                     "reason":reason,
                     "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                     "source":"supervisor",
-                })
+                }
+                if sid:
+                    row["session"]=sid
+                history.append(row)
             if classification=="genuine":
                 genuine=sum(
                     1 for x in history
@@ -10703,7 +10726,7 @@ def reconcile_idle_implementation_session(sid,agent):
             )
         if not finalized and not ready_info(did):
             recorded,outcome=record_leaf_failure(
-                did,worker_behavior_reason,"genuine"
+                did,worker_behavior_reason,"genuine",sid=sid
             )
             release_operator_reservation(
                 sid,did,worker_behavior_reason
@@ -10748,7 +10771,7 @@ def reconcile_idle_implementation_session(sid,agent):
             # failure-history classification may still need to be completed.
             if granted or grant_detail=="already-recorded":
                 record_leaf_failure(
-                    did,infrastructure_reason,"infrastructure"
+                    did,infrastructure_reason,"infrastructure",sid=sid
                 )
             release_operator_reservation(
                 sid,did,infrastructure_reason
@@ -10781,7 +10804,7 @@ def reconcile_idle_implementation_session(sid,agent):
                     recorded=False; outcome=grant_detail
                     if granted or grant_detail=="already-recorded":
                         recorded,outcome=record_leaf_failure(
-                            did,detail,"infrastructure"
+                            did,detail,"infrastructure",sid=sid
                         )
                     log(
                         f"LEAF_VERIFY_INFRASTRUCTURE session={sid} "
@@ -10798,7 +10821,7 @@ def reconcile_idle_implementation_session(sid,agent):
                         did,detail,execution
                     )
                     recorded,outcome=record_leaf_failure(
-                        did,detail,classification
+                        did,detail,classification,sid=sid
                     )
                     if recorded:
                         log(
@@ -10862,7 +10885,7 @@ def reconcile_restart_orphaned_implementation_session(sid,agent):
         sid,did,reason,"opencode-server-restart"
     )
     if granted or detail=="already-recorded":
-        record_leaf_failure(did,reason,"infrastructure")
+        record_leaf_failure(did,reason,"infrastructure",sid=sid)
     release_operator_reservation(sid,did,reason)
     log(
         f"LEAF_RESTART_ORPHANED_INFRASTRUCTURE session={sid} "
@@ -10913,7 +10936,7 @@ def reconcile_compaction_event(sid,agent,comps):
             granted,detail=record_compaction_infrastructure_failure(sid,did)
             if granted or detail=="already-recorded":
                 record_leaf_failure(
-                    did,"opencode-compaction-template","infrastructure"
+                    did,"opencode-compaction-template","infrastructure",sid=sid
                 )
         log(
             f"COMPACTION_FAILED session={sid} agent={agent} "
