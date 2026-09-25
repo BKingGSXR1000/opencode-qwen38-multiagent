@@ -87,9 +87,12 @@ otherwise resolve only the first missing external-reference item. Follow the
 reference-researcher protocol and persist its required durable evidence.""",
     ("acceptance-validator", "final"): """Run final acceptance validation for this project.
 
-Read the durable acceptance, test, and reference evidence. Follow the
-acceptance-validator protocol exactly; do not treat model prose as final
-success and do not modify implementation artifacts.""",
+Read the durable acceptance, test, and reference evidence. Prefer existing
+supervisor/test evidence over recreating checks. If a live check is still
+needed, use one short raw single-line command for one purpose; never invoke the
+sandbox wrapper yourself. Follow the acceptance-validator protocol exactly; do
+not treat model prose as final success and do not modify implementation
+artifacts.""",
 }
 
 

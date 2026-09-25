@@ -35,6 +35,26 @@ Read:
 Validate every MUST Axxx exactly as written.
 Never weaken a MUST to match an implementation fallback.
 
+## Executable-evidence discipline
+
+Prefer already-durable deterministic evidence over recreating large checks:
+- `.opencode-v2/TEST_REPORT.json` and its referenced logs;
+- supervisor-owned `.opencode-v2/work/D*.ready` and
+  `.opencode-v2/work/D*.verify-evidence.json`;
+- bounded project artifacts produced by verified probe/test leaves.
+
+Use live `bash` only when a MUST still has a genuine evidence gap. Every live
+command MUST:
+- be one physical line;
+- perform one focused check;
+- stay concise (normally <= 1200 characters);
+- avoid heredocs, embedded multiline programs, generated temporary scripts, and
+  giant combined assertions.
+
+Never invoke `worker_sandbox.py`, `run-validator-bash`, bubblewrap, or any
+sandbox wrapper yourself. Submit the raw validation command only; the control
+plane applies the sandbox wrapper deterministically.
+
 Before returning, write exactly one `.opencode-v2/acceptance-report.json` with:
 ```json
 {
