@@ -93,9 +93,15 @@ def internal_external_reference_violation(text: str) -> bool:
         negatives=list(re.finditer(r"\b(?:no|without)\b",prefix,re.I))
         if negatives:
             tail=prefix[negatives[-1].end():]
-            if not re.search(r"\b(?:but|however|yet)\b",tail,re.I) and re.search(
+            crossed_contrast=bool(re.search(r"\b(?:but|however|yet)\b",tail,re.I))
+            negative_requirement=bool(re.search(
                 r"\b(?:required|needed|used|consulted|relied\s+upon)\b",suffix,re.I
-            ):
+            ))
+            negative_dependency=bool(re.search(
+                r"\b(?:dependence|dependency|reliance|requirement|need)\s+(?:on|for)\b",
+                tail,re.I,
+            ))
+            if not crossed_contrast and (negative_requirement or negative_dependency):
                 continue
         return True
     return False

@@ -203,7 +203,10 @@ class ControlGuardAcceptanceCoverageTests(unittest.TestCase):
     def test_internal_reference_guard_distinguishes_negation_from_requirement(self):
         check=self.guard["internal_external_reference_violation"]
         self.assertFalse(check(
-            "No external reference, network, or externally maintained source is required."
+            "No external reference, network, or externally maintained source is\nrequired."
+        ))
+        self.assertFalse(check(
+            "The contract contains no dependence on externally maintained truth."
         ))
         self.assertTrue(check(
             "An externally maintained source is required for the expected truth."
