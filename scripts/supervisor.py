@@ -885,6 +885,7 @@ def save_split_status(did, state, **detail):
         "corrective_context_sha256","corrective_dispatch_state",
         "corrective_execution_id","corrective_root_session",
         "corrective_reason_sha256","corrective_primary_response",
+        "historical_corrective_recovery",
     ):
         if key in previous:
             keep[key]=previous[key]
@@ -2503,6 +2504,80 @@ def _primary_splitter_execution_root(parent):
     return ""
 
 
+def splitter_primary_transport_binding(session):
+    """Recover the exact technical root and TaskTool part id for one child."""
+    if not session:
+        raise StateCorruptionError("splitter primary session is missing")
+    con=db_connect()
+    try:
+        row=con.execute(
+            "SELECT parent_id FROM session WHERE id=?",
+            (session,),
+        ).fetchone()
+        if not row or not row[0]:
+            raise StateCorruptionError(
+                f"splitter primary session has no parent: {session}"
+            )
+        root=str(row[0])
+        rows=con.execute(
+            "SELECT id,data FROM part WHERE session_id=? ORDER BY time_created",
+            (root,),
+        ).fetchall()
+    finally:
+        con.close()
+    for part_id,raw in rows:
+        try:
+            item=json.loads(raw or "{}")
+        except Exception:
+            continue
+        state=item.get("state") if isinstance(item,dict) else {}
+        metadata=state.get("metadata") if isinstance(state,dict) else {}
+        if (
+            isinstance(item,dict)
+            and item.get("type")=="tool"
+            and item.get("tool")=="task"
+            and isinstance(metadata,dict)
+            and str(metadata.get("sessionId") or "")==session
+        ):
+            return root,str(part_id)
+    raise StateCorruptionError(
+        f"splitter primary TaskTool binding is missing: {session}"
+    )
+
+
+def historical_splitter_validation_reason(parent,payload,request):
+    """Recompute the deterministic rejection of one archived splitter output."""
+    if not isinstance(payload,dict):
+        return "historical splitter payload is not an object"
+    if payload.get("protocol")==SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL:
+        if _false_parent_contract_invalid(parent,payload,request):
+            return "parent-contract-invalid-unavailable"
+        try:
+            _,_,verify_errors=_validate_parent_contract_invalid_payload(
+                parent,payload,request,
+            )
+        except (ValueError,KeyError,TypeError) as exc:
+            return str(exc)
+        if verify_errors:
+            return ""
+        return (
+            "parent-contract-invalid verify_command lacks a deterministic "
+            "contract defect"
+        )
+    if (
+        payload.get("protocol")!=SPLIT_PROPOSAL_PROTOCOL
+        or payload.get("parent_id")!=parent
+        or payload.get("depth")!=split_depth(parent)
+        or payload.get("generation")!=request.get("generation",1)
+    ):
+        return "proposal protocol, parent, depth, or generation does not match request"
+    try:
+        validate_split_proposal(parent,payload.get("proposals"),request=request)
+    except (ValueError,KeyError,TypeError) as exc:
+        return str(exc)
+    return ""
+
+
 def corrective_splitter_prompt(parent,request,primary_output,reason):
     """Direct context for the only corrective native child of one claim."""
     return (
@@ -2579,7 +2654,9 @@ def dispatch_splitter_corrective_turn(root,prompt):
         return False,repr(exc)
 
 
-def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=""):
+def begin_splitter_corrective_turn(
+    did,session,dispatch_token,reason,raw_output="",root_session="",historical_recovery=None
+):
     """Persist and dispatch the sole corrective *native child* of one claim."""
     status=load_split_status(did)
     if int(status.get("corrective_turn_count") or 0) >= 1:
@@ -2589,13 +2666,16 @@ def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=
     claim_count=int(status.get("claim_count") or 0)
     archived=_archive_corrective_split_proposal(did,claim_count)
     request=load_json_object(split_request_path(did),label=f"split request {did}")
-    root=_primary_splitter_execution_root(did)
+    root=str(root_session or _primary_splitter_execution_root(did))
     if not root: return False,"splitter-corrective-root-missing"
     primary_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.splitter-primary-response-{claim_count}.txt"
     atomic_write_text(primary_path,raw_output)
     context=corrective_splitter_prompt(did,request,raw_output,reason)
     context_sha=hashlib.sha256(context.encode()).hexdigest()
     first_sha=_splitter_response_fingerprint(raw_output)
+    audit={}
+    if isinstance(historical_recovery,dict):
+        audit["historical_corrective_recovery"]=historical_recovery
     # Mark dispatch attempted before POST.  A transport ambiguity must never
     # cause a second corrective POST or silently create a third model turn.
     save_split_status(
@@ -2615,6 +2695,7 @@ def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=
         corrective_primary_response=str(primary_path.relative_to(Path(PROJECT))),
         corrective_dispatch_state="intent-persisted",
         reason=f"invalid splitter response; one bounded corrective turn: {reason}"[:1000],
+        **audit,
     )
     ok,detail=dispatch_splitter_corrective_turn(root,context)
     if ok:
@@ -2639,6 +2720,98 @@ def begin_splitter_corrective_turn(did,session,dispatch_token,reason,raw_output=
         f"session={session} state={state} detail={detail}"
     )
     return False,state
+
+
+def recover_historical_splitter_corrective_turn(parent):
+    """Use the sole corrective turn for a preserved pre-policy failed claim."""
+    status=load_split_status(parent)
+    if status.get("state")!="split-validation-failed":
+        return False,"historical-corrective-requires-split-validation-failed"
+    if int(status.get("corrective_turn_count") or 0)>=1:
+        return False,"splitter-corrective-turn-already-consumed"
+    if leaf_children(parent):
+        return False,"historical-corrective-parent-already-split"
+    claim_count=int(status.get("claim_count") or 0)
+    if claim_count<1:
+        return False,"historical-corrective-claim-missing"
+
+    session=str(status.get("session") or "")
+    archive_rel=str(status.get("archived_proposal") or "")
+    if not session or not archive_rel:
+        return False,"historical-corrective-provenance-missing"
+
+    project_root=Path(PROJECT).resolve()
+    work_root=(project_root/".opencode-v2"/"work").resolve()
+    archive=(project_root/archive_rel).resolve()
+    try:
+        archive.relative_to(work_root)
+    except ValueError:
+        return False,"historical-corrective-archive-outside-work"
+    if not archive.is_file() or archive.is_symlink():
+        return False,"historical-corrective-archive-missing"
+
+    archived=load_json_object(
+        archive,label=f"historical split proposal {parent}"
+    )
+    raw_output=last_assistant_text_db(session)
+    payload=parse_splitter_final_json(raw_output)
+    if not isinstance(payload,dict) or payload!=archived:
+        return False,"historical-corrective-response-mismatch"
+
+    request=load_json_object(
+        split_request_path(parent),label=f"split request {parent}"
+    )
+    reason=historical_splitter_validation_reason(parent,payload,request)
+    if not reason:
+        return False,"historical-corrective-payload-no-longer-rejected"
+    recorded_reason=str(status.get("reason") or "")
+    if recorded_reason and recorded_reason!=reason:
+        return False,"historical-corrective-rejection-drift"
+
+    root,dispatch_token=splitter_primary_transport_binding(session)
+    ledger=load_json_object(
+        project_root/".opencode-v2"/"work"/"stage-a-controller-executions.json",
+        default_missing={"executions":{}},label="controller execution ledger",
+    )
+    generation=int(status.get("generation") or 1)
+    bound=False
+    for item in (ledger.get("executions") or {}).values():
+        action=item.get("action") if isinstance(item,dict) else {}
+        if (
+            isinstance(action,dict)
+            and action.get("agent")=="task-splitter"
+            and action.get("deliverable")==parent
+            and int(action.get("generation") or 1)==generation
+            and str(item.get("root_session") or "")==root
+        ):
+            bound=True
+            break
+    if not bound:
+        return False,"historical-corrective-controller-intent-missing"
+
+    recovery={
+        "protocol":"v2-historical-splitter-corrective-recovery-v1",
+        "claim_count":claim_count,
+        "generation":generation,
+        "primary_session":session,
+        "primary_dispatch_token":dispatch_token,
+        "primary_root_session":root,
+        "archived_proposal":archive_rel,
+        "archived_proposal_sha256":hashlib.sha256(archive.read_bytes()).hexdigest(),
+        "primary_response_sha256":_splitter_response_fingerprint(raw_output),
+        "deterministic_rejection":reason,
+        "authorized_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    }
+    ok,detail=begin_splitter_corrective_turn(
+        parent,session,dispatch_token,reason,raw_output,
+        root_session=root,historical_recovery=recovery,
+    )
+    if ok:
+        log(
+            f"SPLITTER_HISTORICAL_CORRECTIVE_RECOVERY parent={parent} "
+            f"claim={claim_count} session={session} token={dispatch_token}"
+        )
+    return ok,detail
 
 
 def rearm_splits_after_parent_contract_repair():
@@ -8445,7 +8618,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -8659,6 +8832,28 @@ def main():
         if not ok:
             raise SystemExit(f"SPLIT_DIRECT_CONTEXT_RECOVERY_DENY parent={args.recover_splitter_direct_context_contract} reason={detail}")
         print(f"SPLIT_DIRECT_CONTEXT_RECOVERY_ALLOW parent={args.recover_splitter_direct_context_contract} reason={detail}")
+        return
+    if args.recover_historical_splitter_corrective:
+        if unknown or not args.project or not args.opencode_base_url:
+            raise SystemExit(
+                "historical splitter corrective recovery requires "
+                "--project --opencode-base-url"
+            )
+        PROJECT=args.project
+        ok,detail=recover_historical_splitter_corrective_turn(
+            args.recover_historical_splitter_corrective
+        )
+        if not ok:
+            raise SystemExit(
+                f"SPLIT_HISTORICAL_CORRECTIVE_RECOVERY_DENY "
+                f"parent={args.recover_historical_splitter_corrective} "
+                f"reason={detail}"
+            )
+        print(
+            f"SPLIT_HISTORICAL_CORRECTIVE_RECOVERY_ALLOW "
+            f"parent={args.recover_historical_splitter_corrective} "
+            f"reason={detail}"
+        )
         return
     if args.recover_false_parent_contract_repair:
         if unknown or not args.project:

@@ -876,6 +876,72 @@ class SplitStateMachineTests(unittest.TestCase):
                 "D001",payload,json.loads((self.work/"D001.split-request.json").read_text())
             )
 
+    def test_historical_failed_claim_gets_exactly_one_same_claim_corrective_turn(self):
+        self.assertEqual(
+            supervisor.record_leaf_failure("D001","second","genuine"),
+            (True,"split-required"),
+        )
+        payload={
+            "protocol":supervisor.SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL,
+            "parent_id":"D001","depth":0,"generation":1,
+            "field":"verify_command","reason":"x"*1201,
+        }
+        archive=self.work/"D001.split-proposal.failed-2.json"
+        archive.write_text(json.dumps(payload))
+        supervisor.save_split_status(
+            "D001","split-validation-failed",
+            claim_count=2,proposal_failures=2,
+            session="historical-primary",
+            archived_proposal=str(archive.relative_to(self.project)),
+            reason="parent-contract-invalid reason must be 20..1200 chars",
+        )
+        stage_a_controller.save_execution_ledger(self.project,{
+            "owner":"stage-a-controller",
+            "protocol":stage_a_controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions":{"historical-execution":{
+                "execution_id":"historical-execution",
+                "state_version":"historical-state",
+                "root_session":"technical-root",
+                "action":{
+                    "kind":"launch","agent":"task-splitter",
+                    "deliverable":"D001","generation":1,
+                },
+                "transport":"prompt_async+SubtaskPart",
+                "transport_may_have_been_attempted":True,
+            }},
+        })
+        with mock.patch.object(
+            supervisor,"last_assistant_text_db",return_value=json.dumps(payload)
+        ), mock.patch.object(
+            supervisor,"splitter_primary_transport_binding",
+            return_value=("technical-root","historical-token"),
+        ), mock.patch.object(
+            supervisor,"dispatch_splitter_corrective_turn",
+            return_value=(True,"accepted-after-root-idle"),
+        ) as dispatch:
+            ok,detail=supervisor.recover_historical_splitter_corrective_turn("D001")
+        self.assertEqual((ok,detail),(True,"splitter-corrective-turn-pending"))
+        dispatch.assert_called_once()
+        status=supervisor.load_split_status("D001")
+        self.assertEqual(status["claim_count"],2)
+        self.assertEqual(status["corrective_turn_count"],1)
+        self.assertEqual(status["corrective_dispatch_state"],"post-accepted")
+        recovery=status["historical_corrective_recovery"]
+        self.assertEqual(recovery["primary_session"],"historical-primary")
+        self.assertEqual(recovery["primary_dispatch_token"],"historical-token")
+        self.assertEqual(recovery["primary_root_session"],"technical-root")
+        self.assertEqual(recovery["claim_count"],2)
+        self.assertEqual(
+            recovery["deterministic_rejection"],
+            "parent-contract-invalid reason must be 20..1200 chars",
+        )
+        with mock.patch.object(supervisor,"dispatch_splitter_corrective_turn") as again:
+            self.assertEqual(
+                supervisor.recover_historical_splitter_corrective_turn("D001"),
+                (False,"historical-corrective-requires-split-validation-failed"),
+            )
+        again.assert_not_called()
+
     def test_valid_failed_parent_rejects_model_prerequisite_repair(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         payload={
