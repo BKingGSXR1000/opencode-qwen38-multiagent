@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,base64,contextlib,hashlib,json,os,re,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
+import argparse,base64,contextlib,hashlib,json,os,re,shlex,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
@@ -31,6 +31,8 @@ from worker_sandbox import (
     has_fatal_violation as worker_sandbox_has_fatal_violation,
     has_only_denied_preexecution_violations as
         worker_sandbox_has_only_denied_preexecution_violations,
+    command_invokes_manual_sandbox_wrapper as
+        worker_command_invokes_manual_sandbox_wrapper,
 )
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 from control_query_views import materialize_control_query_views
@@ -3242,6 +3244,262 @@ def recover_version_skew_zero_work_dispatch(did):
         f"{did} attempt={count} placeholder={placeholder}",
     )
     return True,"rearmed-same-attempt"
+
+
+def persisted_model_bash_commands(sid,agent):
+    """Recover model-supplied bash text from old plugin-persisted wrappers."""
+    if not sid or agent not in IMPLEMENTATION_AGENTS:
+        return []
+    prefix=[
+        "python3",str((ROOT/"scripts"/"worker_sandbox.py").resolve()),
+        "run-bash","--project",str(Path(PROJECT).resolve()),
+        "--session",sid,"--agent",agent,"--command-b64",
+    ]
+    out=[]
+    try:
+        records=_v1_message_records(sid)
+    except Exception:
+        return out
+    for record in records:
+        if record.get("data",{}).get("role")!="assistant":
+            continue
+        for part in _v1_message_parts(record["id"]):
+            if part.get("type")!="tool" or part.get("tool") not in {"bash","shell"}:
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            raw=state.get("input")
+            if isinstance(raw,dict):
+                args=raw
+            elif isinstance(raw,str):
+                try:
+                    args=json.loads(raw)
+                except Exception:
+                    args={}
+            else:
+                args={}
+            command=args.get("command") if isinstance(args,dict) else None
+            if not isinstance(command,str) or not command:
+                continue
+            try:
+                parts=shlex.split(command,posix=True)
+            except ValueError:
+                continue
+            if len(parts)!=len(prefix)+1 or parts[:-1]!=prefix:
+                continue
+            try:
+                original=base64.b64decode(parts[-1],validate=True).decode("utf-8")
+            except Exception:
+                continue
+            out.append({
+                "command":original,
+                "status":str(state.get("status") or ""),
+                "output":str(state.get("output") or ""),
+                "error":str(state.get("error") or ""),
+            })
+    return out
+
+
+def sandbox_wrapper_history_evidence(sid,did):
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return {}
+    commands=persisted_model_bash_commands(sid,agent)
+    manual=[
+        item for item in commands
+        if worker_command_invokes_manual_sandbox_wrapper(item["command"])
+    ]
+    failure_re=re.compile(
+        r"(?:unexpected EOF|can't open file|malformed canonical sandbox wrapper|"
+        r"manual sandbox wrapper forbidden)",
+        re.IGNORECASE,
+    )
+    failed=[
+        item for item in manual
+        if item.get("status")=="error"
+        or failure_re.search(
+            str(item.get("error") or "")+" "+str(item.get("output") or "")
+        )
+    ]
+    last=last_assistant_text_db(sid)
+    return {
+        "agent":agent,
+        "persisted_wrapper_calls":len(commands),
+        "manual_wrapper_calls":len(manual),
+        "manual_wrapper_failures":len(failed),
+        "maximum_steps_reached":bool(
+            re.search(r"maximum steps reached",last or "",re.IGNORECASE)
+        ),
+        "completed_tool_turns":persisted_completed_tool_turns(sid),
+        "meaningful_execution":bool(meaningful_worker_execution(sid,did)),
+    }
+
+
+SANDBOX_WRAPPER_HISTORY_RECOVERY_PROTOCOL=(
+    "v2-sandbox-wrapper-history-recovery-v1"
+)
+
+
+def recover_sandbox_wrapper_history_poison(did):
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"wrapper-history-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"wrapper-history-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count or not isinstance(sessions[-1],str)
+            ):
+                return False,"wrapper-history-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("sandbox_wrapper_history_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"wrapper-history-recovery-history-invalid"
+            if any(
+                isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+                and item.get("session")==sid
+                for item in prior
+            ):
+                return True,"already-recovered"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-1"
+            ):
+                return False,"wrapper-history-recovery-terminal-failure-mismatch"
+            if int(state.get("infrastructure_retry_grants") or 0)>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"wrapper-history-recovery-infrastructure-limit"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"wrapper-history-recovery-session-still-active"
+    evidence=sandbox_wrapper_history_evidence(sid,did)
+    if int(evidence.get("persisted_wrapper_calls") or 0)<5:
+        return False,"wrapper-history-recovery-insufficient-persisted-wrappers"
+    if int(evidence.get("manual_wrapper_calls") or 0)<1:
+        return False,"wrapper-history-recovery-no-manual-wrapper"
+    if int(evidence.get("manual_wrapper_failures") or 0)<1:
+        return False,"wrapper-history-recovery-no-wrapper-failure"
+    if not evidence.get("maximum_steps_reached"):
+        return False,"wrapper-history-recovery-no-max-step-terminal"
+    if not evidence.get("meaningful_execution"):
+        return False,"wrapper-history-recovery-no-durable-execution"
+
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("result")=="verify-failed-1"
+        and int(verify.get("exit_code") or -1)==1
+    ):
+        return False,"wrapper-history-recovery-verify-evidence-mismatch"
+
+    try:
+        plugin_text=(
+            ROOT/"xdg/config/opencode/plugins/v2-bounded-subagent.js"
+        ).read_text(errors="replace")
+    except OSError:
+        return False,"wrapper-history-recovery-current-plugin-missing"
+    if not (
+        "captureOriginalSandboxCommand(event, output);" in plugin_text
+        and "restoreOriginalSandboxCommand(event, output);" in plugin_text
+    ):
+        return False,"wrapper-history-recovery-current-plugin-unfixed"
+
+    reason=(
+        "sandbox-wrapper-history-poison "
+        f"persisted={evidence['persisted_wrapper_calls']} "
+        f"manual={evidence['manual_wrapper_calls']} "
+        f"failed={evidence['manual_wrapper_failures']} maximum_steps_reached"
+    )
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"wrapper-history-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"wrapper-history-recovery-ledger-changed"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or failures[0].get("classification")!="genuine":
+                return False,"wrapper-history-recovery-failure-changed"
+            state=attempt_state(entry)
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"wrapper-history-recovery-infrastructure-limit"
+
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]=str(failure.get("reason") or "")
+            failure["classification"]="infrastructure"
+            failure["reason"]=reason
+            failure["reclassified_by"]="runtime-sandbox-wrapper-history-repair"
+            entry.setdefault("infrastructure_failures",[]).append({
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "grant":1,
+                "source":"supervisor",
+                "kind":"runtime-cancel",
+                "session":sid,
+                "evidence":"durable-partial-state-preserved",
+                "reason":reason,
+            })
+            entry["infrastructure_retry_grants"]=grants+1
+            entry.setdefault("sandbox_wrapper_history_recoveries",[]).append({
+                "protocol":SANDBOX_WRAPPER_HISTORY_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "persisted_wrapper_calls":int(evidence["persisted_wrapper_calls"]),
+                "manual_wrapper_calls":int(evidence["manual_wrapper_calls"]),
+                "manual_wrapper_failures":int(evidence["manual_wrapper_failures"]),
+                "completed_tool_turns":int(evidence["completed_tool_turns"]),
+                "verify_result":"verify-failed-1",
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            })
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(projected.get("infrastructure_retry_grants") or 0)!=grants+1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"wrapper-history-recovery-projected-ledger-invalid"
+            save_attempts(data)
+
+    log(
+        f"SANDBOX_WRAPPER_HISTORY_RECOVERY deliverable={did} attempt={count} "
+        f"session={sid} persisted={evidence['persisted_wrapper_calls']} "
+        f"manual={evidence['manual_wrapper_calls']} "
+        f"failed={evidence['manual_wrapper_failures']}"
+    )
+    csv(
+        "SANDBOX_WRAPPER_HISTORY_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} persisted={evidence['persisted_wrapper_calls']} "
+        f"manual={evidence['manual_wrapper_calls']} "
+        f"failed={evidence['manual_wrapper_failures']}",
+    )
+    return True,"recovered"
 
 
 HISTORICAL_PARENT_REPAIR_RESOLUTION_PROTOCOL=(
@@ -9345,7 +9603,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -9643,6 +9901,27 @@ def main():
         print(
             f"VERSION_SKEW_ZERO_WORK_RECOVERY_ALLOW "
             f"deliverable={args.recover_version_skew_zero_work_dispatch} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_sandbox_wrapper_history_poison:
+        if unknown or not args.project:
+            raise SystemExit(
+                "sandbox-wrapper history recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_sandbox_wrapper_history_poison(
+            args.recover_sandbox_wrapper_history_poison
+        )
+        if not ok:
+            raise SystemExit(
+                f"SANDBOX_WRAPPER_HISTORY_RECOVERY_DENY "
+                f"deliverable={args.recover_sandbox_wrapper_history_poison} "
+                f"reason={detail}"
+            )
+        print(
+            f"SANDBOX_WRAPPER_HISTORY_RECOVERY_ALLOW "
+            f"deliverable={args.recover_sandbox_wrapper_history_poison} "
             f"reason={detail}"
         )
         return

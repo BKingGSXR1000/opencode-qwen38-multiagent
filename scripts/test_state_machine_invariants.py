@@ -356,6 +356,123 @@ class VersionSkewZeroWorkRecoveryTests(unittest.TestCase):
         )
 
 
+class SandboxWrapperHistoryRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        self.sid="ses-wrapper-poison"
+        self.verify="test -s owned.txt"
+        leaf={
+            "id":"D001","name":"owned","outcome":"repair owned",
+            "owned_artifacts":"`owned.txt`",
+            "owned_artifact_paths":["owned.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":self.verify,"role":"implementer",
+            "done_when":"owned exists","acceptance_ids":["A001"],
+            "parallel":"none","split_children":[],"complexity":"S",
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":leaf},
+        }))
+        (self.project/"owned.txt").write_text("partial\n")
+        history=[
+            {"attempt":1,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":2,"classification":"genuine","reason":"verify-failed-1"},
+            {"attempt":3,"classification":"infrastructure","reason":"runtime"},
+            {"attempt":4,"classification":"infrastructure","reason":"runtime"},
+            {"attempt":5,"classification":"genuine","reason":"verify-failed-1"},
+        ]
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{"D001":{
+                "automatic_limit":3,"count":5,
+                "sessions":["s1","s2","s3","s4",self.sid],
+                "failure_history":history,
+                "infrastructure_retry_grants":2,
+                "infrastructure_failures":[
+                    {"grant":1,"source":"supervisor","kind":"runtime-cancel",
+                     "session":"s3","evidence":"durable-partial-state-preserved",
+                     "reason":"runtime"},
+                    {"grant":1,"source":"supervisor","kind":"runtime-cancel",
+                     "session":"s4","evidence":"durable-partial-state-preserved",
+                     "reason":"runtime"},
+                ],
+            }},
+        }))
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"still incomplete\n"
+        })()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001",self.sid,self.verify,checked,"verify-failed-1"
+        )
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def proof(self):
+        return {
+            "agent":"implementer","persisted_wrapper_calls":11,
+            "manual_wrapper_calls":1,"manual_wrapper_failures":1,
+            "maximum_steps_reached":True,"completed_tool_turns":22,
+            "meaningful_execution":True,
+        }
+
+    def test_reclassifies_only_contaminated_attempt_and_grants_one_slot(self):
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"sandbox_wrapper_history_evidence",
+            return_value=self.proof(),
+        ):
+            ok,detail=supervisor.recover_sandbox_wrapper_history_poison(
+                "D001"
+            )
+        self.assertEqual((ok,detail),(True,"recovered"))
+        data=json.loads((self.work/"attempts.json").read_text())
+        entry=data["deliverables"]["D001"]
+        self.assertEqual(entry["count"],5)
+        self.assertEqual(entry["infrastructure_retry_grants"],3)
+        latest=entry["failure_history"][-1]
+        self.assertEqual(latest["attempt"],5)
+        self.assertEqual(latest["classification"],"infrastructure")
+        self.assertEqual(latest["original_reason"],"verify-failed-1")
+        self.assertEqual(
+            latest["reclassified_by"],
+            "runtime-sandbox-wrapper-history-repair",
+        )
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertEqual(state["allowed_attempts"],6)
+        self.assertEqual(
+            entry["sandbox_wrapper_history_recoveries"][0]["attempt"],5
+        )
+
+    def test_refuses_without_nested_wrapper_failure(self):
+        proof=self.proof()
+        proof["manual_wrapper_failures"]=0
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ), mock.patch.object(
+            supervisor,"sandbox_wrapper_history_evidence",
+            return_value=proof,
+        ):
+            ok,detail=supervisor.recover_sandbox_wrapper_history_poison(
+                "D001"
+            )
+        self.assertEqual(
+            (ok,detail),
+            (False,"wrapper-history-recovery-no-wrapper-failure"),
+        )
+
+
 class HistoricalParentContractRepairResolutionTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
