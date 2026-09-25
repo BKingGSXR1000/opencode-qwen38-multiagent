@@ -366,3 +366,34 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
   live end-to-end proof remains incomplete; do not use this as authorization
   for retained D003-B recovery. Retained D003-B/D003/D002/D004 were untouched
   and the disposable runtime was stopped.
+
+## Full deterministic completion + restart/crash recovery — 2026-09-25
+
+- Fresh R6 project `/home/bking/AI/a2-e2e/20260925-081317-deterministic-full-r6/project`
+  reached durable `complete`: final tests PASS, acceptance validation complete,
+  zero execution blockers, and a hash-bound `acceptance-pass.json` covering all
+  20 MUST checks.
+- Supervisor-only live restart proof:
+  `/home/bking/AI/a2-restart-canary/20260925-113631-supervisor-restart-fixed`.
+  D001 was busy at crash with attempt count 1 / one child / no failures. After
+  supervisor restart, the same child remained busy and unique, with no retry or
+  failure charged. Scheduler recovered one active worker and two free slots.
+  That child later completed and READY was minted on attempt 1. Restarting the
+  supervisor again after completion did not rerun D001.
+- The first restart attempt exposed a bug in orphan classification: a pending
+  pre-restart child was treated as server-lost even while still active.
+  `a65156b` fixes the predicate and adds a regression for that exact case.
+- True OpenCode-server + supervisor crash proof:
+  `/home/bking/AI/a2-restart-canary/20260925-114140-server-crash-real`.
+  The actual listener PID on port 58479 and supervisor were SIGKILLed while D001
+  was busy; the port was confirmed closed. After both restarted, the old child
+  was absent from `/session/status` and was classified once as infrastructure
+  (`opencode-server-restart-incomplete-session`), never as a genuine failure.
+  D001 became eligible with 3 free scheduler slots. One replacement attempt was
+  dispatched (attempt 2), produced the exact sentinel artifact, and finalized
+  READY. Root child set is exactly {lost original, replacement}; no third child
+  exists. `server-crash-final-proof.json` records `pass=true`.
+- Final regression sweep: control-plane 126 PASS, state-machine 79 PASS, Stage-A
+  stabilization 41 PASS, historical New51 replay 6 PASS over 121 archived
+  decisions, transport-root 5 PASS, plus run-checks/finalizer/controller/
+  restart-canary selftests PASS.

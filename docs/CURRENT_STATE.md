@@ -296,3 +296,50 @@ child appeared under the root, so that accepted POST remains transport-ambiguous
 No replay was attempted. This implementation is component-tested but is **not
 yet proven end-to-end live**. The disposable runtime was stopped. Retained
 D003-B/D003/D002/D004 state and recovery budgets were not touched.
+
+## Deterministic full-run and restart/crash validation — 2026-09-25
+
+The deterministic Stage-A path now has a complete fresh end-to-end proof.
+Run R6 is `/home/bking/AI/a2-e2e/20260925-081317-deterministic-full-r6/project`.
+It reached `resume_phase=complete` with final tests passing, no execution
+blockers, and hash-bound `.opencode-v2/acceptance-pass.json`. The finalizer
+accepted all 20 MUST checks. The acceptance pass records
+`report_sha256=6b8a577272aadfed9349d7cb27305b47199cb87a3060ff40da8b277233ab1962`
+and
+`test_report_sha256=892c1c41188ff77c3990bfe28c0fe73df57c442ef68d1ff19abc2106f198ea6e`.
+
+A reusable live restart fixture is committed as
+`scripts/create-restart-recovery-canary.py`. Supervisor-only restart was proven
+on `/home/bking/AI/a2-restart-canary/20260925-113631-supervisor-restart-fixed/project`.
+D001 had exactly one busy native child when the supervisor was killed. After
+restart, the same child remained the only D001 session, attempt count stayed
+1, failure history stayed empty, scheduler reported exactly one active worker,
+and no duplicate dispatch occurred. The restarted supervisor then finalized
+D001 READY on attempt 1. A second supervisor restart after completion preserved
+that READY state, kept attempt/session count unchanged, and did not make D001
+eligible again. Proof files are `supervisor-restart-proof.json` and
+`post-completion-restart-proof.json` in that canary base directory.
+
+A true OpenCode-server + supervisor crash was then proven on
+`/home/bking/AI/a2-restart-canary/20260925-114140-server-crash-real/project`.
+The actual `opencode serve` process and supervisor were SIGKILLed while D001's
+first native child was busy; port 58479 was verified closed before restart.
+The restarted OpenCode server reported no active child. The restarted
+supervisor classified the lost attempt exactly once as infrastructure reason
+`opencode-server-restart-incomplete-session`, with zero genuine failures and
+D001 eligible for bounded recovery. Exactly one replacement child was launched
+as attempt 2. It completed `restart_probe.txt` with exact content
+`restart-recovery-ok`, and the supervisor minted D001 READY at attempt 2. The
+root has exactly the original lost child plus one replacement child, with no
+third dispatch. `server-crash-final-proof.json` records `pass=true`; after the
+normal publication cycle the scheduler converged to zero active workers, three
+free slots, and only D002 eligible.
+
+The live restart work exposed and fixed one real bug: a pre-supervisor-restart
+pending child was previously classified as a server-restart orphan even when it
+was still present in OpenCode's live active-session set. Commit `a65156b`
+introduces `restart_orphan_candidate(...)`, requiring absence from the active
+set before infrastructure orphan classification. Final focused regression
+state: control-plane 126 tests PASS, state-machine 79 PASS, Stage-A
+stabilization 41 PASS, historical New51 replay 6 PASS over 121 frozen decision
+cases, and transport-root 5 PASS.
