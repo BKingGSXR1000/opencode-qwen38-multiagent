@@ -9,6 +9,7 @@ import json
 import hashlib
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -111,6 +112,35 @@ class DriverReportingTests(unittest.TestCase):
         lines = [line for line in out.getvalue().splitlines() if line.strip()]
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0]), {"event": "no-dispatch", "actions": blocked["actions"]})
+
+
+class StageATickPreflightSafetyTests(unittest.TestCase):
+    def test_tick_cannot_dispatch_when_preflight_proof_is_rejected(self):
+        path=Path(__file__).with_name("run-stage-a-tick.py")
+        spec=importlib.util.spec_from_file_location("stage_a_tick_safety_test",path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        tick=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tick)
+
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            proof=project/"proof.json"
+            proof.write_text("{}")
+            argv=[
+                "run-stage-a-tick.py",
+                "--project",str(project),
+                "--base-url","http://127.0.0.1:1",
+                "--root-session","ses-root",
+                "--preflight-proof",str(proof),
+            ]
+            with mock.patch.object(sys,"argv",argv), mock.patch.object(
+                tick.preflight,"verify_proof",
+                side_effect=tick.preflight.PreflightError("rejected proof"),
+            ), mock.patch.object(tick,"execute_one") as execute:
+                with self.assertRaisesRegex(tick.TickError,"rejected proof"):
+                    tick.main()
+                execute.assert_not_called()
 
 
 class PlannerContractTests(unittest.TestCase):

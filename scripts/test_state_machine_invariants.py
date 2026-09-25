@@ -864,6 +864,52 @@ class SplitStateMachineTests(unittest.TestCase):
         self.assertEqual(evidence["result"],"verify-failed-1")
         self.assertEqual(evidence["stderr"],"missing b.txt\n")
 
+    def test_final_test_split_writer_cannot_weaken_run_checks_verify(self):
+        self.parent.update({
+            "owned_artifacts":"`.opencode-v2/TEST_CHECKS.json`",
+            "owned_artifact_paths":[".opencode-v2/TEST_CHECKS.json"],
+            "verify_command":supervisor.RUN_CHECKS_COMMAND,
+            "role":"test-builder",
+            "done_when":"canonical final checks pass",
+        })
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9",
+            "project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.parent},
+        }))
+        proposals=[
+            {
+                "scope":"inspect final test contract",
+                "owned_artifacts":"none",
+                "verify_command":supervisor.SPLIT_HANDOFF_VERIFY_SENTINEL,
+                "role":"probe-builder",
+                "depends_on_sibling":"",
+                "done_when":"handoff ready",
+                "reads_existing":[],
+                "creates_or_updates":[],
+            },
+            {
+                "scope":"write final test manifest",
+                "owned_artifacts":"`.opencode-v2/TEST_CHECKS.json`",
+                "verify_command":"python3 -c \"import json; assert json.load(open('.opencode-v2/TEST_CHECKS.json')).get('checks')\"",
+                "role":"test-builder",
+                "depends_on_sibling":"first",
+                "done_when":"manifest exists",
+                "reads_existing":[],
+                "creates_or_updates":[".opencode-v2/TEST_CHECKS.json"],
+            },
+        ]
+        with self.assertRaisesRegex(
+            ValueError,
+            "final-test manifest child must preserve exact parent Verify",
+        ):
+            supervisor.validate_split_proposal("D001",proposals,request={})
+        proposals[1]["verify_command"]=supervisor.RUN_CHECKS_COMMAND
+        expected,children=supervisor.validate_split_proposal("D001",proposals,request={})
+        self.assertEqual(expected,["D001-A","D001-B"])
+        self.assertEqual(children[1]["verify_command"],supervisor.RUN_CHECKS_COMMAND)
+
     def test_parent_contract_invalid_reason_remains_bounded_and_strict(self):
         supervisor.record_leaf_failure("D001","second","genuine")
         payload={

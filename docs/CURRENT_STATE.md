@@ -352,3 +352,27 @@ Exact supervisor Verify history is append-only. Re-running Verify for the same a
 Canonical retained D002 remains read-only historical evidence: exactly two attempts, two genuine failure records, and its exact Verify evidence were re-audited without mutation. Disposable validation continues on separate fresh projects.
 
 Normal Stage-A launcher, tick, and driver entrypoints are regression-locked behind consolidated preflight proof. A failed proof prevents any tick execution. Driver terminal reporting is also regression-locked to compact deduplicated events: complete exits 0; a stable blocked state is observed three times, printed once, and exits 2.
+
+## Generic driver proof and final-test split invariant — 2026-09-25
+
+Fresh generic-driver project:
+`/home/bking/AI/a2-e2e/20260925-125300-generic-driver/project`.
+The generic launcher/driver advanced without manual action selection through
+acceptance planning, implementation planning (fresh plus bounded repair), D001-
+D004 implementation, D005 test-builder retries, D005 recursive task splitting,
+the D005-A probe handoff, and the D005-B test-builder child. It then reported
+one stable compact `parent-finalize-failed` blocker and exited rather than
+replaying work. This is the required multi-action generic-driver proof.
+
+That run exposed a real split-contract defect: D005-B owned
+`.opencode-v2/TEST_CHECKS.json` but had been allowed to weaken the parent's
+canonical `.opencode-v2/bin/run-checks` Verify to a JSON-presence check. The
+child passed while the parent correctly rejected unknown manifest fields.
+Split validation now requires any child owning the canonical final-test manifest
+under a `run-checks` parent to preserve that exact Verify command. A focused
+regression covers both rejection of the weak Verify and acceptance of the exact
+canonical Verify.
+
+Final regression after the fix: control-plane 139 PASS, state-machine 88 PASS,
+Stage-A stabilization 45 PASS, historical New51 replay 6 PASS, transport-root
+5 PASS, and tick/driver/preflight selftests PASS.

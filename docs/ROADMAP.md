@@ -96,12 +96,12 @@ Only after D passes:
 - [x] never use retained D002 as a disposable test target
 
 ## F. Continuous/generic operation
-- [ ] prove generic driver advances across multiple action types without manual orchestration
+- [x] prove generic driver advances across multiple action types without manual orchestration
 - [x] prove restart/resume from durable state
 - [x] prove no duplicate semantic dispatch after ambiguous transport outcomes
 - [x] prove preflight cannot be bypassed by normal launcher/driver entrypoints
 - [x] validate concise terminal/block reporting
-- [ ] final static/component/integration suite
+- [x] final static/component/integration suite
 - [ ] update project memory to final proven state
 
 ## G. Deferred performance work — outside correctness stabilization

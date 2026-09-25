@@ -415,3 +415,12 @@ Retained project: `/home/bking/AI/a2-controller-live-20260920-161347`
 - State-machine regression suite passes 85 tests with the new preservation test.
 - Stage-A stabilization now includes explicit regressions proving normal launcher/tick/driver entrypoints require consolidated preflight proof and that a failed proof prevents tick execution.
 - Driver terminal/block output is behavior-tested: identical stable blocked state prints once and exits 2 after three observations; complete prints one compact event and exits 0. Stage-A stabilization passes 44 tests.
+
+## Generic driver multi-action proof + D005 final-test split defect — 2026-09-25
+
+- Fresh project: `/home/bking/AI/a2-e2e/20260925-125300-generic-driver/project`.
+- One generic launcher/driver sequence advanced acceptance-planner -> implementation-planner fresh -> implementation-planner repair -> D001-D004 implementation -> D005 test-builder retries -> D005 task-splitter -> D005-A probe-builder -> D005-B test-builder, without manual action selection.
+- The stable terminal projection was one compact `parent-finalize-failed` blocker for D005.
+- Exact evidence showed D005-B's weak child Verify passed a manifest containing unsupported top-level fields, while the inherited canonical `.opencode-v2/bin/run-checks` correctly failed with `manifest has unknown field(s): acceptance_ids, deliverable, protocol`.
+- Split validation now forbids weakening the canonical final-test Verify when a split child owns `.opencode-v2/TEST_CHECKS.json`.
+- Full focused regression after the change: control-plane 139 PASS; state-machine 88 PASS; Stage-A stabilization 45 PASS; historical replay 6 PASS; transport-root 5 PASS; tick/driver/preflight selftests PASS.

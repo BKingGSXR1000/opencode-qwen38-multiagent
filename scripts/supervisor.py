@@ -2006,6 +2006,16 @@ def validate_split_proposal(parent, proposals, request=None):
             contract_errors=validate_leaf_contract(role, owned_list, proposal["verify_command"])
             if contract_errors:
                 raise ValueError("; ".join(contract_errors))
+            parent_verify=str(leaf.get("verify_command") or "").strip()
+            if (
+                parent_verify==RUN_CHECKS_COMMAND
+                and ".opencode-v2/TEST_CHECKS.json" in owned
+                and proposal["verify_command"].strip()!=RUN_CHECKS_COMMAND
+            ):
+                raise ValueError(
+                    "final-test manifest child must preserve exact parent Verify "
+                    + RUN_CHECKS_COMMAND
+                )
 
         read_only_role=role in READ_ONLY_SPLIT_ROLES
         if handoff_only or read_only_role:
