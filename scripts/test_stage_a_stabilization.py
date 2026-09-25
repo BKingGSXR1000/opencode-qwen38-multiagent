@@ -240,6 +240,16 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
         )
         self.assertIn("the runtime wraps bash automatically",prompt)
 
+    def test_split_child_prompt_applies_parent_correction_before_child_correction(self):
+        prompt=supervisor.implementation_prompt("D010-B")
+        self.assertIn("parent_supervisor_execution_correction",prompt)
+        self.assertIn("supervisor_execution_correction",prompt)
+        self.assertIn("child-specific correction",prompt)
+        self.assertIn(
+            "Neither correction may change ownership, Verify, dependencies",
+            prompt,
+        )
+
     def test_progress_handoff_prompt_requires_symlink_following_discovery(self):
         manifest={
             "leaves":{
