@@ -303,6 +303,10 @@ def build_leaf_contexts(project, manifest):
             "current_progress": current_progress,
             "supervisor_execution_correction":
                 _execution_contract_correction(project,did),
+            "parent_supervisor_execution_correction":(
+                _execution_contract_correction(project,parent_id)
+                if parent_id else {}
+            ),
         }
 
         if ".opencode-v2/TEST_CHECKS.json" in packet["owned_artifact_paths"]:

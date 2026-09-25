@@ -240,6 +240,28 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
         )
         self.assertIn("the runtime wraps bash automatically",prompt)
 
+    def test_progress_handoff_prompt_requires_symlink_following_discovery(self):
+        manifest={
+            "leaves":{
+                "D010-A":{
+                    "owned_artifact_paths":[],
+                    "owned_artifacts":"none",
+                    "complexity":"M",
+                    "split_handoff_only":True,
+                }
+            }
+        }
+        with mock.patch.object(supervisor,"load_manifest",return_value=manifest):
+            prompt=supervisor.implementation_runtime_prompt(
+                "D010-A","probe-builder"
+            )
+        self.assertIn("SANDBOX DISCOVERY RULE",prompt)
+        self.assertIn("find -L",prompt)
+        self.assertIn(
+            "recursive find/glob that does not follow symlinks is NOT evidence",
+            prompt,
+        )
+
     def test_runtime_prompt_requires_small_parseable_first_write(self):
         manifest={
             "leaves":{

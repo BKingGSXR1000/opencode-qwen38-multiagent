@@ -1175,6 +1175,45 @@ class ExternalExecutionContractRecoveryTests(unittest.TestCase):
             data["deliverables"]["D001"].get("operator_retry_attempts")
         )
 
+    def test_split_child_projects_parent_execution_correction(self):
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ):
+            self.assertEqual(
+                supervisor.recover_external_execution_contract(
+                    "D001",str(self.correction)
+                ),
+                (True,"recovered"),
+            )
+
+        import control_query_views
+        manifest=json.loads(
+            (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").read_text()
+        )
+        child=dict(self.leaf)
+        child.update({
+            "id":"D001-A",
+            "parent":"D001",
+            "owned_artifacts":"none",
+            "owned_artifact_paths":[],
+            "split_handoff_only":True,
+            "split_handoff_source":"",
+            "split_reads_existing":["owned.txt"],
+            "split_creates_or_updates":[],
+        })
+        manifest["leaves"]["D001-A"]=child
+
+        packet=control_query_views.build_leaf_contexts(
+            self.project,manifest
+        )["D001-A"]
+        self.assertEqual(packet["supervisor_execution_correction"],{})
+        inherited=packet["parent_supervisor_execution_correction"]
+        self.assertEqual(inherited["correction"],self.correction_text)
+        self.assertEqual(
+            inherited["authoritative_sources"],
+            ["https://ssd-api.jpl.nasa.gov/doc/horizons.html"],
+        )
+
     def test_recovery_is_bounded_and_requires_external_policy(self):
         with mock.patch.object(
             supervisor,"v1_session_status_snapshot",return_value={}

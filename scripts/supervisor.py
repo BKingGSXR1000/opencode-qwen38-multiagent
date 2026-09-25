@@ -669,6 +669,11 @@ def implementation_runtime_prompt(did,agent):
             "mechanical guard denies a second consecutive discovery with "
             "PROGRESS_CHECKPOINT_REQUIRED but keeps the session alive so you can checkpoint. "
             "A failed query is evidence and must be checkpointed.\n"
+            "SANDBOX DISCOVERY RULE: dependency directories in the worker view may be symlinks "
+            "into the read-only lower tree. A recursive find/glob that does not follow symlinks "
+            "is NOT evidence that dependency files are absent. Before declaring a named source "
+            "tree or fixture absent, read the named path directly or use symlink-following "
+            "discovery such as find -L.\n"
             "When sufficient, write exact HANDOFF_READY: true, run the exact Verify command, "
             "persist the result, and return. Temporary files do not count."
         )
