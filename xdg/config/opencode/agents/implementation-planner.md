@@ -281,6 +281,9 @@ or `systemctl` remediation.
 `verify_command` is executable evidence, not semantic authority.
 
 - It must fail closed.
+- Every `verify_command` must be exactly one physical line with no embedded
+  newline. Keep shell/Python checks compact; do not format a command as
+  multiline source text.
 - Never use `true`, `:`, cosmetic echo, or `|| true`.
 - Numeric bounds/enums/units must come from ACCEPTANCE, reference foundation,
   a documented format, or a preceding probe contract.

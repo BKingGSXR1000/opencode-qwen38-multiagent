@@ -30,6 +30,16 @@ class LauncherReadinessTimeoutTests(unittest.TestCase):
         self.assertIn('http_status(){', text)
 
 
+class PlannerContractTests(unittest.TestCase):
+    def test_verify_command_is_explicitly_single_line(self):
+        role = (
+            Path(__file__).resolve().parent.parent
+            / "xdg/config/opencode/agents/implementation-planner.md"
+        ).read_text()
+        self.assertIn("exactly one physical line", role)
+        self.assertIn("no embedded\n  newline", role)
+
+
 class ExactProjectPathPermissionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
