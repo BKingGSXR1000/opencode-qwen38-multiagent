@@ -351,14 +351,13 @@ def _strip_dir_marker(path: str):
 
 
 def path_is_owned(rel: str, declared):
+    """Match canonical ownership roots using supervisor containment semantics."""
     rel=rel.rstrip("/")
     for raw in declared:
         base=_strip_dir_marker(raw).rstrip("/")
         if not base:
             continue
-        if rel==base:
-            return True
-        if raw.endswith("/") and rel.startswith(base+"/"):
+        if rel==base or rel.startswith(base+"/"):
             return True
     return False
 
@@ -1483,6 +1482,17 @@ def selftest(require_bwrap=False):
             raise AssertionError("unowned edit was allowed")
         except SandboxError:
             pass
+
+        # Canonical ownership roots use path-prefix containment consistently
+        # with supervisor._path_inside_any(), even without a trailing slash.
+        assert path_is_owned(
+            "reference/fixtures/epoch-0001.json",
+            ["reference/fixtures"],
+        )
+        assert not path_is_owned(
+            "reference/fixtures-sibling/epoch-0001.json",
+            ["reference/fixtures"],
+        )
 
         (project/"alias-target").mkdir()
         (project/"alias").symlink_to(project/"alias-target",target_is_directory=True)
