@@ -1229,6 +1229,122 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
             abort.assert_called_once()
 
 
+class OwnershipPrefixFirewallRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        self.work=self.ctrl/"work"
+        self.work.mkdir(parents=True)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+        self.sid="ses-prefix-denial"
+        self.verify="test -s reference/reference_fixtures_manifest.json"
+        self.leaf={
+            "id":"D001","name":"fixtures","outcome":"write fixture directory",
+            "owned_artifacts":"`reference/fixtures`, `reference/reference_fixtures_manifest.json`",
+            "owned_artifact_paths":[
+                "reference/fixtures",
+                "reference/reference_fixtures_manifest.json",
+            ],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":self.verify,"role":"core-builder",
+            "done_when":"fixture files exist","acceptance_ids":["A001"],
+            "parallel":"none","split_children":[],"complexity":"M",
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.leaf},
+        }))
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{"D001":{
+                "automatic_limit":2,
+                "count":1,
+                "sessions":[self.sid],
+                "failure_history":[{
+                    "attempt":1,
+                    "classification":"genuine",
+                    "reason":"verify-failed-1",
+                    "session":self.sid,
+                    "source":"supervisor",
+                }],
+            }},
+        }))
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"",
+        })()
+        supervisor.persist_supervisor_verify_evidence(
+            "D001",self.sid,self.verify,checked,"verify-failed-1"
+        )
+        self.violation=supervisor.worker_sandbox_violation_path(
+            self.project,"D001",self.sid
+        )
+        self.violation.parent.mkdir(parents=True,exist_ok=True)
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def write_violation(self,path):
+        self.violation.write_text(json.dumps({
+            "agent":"core-builder",
+            "attempt":1,
+            "deliverable":"D001",
+            "kind":"direct-tool-outside-ownership",
+            "session":self.sid,
+            "detail":{
+                "tool":"write",
+                "path":path,
+                "owned":[
+                    "reference/fixtures",
+                    "reference/reference_fixtures_manifest.json",
+                ],
+            },
+        })+"\n")
+
+    def test_reclassifies_canonical_owned_descendant_denial(self):
+        denied="reference/fixtures/epoch-0001.json"
+        self.write_violation(denied)
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ):
+            self.assertEqual(
+                supervisor.recover_ownership_prefix_firewall_failure("D001"),
+                (True,"recovered"),
+            )
+
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ]["D001"]
+        failure=entry["failure_history"][0]
+        self.assertEqual(failure["classification"],"infrastructure")
+        self.assertEqual(failure["original_reason"],"verify-failed-1")
+        self.assertEqual(
+            failure["reclassified_by"],
+            "runtime-ownership-prefix-firewall-repair",
+        )
+        self.assertEqual(entry["infrastructure_retry_grants"],1)
+        self.assertEqual(
+            entry["ownership_prefix_firewall_recoveries"][0]["denied_paths"],
+            [denied],
+        )
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"],state)
+        self.assertGreater(state["allowed_attempts"],entry["count"])
+
+    def test_refuses_genuinely_unowned_denial(self):
+        self.write_violation("reference/generate_fixtures.py")
+        with mock.patch.object(
+            supervisor,"v1_session_status_snapshot",return_value={}
+        ):
+            self.assertEqual(
+                supervisor.recover_ownership_prefix_firewall_failure("D001"),
+                (False,"ownership-prefix-recovery-no-canonical-owned-denial"),
+            )
+
+
 class ExternalExecutionContractRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()

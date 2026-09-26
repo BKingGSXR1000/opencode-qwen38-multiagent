@@ -30,6 +30,7 @@ from worker_sandbox import (
     commit_verify_outputs as worker_sandbox_commit_verify_outputs,
     session_used_sandbox as worker_session_used_sandbox,
     violation_path as worker_sandbox_violation_path,
+    path_is_owned as worker_sandbox_path_is_owned,
     has_fatal_violation as worker_sandbox_has_fatal_violation,
     has_only_denied_preexecution_violations as
         worker_sandbox_has_only_denied_preexecution_violations,
@@ -4063,6 +4064,194 @@ def recover_context_delivery_failure(did):
         f"{did} attempt={count} truncated={evidence['truncated_context_reads']} "
         f"progress_denials={evidence['progress_read_denials']} "
         f"gate_denials={evidence['write_required_denials']}",
+    )
+    return True,"recovered"
+
+
+
+OWNERSHIP_PREFIX_FIREWALL_RECOVERY_PROTOCOL=(
+    "v2-ownership-prefix-firewall-recovery-v1"
+)
+
+
+def ownership_prefix_firewall_failure_evidence(did,sid):
+    """Return canonical-owned paths historically denied by the worker firewall."""
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict):
+        return []
+    owned=owned_artifact_paths(leaf)
+    if not owned:
+        return []
+    path=worker_sandbox_violation_path(Path(PROJECT),did,sid)
+    if not path.is_file():
+        return []
+    result=[]
+    try:
+        lines=path.read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            row=json.loads(line)
+        except Exception:
+            continue
+        if (
+            not isinstance(row,dict)
+            or row.get("kind")!="direct-tool-outside-ownership"
+            or row.get("session")!=sid
+        ):
+            continue
+        detail=row.get("detail")
+        rel=str(detail.get("path") or "") if isinstance(detail,dict) else ""
+        if (
+            rel
+            and _path_inside_any(rel,owned)
+            and worker_sandbox_path_is_owned(rel,owned)
+        ):
+            result.append(rel)
+    return list(dict.fromkeys(result))
+
+
+def recover_ownership_prefix_firewall_failure(did):
+    """Reclassify one terminal Verify failure caused by the old prefix matcher."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"ownership-prefix-recovery-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"ownership-prefix-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"ownership-prefix-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count or not isinstance(sessions[-1],str)
+                or not sessions[-1] or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"ownership-prefix-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("ownership_prefix_firewall_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"ownership-prefix-recovery-history-invalid"
+            if prior:
+                if any(
+                    isinstance(row,dict)
+                    and int(row.get("attempt") or 0)==count
+                    and row.get("session")==sid
+                    for row in prior
+                ):
+                    return True,"already-recovered"
+                return False,"ownership-prefix-recovery-already-used"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-1"
+            ):
+                return False,"ownership-prefix-recovery-terminal-failure-mismatch"
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"ownership-prefix-recovery-infrastructure-limit"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"ownership-prefix-recovery-session-still-active"
+
+    denied=ownership_prefix_firewall_failure_evidence(did,sid)
+    if not denied:
+        return False,"ownership-prefix-recovery-no-canonical-owned-denial"
+
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")=="verify-failed-1"
+        and int(verify.get("exit_code") or -1)==1
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"ownership-prefix-recovery-verify-evidence-mismatch"
+
+    reason=(
+        "ownership-prefix-firewall false denial "
+        f"canonical_owned_path={denied[0]}"
+    )
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"ownership-prefix-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"ownership-prefix-recovery-ledger-changed"
+            failures=[
+                item for item in (entry.get("failure_history") or [])
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or failures[0].get("classification")!="genuine":
+                return False,"ownership-prefix-recovery-failure-changed"
+
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]=str(failure.get("reason") or "")
+            failure["classification"]="infrastructure"
+            failure["reason"]=reason
+            failure["reclassified_by"]="runtime-ownership-prefix-firewall-repair"
+            entry.setdefault("infrastructure_failures",[]).append({
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "grant":1,
+                "source":"supervisor",
+                "kind":"ownership-prefix-firewall",
+                "session":sid,
+                "evidence":"canonical-owned-descendant-denied",
+                "reason":reason,
+            })
+            entry["infrastructure_retry_grants"]=grants+1
+            entry.setdefault("ownership_prefix_firewall_recoveries",[]).append({
+                "protocol":OWNERSHIP_PREFIX_FIREWALL_RECOVERY_PROTOCOL,
+                "source":"supervisor-ownership-prefix-firewall-repair",
+                "grant":1,
+                "attempt":count,
+                "session":sid,
+                "denied_paths":denied,
+                "verify_result":"verify-failed-1",
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            })
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(projected.get("infrastructure_retry_grants") or 0)!=grants+1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"ownership-prefix-recovery-projected-ledger-invalid"
+            save_attempts(data)
+
+    log(
+        f"OWNERSHIP_PREFIX_FIREWALL_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} path={denied[0]}"
+    )
+    csv(
+        "OWNERSHIP_PREFIX_FIREWALL_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} path={denied[0]}",
     )
     return True,"recovered"
 
@@ -12383,7 +12572,7 @@ def persisted_reconcile_loop():
 def main():
     global PROJECT
     ap=argparse.ArgumentParser(add_help=False)
-    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-false-ownership-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-nested-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
+    ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-false-ownership-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-ownership-prefix-firewall"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-nested-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
@@ -12744,6 +12933,27 @@ def main():
         print(
             f"CONTEXT_DELIVERY_RECOVERY_ALLOW "
             f"deliverable={args.recover_context_delivery_failure} "
+            f"reason={detail}"
+        )
+        return
+    if args.recover_ownership_prefix_firewall:
+        if unknown or not args.project:
+            raise SystemExit(
+                "ownership-prefix firewall recovery requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=recover_ownership_prefix_firewall_failure(
+            args.recover_ownership_prefix_firewall
+        )
+        if not ok:
+            raise SystemExit(
+                f"OWNERSHIP_PREFIX_FIREWALL_RECOVERY_DENY "
+                f"deliverable={args.recover_ownership_prefix_firewall} "
+                f"reason={detail}"
+            )
+        print(
+            f"OWNERSHIP_PREFIX_FIREWALL_RECOVERY_ALLOW "
+            f"deliverable={args.recover_ownership_prefix_firewall} "
             f"reason={detail}"
         )
         return
