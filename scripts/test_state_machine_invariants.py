@@ -355,6 +355,24 @@ class VersionSkewZeroWorkRecoveryTests(unittest.TestCase):
             (False,"version-skew-recovery-meaningful-execution-present"),
         )
 
+    def test_infrastructure_abort_uses_attempt_delta_not_preexisting_file(self):
+        (self.project/"owned.txt").write_text("preexisting\n")
+        supervisor.write_execution_baseline("D001",4)
+        self.assertFalse(supervisor.durable_worker_execution("D001",self.sid))
+        with mock.patch.object(supervisor,"ready_info",return_value={}):
+            ok,detail=supervisor.record_infrastructure_abort(
+                self.sid,"D001","zero-work transport failure","child-binding-failure"
+            )
+        self.assertEqual((ok,detail),(True,"granted"))
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ]["D001"]
+        self.assertEqual(
+            entry["infrastructure_failures"][-1]["evidence"],
+            "no-owned-artifact-or-progress",
+        )
+        self.assertTrue(control_state.attempt_state(entry)["valid"])
+
     def test_infrastructure_abort_repairs_preclaimed_successor_race(self):
         reason="child_compaction count=2; limit=1"
         entry={
@@ -499,6 +517,31 @@ class V2612OperatorRetryCompatibilityTests(unittest.TestCase):
         self.assertTrue(state["valid"],state)
         self.assertEqual(state["operator_grants_remaining"],1)
         self.assertEqual(state["operator_grants_used"],0)
+        self.assertEqual(state["allowed_attempts"],6)
+
+    def test_refunded_operator_abort_failure_row_does_not_require_supervisor_grant(self):
+        entry=self.entry()
+        entry["failure_history"].append({
+            "attempt":5,
+            "classification":"infrastructure",
+            "reason":"zero-work operator dispatch transport failure",
+            "session":"s5",
+        })
+        entry["operator_retry_attempts"]=[{
+            "sequence":5,
+            "session":"s5",
+            "state":"infrastructure_abort",
+            "outcome":"infrastructure_abort",
+            "consumes_operator_grant":False,
+            "evidence":"zero-work operator dispatch transport failure",
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:04:00Z",
+        }]
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"],state)
+        self.assertEqual(state["infrastructure_retry_grants"],3)
+        self.assertEqual(state["operator_infrastructure_aborted"],0)
+        self.assertEqual(state["operator_grants_remaining"],1)
         self.assertEqual(state["allowed_attempts"],6)
 
     def test_late_infrastructure_abort_refunds_consumed_operator_record(self):

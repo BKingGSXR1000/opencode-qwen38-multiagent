@@ -8897,12 +8897,10 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
     """
     if not did or ready_info(did): return False,"already-complete-or-unknown"
     leaf=(load_manifest().get("leaves") or {}).get(did)
-    paths=owned_artifact_paths(leaf)
-    progress=Path(PROJECT)/".opencode-v2/work"/f"{did}.progress.md"
-    durable_present=bool(
-        (paths and any((Path(PROJECT)/path).exists() for path in paths))
-        or progress.exists()
-    )
+    # Infrastructure accounting is attempt-scoped. Pre-existing owned files
+    # from earlier attempts are not evidence that THIS cancelled dispatch made
+    # durable progress.
+    durable_present=bool(durable_worker_execution(did,sid))
     race_recovered=False
     timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
     with dispatch_lock:

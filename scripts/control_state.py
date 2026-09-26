@@ -646,7 +646,46 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         1 for item in infrastructure_rows
         if item.get("reclassified_by")=="runtime-context-delivery-repair"
     )
-    infra_history=len(infrastructure_rows)-context_delivery_history
+    # A human-authorized dispatch can later be proven zero-work
+    # infrastructure. Its immutable failure row remains classification=
+    # infrastructure, but the matching operator attempt is refunded and is
+    # therefore NOT a supervisor infrastructure grant. Count only exact,
+    # auditable session/sequence matches here; the complete operator record is
+    # still validated below before this compatibility projection may succeed.
+    operator_abort_pairs=set()
+    raw_operator_attempts=entry.get("operator_retry_attempts") or []
+    if isinstance(raw_operator_attempts,list):
+        for op in raw_operator_attempts:
+            if not isinstance(op,dict):
+                continue
+            try:
+                seq=int(op.get("sequence") or 0)
+            except (TypeError,ValueError):
+                continue
+            session=op.get("session")
+            if (
+                op.get("state")=="infrastructure_abort"
+                and op.get("consumes_operator_grant") is False
+                and op.get("outcome")
+                and op.get("source")=="supervisor"
+                and 1 <= seq <= len(sessions)
+                and isinstance(session,str)
+                and sessions[seq-1]==session
+            ):
+                operator_abort_pairs.add((seq,session))
+    operator_infrastructure_history=0
+    for item in infrastructure_rows:
+        try:
+            pair=(int(item.get("attempt") or 0),item.get("session"))
+        except (TypeError,ValueError):
+            continue
+        if pair in operator_abort_pairs:
+            operator_infrastructure_history+=1
+    infra_history=(
+        len(infrastructure_rows)
+        - context_delivery_history
+        - operator_infrastructure_history
+    )
     genuine_failures = sum(
         1 for item in history
         if (
