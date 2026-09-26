@@ -950,7 +950,76 @@ def _split_failure_is_verification_related(reason):
         "verification-error-",
         "verify-command-unsafe:",
         "verify-mutated-owned-artifacts:",
+        "functional-diagnostic-",
     ))
+
+
+def _functional_split_evidence(did):
+    """Return current supervisor-owned functional failure evidence, if any."""
+    path=(
+        Path(PROJECT)/".opencode-v2"/"work"/
+        f"{did}.functional-diagnostic-evidence.json"
+    )
+    try:
+        item=load_json_object(
+            path,default_missing={},
+            label=f"functional diagnostic evidence {did}",
+        )
+    except (StateCorruptionError,OSError):
+        return {}
+    if (
+        item.get("owner")!="supervisor"
+        or item.get("deliverable")!=did
+        or item.get("executed") is not True
+        or not _split_failure_is_verification_related(item.get("result"))
+    ):
+        return {}
+    return {
+        k:item.get(k)
+        for k in (
+            "protocol","deliverable","contract_source_deliverable","session",
+            "command","executed","exit_code","result","stdout","stderr","error",
+            "timestamp",
+        )
+        if k in item
+    }
+
+
+def _upgrade_split_request_functional_evidence(did,request):
+    """Refresh an existing durable split request after functional-gate policy."""
+    if not isinstance(request,dict):
+        return request,False
+    changed=False
+    evidence=_functional_split_evidence(did)
+    if evidence and request.get("supervisor_functional_diagnostic_evidence")!=evidence:
+        request["supervisor_functional_diagnostic_evidence"]=evidence
+        changed=True
+    policy=request.get("decomposition_policy")
+    if isinstance(policy,dict):
+        allowed=_split_request_verification_recovery_allowed(request)
+        if policy.get("verification_recovery_allowed") != allowed:
+            policy["verification_recovery_allowed"]=allowed
+            changed=True
+        precedence=(
+            "A structurally invalid or unsafe canonical verify_command may use "
+            "v2-split-parent-contract-invalid-v1. A passing canonical Verify plus "
+            "a failed supervisor_functional_diagnostic_evidence record is NOT a "
+            "parent-contract defect: it is a verification-related execution failure "
+            "and must use bounded split recovery."
+        )
+        if policy.get("parent_verify_invalid_precedence")!=precedence:
+            policy["parent_verify_invalid_precedence"]=precedence
+            changed=True
+    evidence_precedence=(
+        "supervisor_verify_evidence is authoritative for the exact canonical "
+        "Verify. supervisor_functional_diagnostic_evidence is authoritative for "
+        "the additional supervisor-owned readiness diagnostic. Either can establish "
+        "a verification-related failure; worker durable_progress cannot override them."
+    )
+    if request.get("evidence_precedence")!=evidence_precedence:
+        request["evidence_precedence"]=evidence_precedence
+        changed=True
+    return request,changed
 
 
 def _split_request_verification_recovery_allowed(request):
@@ -1091,6 +1160,15 @@ def split_request(did):
             and int(existing.get("generation") or 0)==generation
             and existing.get("protocol")==SPLIT_PROPOSAL_PROTOCOL
         ):
+            existing,changed=_upgrade_split_request_functional_evidence(
+                did,existing
+            )
+            if changed:
+                atomic_write_json(path,existing)
+                log(
+                    f"SPLIT_REQUEST_FUNCTIONAL_EVIDENCE_REFRESHED "
+                    f"parent={did} generation={generation}"
+                )
             return True,"split-required"
         raise StateCorruptionError(f"split request {did} conflicts with ledger generation")
 
@@ -1149,10 +1227,12 @@ def split_request(did):
             "authority":"worker-non-authoritative-for-canonical-verify",
         },
         "supervisor_verify_evidence":split_verify_evidence,
+        "supervisor_functional_diagnostic_evidence":_functional_split_evidence(did),
         "evidence_precedence":(
-            "supervisor_verify_evidence is authoritative for whether the exact "
-            "canonical parent Verify ran, its exit code, stdout, and stderr. "
-            "durable_progress is worker-authored and MUST NOT override it."
+            "supervisor_verify_evidence is authoritative for the exact canonical "
+            "Verify. supervisor_functional_diagnostic_evidence is authoritative for "
+            "the additional supervisor-owned readiness diagnostic. Either can establish "
+            "a verification-related failure; worker durable_progress cannot override them."
         ),
         "existing_artifacts":[item for item in parent_owned if (Path(PROJECT)/item).exists()],
         "artifact_inventory":_split_artifact_inventory(parent_owned),
@@ -1167,10 +1247,11 @@ def split_request(did):
                 for item in compact if isinstance(item,dict)
             ),
             "parent_verify_invalid_precedence":(
-                "If supervisor_verify_evidence shows the parent verify_command itself "
-                "is intrinsically invalid, contradictory, or non-verifying, return "
-                "v2-split-parent-contract-invalid-v1. This takes precedence over "
-                "verification_recovery_allowed and writer+tester recovery."
+                "A structurally invalid or unsafe canonical verify_command may use "
+                "v2-split-parent-contract-invalid-v1. A passing canonical Verify plus "
+                "a failed supervisor_functional_diagnostic_evidence record is NOT a "
+                "parent-contract defect: it is a verification-related execution failure "
+                "and must use bounded split recovery."
             ),
             "rule":(
                 "Split must materially reduce executable work: partition owned "
@@ -2484,7 +2565,10 @@ def _request_parent_contract_repair(did, field, reason, request, verify_errors):
 SPLITTER_FALSE_PARENT_INVALID_CONTEXT=(
     "The supervisor independently validated that the parent contract's exact "
     "Verify command is structurally valid. `parent-contract-invalid` is not "
-    "available for this claim. Missing required artifacts are unfinished "
+    "available for this claim. A supervisor_functional_diagnostic_evidence "
+    "failure is authoritative verification-related evidence even when the "
+    "canonical Verify itself passed; recover that failed functional dimension "
+    "through the bounded split. Missing required artifacts are unfinished "
     "failing work and may be assigned to split children. Emit a valid bare "
     "split proposal under the existing schema only."
 )
@@ -2922,8 +3006,15 @@ def recover_exhausted_splitter_deterministic_handoff(parent):
         and str(row.get("command") or "").strip()==verify
         and _split_failure_is_verification_related(row.get("result"))
     ]
-    if not evidence:
-        return False,"deterministic-fallback-exact-verify-evidence-missing"
+    functional=request.get("supervisor_functional_diagnostic_evidence")
+    if not (
+        isinstance(functional,dict)
+        and functional.get("executed") is True
+        and _split_failure_is_verification_related(functional.get("result"))
+    ):
+        functional=_functional_split_evidence(parent)
+    if not evidence and not functional:
+        return False,"deterministic-fallback-verification-evidence-missing"
 
     existing=[rel for rel in owned if (Path(PROJECT)/rel).exists()]
     proposals=[

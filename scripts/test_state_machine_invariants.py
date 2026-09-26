@@ -2353,6 +2353,55 @@ class SplitStateMachineTests(unittest.TestCase):
         self.assertEqual(evidence["result"],"verify-failed-1")
         self.assertEqual(evidence["stderr"],"missing b.txt\n")
 
+    def test_functional_diagnostic_failure_enables_split_recovery_and_refresh(self):
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"runtime json failed\n"
+        })()
+        supervisor.persist_functional_diagnostic_evidence(
+            "D001","s2",
+            "python3 reference.py sample",
+            checked,
+            "functional-diagnostic-verify-failed-1",
+        )
+        self.assertEqual(
+            supervisor.record_leaf_failure(
+                "D001","functional-diagnostic-verify-failed-1","genuine"
+            ),
+            (True,"split-required"),
+        )
+        path=self.work/"D001.split-request.json"
+        req=json.loads(path.read_text())
+        self.assertTrue(
+            req["decomposition_policy"]["verification_recovery_allowed"]
+        )
+        self.assertEqual(
+            req["supervisor_functional_diagnostic_evidence"]["result"],
+            "functional-diagnostic-verify-failed-1",
+        )
+
+        # Simulate a request materialized by the pre-functional policy, then
+        # prove restart reconciliation refreshes it from supervisor evidence.
+        req["decomposition_policy"]["verification_recovery_allowed"]=False
+        req.pop("supervisor_functional_diagnostic_evidence",None)
+        req["evidence_precedence"]="legacy"
+        path.write_text(json.dumps(req))
+        self.assertEqual(
+            supervisor.split_request("D001"),
+            (True,"split-required"),
+        )
+        refreshed=json.loads(path.read_text())
+        self.assertTrue(
+            refreshed["decomposition_policy"]["verification_recovery_allowed"]
+        )
+        self.assertEqual(
+            refreshed["supervisor_functional_diagnostic_evidence"]["session"],
+            "s2",
+        )
+        self.assertIn(
+            "failed supervisor_functional_diagnostic_evidence",
+            refreshed["decomposition_policy"]["parent_verify_invalid_precedence"],
+        )
+
     def test_final_test_split_writer_cannot_weaken_run_checks_verify(self):
         self.parent.update({
             "owned_artifacts":"`.opencode-v2/TEST_CHECKS.json`",
@@ -2474,6 +2523,46 @@ class SplitStateMachineTests(unittest.TestCase):
             self.parent["verify_command"],
         )
         self.assertEqual(leaves["D001-B"]["split_handoff_source"],"D001-A")
+
+    def test_deterministic_splitter_fallback_accepts_functional_failure(self):
+        checked=type("Checked",(),{
+            "returncode":1,"stdout":"","stderr":"runtime json failed\n"
+        })()
+        supervisor.persist_functional_diagnostic_evidence(
+            "D001","s2",
+            "python3 reference.py sample",
+            checked,
+            "functional-diagnostic-verify-failed-1",
+        )
+        self.assertEqual(
+            supervisor.record_leaf_failure(
+                "D001","functional-diagnostic-verify-failed-1","genuine"
+            ),
+            (True,"split-required"),
+        )
+        request=json.loads((self.work/"D001.split-request.json").read_text())
+        self.assertEqual(request["supervisor_verify_evidence"],[])
+        self.assertEqual(
+            request["supervisor_functional_diagnostic_evidence"]["result"],
+            "functional-diagnostic-verify-failed-1",
+        )
+        supervisor.save_split_status(
+            "D001","split-validation-failed",
+            claim_count=supervisor.MAX_SPLITTER_ATTEMPTS,
+            proposal_failures=3,
+            corrective_turn_count=1,
+            corrective_dispatch_state="native-child-completed",
+        )
+        self.assertEqual(
+            supervisor.recover_exhausted_splitter_deterministic_handoff("D001"),
+            (True,"accepted"),
+        )
+        leaves=supervisor.load_manifest()["leaves"]
+        self.assertTrue(leaves["D001-A"]["split_handoff_only"])
+        self.assertEqual(
+            leaves["D001-B"]["owned_artifact_paths"],
+            self.parent["owned_artifact_paths"],
+        )
 
     def test_deterministic_splitter_fallback_requires_completed_corrective(self):
         checked=type("Checked",(),{"returncode":1,"stdout":"","stderr":""})()
