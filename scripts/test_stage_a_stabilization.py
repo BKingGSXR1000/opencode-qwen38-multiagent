@@ -292,7 +292,10 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
         self.assertIn("repair it with SMALL TARGETED EDITS",prompt)
         self.assertIn("do not replace the whole file with one large write",prompt)
         self.assertIn("continue with bounded edits rather than monolithic",prompt)
-        self.assertIn("avoids malformed tool JSON from oversized content",prompt)
+        self.assertIn("bounded edits rather than monolithic rewrites",prompt)
+        self.assertLessEqual(
+            len(prompt),supervisor.MAX_IMPLEMENTATION_PROMPT_CHARS
+        )
 
 
 class WorkerSandboxPythonSideEffectTests(unittest.TestCase):

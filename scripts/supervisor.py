@@ -629,12 +629,9 @@ def _next_ordinal_word(value):
 def verify_reporting_rule():
     return (
         "\n\nEXACT VERIFY REPORTING:\n"
-        "Only report or write `exact Verify passed` when you ran the context packet's "
-        "verify_command UNCHANGED and that exact command exited 0. Any modified, "
-        "equivalent, diagnostic, or smoke check must be labeled `noncanonical check`; "
-        "never claim it proves the canonical Verify. Run verification commands directly; "
-        "do not create helper scripts, temporary files, or wrapper files outside your owned "
-        "artifacts. Supervisor Verify evidence is authoritative."
+        "Say `exact Verify passed` only when the packet's verify_command ran UNCHANGED "
+        "and exited 0. Label every other check `noncanonical check`. Run Verify directly; "
+        "no helper/temp/wrapper files outside owned artifacts. Supervisor evidence wins."
     )
 
 
@@ -689,28 +686,19 @@ def implementation_runtime_prompt(did,agent):
     if agent in IMPLEMENTATION_AGENTS and owned:
         implementer_direct_write=(
             "\n\nIMPLEMENTER DIRECT-WRITE ORDER — EXACT:\n"
-            "1. Read the authoritative context packet exactly once.\n"
-            "2. BEFORE the first write, you may do ONLY the bounded reads explicitly required "
-            "to preserve existing state: read the named split_handoff_source progress file once "
-            "when the packet names one, and read each existing owned artifact at most once. "
-            "Batch those reads in one tool-bearing response when possible. Do not explore the "
-            "plan, repository, caches, unrelated dependencies, or runtime state.\n"
-            "3. After those bounded reads, your NEXT tool-bearing response MUST write or edit "
-            "an owned project artifact. Start with a SMALL, parseable, contract-shaped artifact "
-            "rather than trying to emit the full implementation in one large tool call. Keep "
-            "the first write concise (prefer a minimal executable/exportable skeleton with no "
-            "long prose/comments). If an owned artifact already exists and is nontrivial, repair "
-            "it with SMALL TARGETED EDITS; do not replace the whole file with one large write. "
-            "After any successful write, continue with bounded edits rather than monolithic "
-            "rewrites. This avoids malformed tool JSON from oversized content. Missing evidence is a value "
-            "to record or validate after the artifact exists, not permission for unbounded "
-            "discovery.\n"
-            "4. After the first owned-artifact change, inspect only direct dependencies needed "
-            "to complete it, run the exact Verify command, and repair only owned artifacts.\n"
-            "5. Call the bash tool with ONLY the intended shell command. Never invoke "
-            "worker_sandbox.py, run-bash, bubblewrap, or any sandbox wrapper yourself; "
-            "the runtime wraps bash automatically.\n"
-            "The Early Write Gate below is a ceiling, not a target."
+            "1. Read the context packet exactly once.\n"
+            "2. Before first write, read only the named split_handoff_source once and each "
+            "existing owned artifact once; batch them. No plan/repo/cache/runtime exploration.\n"
+            "3. NEXT tool-bearing response MUST write/edit an owned artifact. Start with a "
+            "SMALL, parseable, contract-shaped artifact (prefer a minimal executable/exportable "
+            "skeleton). For an existing nontrivial file, repair it with SMALL TARGETED EDITS; "
+            "do not replace the whole file with one large write. After success, continue with "
+            "bounded edits rather than monolithic rewrites. Missing evidence is not permission "
+            "for extra discovery.\n"
+            "4. After first change, inspect only direct dependencies, run exact Verify, and "
+            "repair only owned artifacts.\n"
+            "5. Bash gets only the intended command. Never invoke worker_sandbox.py, run-bash, "
+            "bubblewrap, or any sandbox wrapper; the runtime wraps bash automatically."
         )
         base=base+implementer_direct_write
 
@@ -734,13 +722,10 @@ def implementation_runtime_prompt(did,agent):
         deadline=early_write_completed_turn_limit(leaf)
         gate=(
             "\n\nEARLY WRITE GATE — EXACT:\n"
-            f"Use the first {deadline} completed tool-bearing turns for bounded inspection. "
-            f"If no owned artifact differs at the end of turn {deadline}, the NEXT tool-bearing "
-            "response is WRITE-ONLY: it MUST create or update an owned project artifact. "
-            "No additional read/search/web/discovery call is allowed in that state. The only "
-            "alternative is one exact progress-file write when the owned artifact is already "
-            "correct and you are finalizing the handoff. A non-writing tool in WRITE-ONLY "
-            "state causes deterministic session retirement."
+            f"By completed tool turn {deadline}, if no owned artifact differs, the NEXT "
+            "tool-bearing response is WRITE-ONLY and MUST change an owned artifact. No "
+            "read/search/web/discovery then. Only exception: exact progress-file write when "
+            "the owned artifact is already correct. Any other tool retires the session."
         )
         return base+gate+verify_reporting_rule()
 
