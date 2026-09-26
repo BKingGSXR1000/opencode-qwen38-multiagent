@@ -1897,6 +1897,40 @@ class VerificationSemanticsTests(unittest.TestCase):
         )
         self.assertEqual(evidence["result"],"functional-verified")
 
+    def test_split_writer_inherits_parent_functional_diagnostic(self):
+        self.leaves["D003"]={
+            "id":"D003","name":"parent",
+            "owned_artifacts":"`a.txt`","owned_artifact_paths":["a.txt"],
+            "launch_deps":[],"contract_deps":[],"verify_deps":[],
+            "verify_command":"test -f a.txt","role":"implementer",
+            "done_when":"parent functional output is valid",
+            "acceptance_ids":["A001"],"parallel":"none",
+            "split_children":["D002","D001"],
+        }
+        self.leaves["D001"]["parent"]="D003"
+        self.leaves["D001"]["split_handoff_source"]="D002"
+        self._write_manifest()
+        self._functional_correction(
+            "D003",
+            "printf ''",
+            {
+                "required_tokens":["Io","Europa","Ganymede","Callisto"],
+                "required_key_substring_groups":[
+                    ["offset","arcsec"],["order","side"],["occlu"],["shadow"],
+                ],
+            },
+        )
+        supervisor.write_ownership_baseline("D001")
+        ok,detail=supervisor.post_session_finalize("D001",sid="s1")
+        self.assertFalse(ok)
+        self.assertEqual(detail,"functional-diagnostic-empty-json-output")
+        self.assertFalse(control_state.ready_info(self.project,"D001"))
+        evidence=json.loads(
+            (self.work/"D001.functional-diagnostic-evidence.json").read_text()
+        )
+        self.assertEqual(evidence["contract_source_deliverable"],"D003")
+        self.assertEqual(evidence["result"],detail)
+
     def test_verify_evidence_preserves_fail_then_pass_for_same_attempt_session(self):
         command=self.leaves["D001"]["verify_command"]
         failed=type("Checked",(),{"returncode":1,"stdout":"","stderr":"first failure\n"})()

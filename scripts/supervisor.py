@@ -4752,6 +4752,229 @@ def recover_nested_handoff_writer_verify(parent):
     return True,"nested-writer-contract-replacement-ready"
 
 
+SPLIT_WRITER_FUNCTIONAL_GATE_RECOVERY_PROTOCOL=(
+    "v2-split-writer-functional-gate-recovery-v1"
+)
+
+
+def recover_split_writer_functional_gate(parent):
+    """Reopen one READY split writer after parent functional finalization fails.
+
+    This is a finalization-contract repair, not a semantic retry override. The
+    writer must still have an ordinary unused attempt. Historical READY and
+    parent failure evidence are preserved, the writer receives an exact
+    supervisor correction plus the parent's functional diagnostic, and only
+    then is its READY marker revoked for one normal replacement attempt.
+    """
+    if not valid_deliverable_id(parent):
+        return False,"invalid-parent"
+
+    project=Path(PROJECT)
+    work=project/".opencode-v2"/"work"
+
+    with splitter_state_lock(parent):
+        with dispatch_lock:
+            with attempt_lock():
+                status=load_split_status(parent)
+                if status.get("state")!="parent-finalize-failed":
+                    return False,"functional-gate-recovery-requires-parent-finalize-failed"
+                if int(status.get("parent_finalize_failures") or 0)<MAX_SPLIT_PARENT_FINALIZE_FAILURES:
+                    return False,"functional-gate-recovery-parent-finalize-not-exhausted"
+
+                txn=load_split_transaction(parent)
+                if (
+                    txn.get("state")!="committed"
+                    or txn.get("parent_id")!=parent
+                    or not isinstance(txn.get("child_defs"),dict)
+                    or not isinstance(txn.get("children"),list)
+                    or len(txn.get("children") or [])!=2
+                ):
+                    return False,"functional-gate-recovery-transaction-invalid"
+
+                first_id,writer_id=list(txn["children"])
+                child_defs=txn["child_defs"]
+                first=child_defs.get(first_id)
+                writer=child_defs.get(writer_id)
+                if not isinstance(first,dict) or not isinstance(writer,dict):
+                    return False,"functional-gate-recovery-child-definition-missing"
+                if not first.get("split_handoff_only") or first.get("owned_artifact_paths"):
+                    return False,"functional-gate-recovery-first-child-not-handoff"
+                if writer.get("split_handoff_only"):
+                    return False,"functional-gate-recovery-writer-is-handoff"
+                if writer.get("split_handoff_source")!=first_id:
+                    return False,"functional-gate-recovery-handoff-source-mismatch"
+
+                manifest=load_manifest()
+                leaves=manifest.get("leaves") if isinstance(manifest.get("leaves"),dict) else {}
+                parent_leaf=leaves.get(parent)
+                live_first=leaves.get(first_id)
+                live_writer=leaves.get(writer_id)
+                if not all(isinstance(x,dict) for x in (parent_leaf,live_first,live_writer)):
+                    return False,"functional-gate-recovery-live-leaf-missing"
+                if list(parent_leaf.get("split_children") or [])!=[first_id,writer_id]:
+                    return False,"functional-gate-recovery-active-children-mismatch"
+                if live_first!=first or live_writer!=writer:
+                    return False,"functional-gate-recovery-live-child-drift"
+
+                parent_owned=set(owned_artifact_paths(parent_leaf))
+                writer_owned=set(owned_artifact_paths(writer))
+                if not parent_owned or writer_owned!=parent_owned:
+                    return False,"functional-gate-recovery-writer-does-not-own-parent"
+
+                if not ready_info(first_id) or not ready_info(writer_id):
+                    return False,"functional-gate-recovery-children-not-ready"
+
+                contract_source,parent_correction=(
+                    effective_functional_diagnostic_correction(parent)
+                )
+                diagnostic=parent_correction.get("functional_diagnostic")
+                if contract_source!=parent or not isinstance(diagnostic,dict):
+                    return False,"functional-gate-recovery-parent-diagnostic-missing"
+
+                evidence=load_json_object(
+                    functional_diagnostic_evidence_path(parent),
+                    default_missing={},
+                    label=f"functional diagnostic evidence {parent}",
+                )
+                result=str(evidence.get("result") or "")
+                if not result.startswith("functional-diagnostic-"):
+                    return False,"functional-gate-recovery-parent-failure-evidence-mismatch"
+
+                attempts=load_attempts()
+                entries=attempts.get("deliverables")
+                writer_entry=entries.get(writer_id) if isinstance(entries,dict) else None
+                parent_entry=entries.get(parent) if isinstance(entries,dict) else None
+                if not isinstance(writer_entry,dict) or not isinstance(parent_entry,dict):
+                    return False,"functional-gate-recovery-attempt-ledger-missing"
+
+                writer_state=attempt_state(writer_entry)
+                if not writer_state.get("valid"):
+                    return False,"functional-gate-recovery-writer-ledger-invalid"
+                writer_count=int(writer_entry.get("count") or 0)
+                if writer_count<1:
+                    return False,"functional-gate-recovery-writer-attempt-missing"
+                if writer_count>=int(writer_state.get("allowed_attempts") or 0):
+                    return False,"functional-gate-recovery-no-unused-writer-attempt"
+
+                rows=parent_entry.setdefault(
+                    "split_writer_functional_gate_recoveries",[]
+                )
+                if not isinstance(rows,list):
+                    return False,"functional-gate-recovery-history-invalid"
+                if rows:
+                    latest=rows[-1] if isinstance(rows[-1],dict) else {}
+                    if latest.get("state")=="committed":
+                        return False,"functional-gate-recovery-already-used"
+                    return False,"functional-gate-recovery-incomplete-prior-transition"
+
+                ready_path=work/f"{writer_id}.ready"
+                try:
+                    ready_text=ready_path.read_text(errors="replace")
+                except OSError:
+                    return False,"functional-gate-recovery-writer-ready-unreadable"
+
+                command=str(diagnostic.get("command") or "").strip()
+                stderr=str(evidence.get("stderr") or "").strip()
+                correction=(
+                    f"Parent {parent} functional finalization failed after {writer_id} "
+                    f"was marked READY. Current supervisor result: {result}. "
+                    "Treat the predecessor handoff as authoritative for fixture facts and "
+                    "repair the CURRENT owned files, not the historical stub. "
+                    f"Observed stderr: {stderr[:1200] or 'none'}. "
+                    "Run the child canonical Verify unchanged, then run the inherited "
+                    f"functional diagnostic exactly: {command}. It must exit 0 and emit "
+                    "valid JSON satisfying the required moon tokens and offset/order/"
+                    "occlusion/shadow key groups. Do not stop at syntax-only success."
+                )
+                digest=hashlib.sha256(correction.encode("utf-8")).hexdigest()
+                archive=work/f"{writer_id}.ready.functional-gate-recovery-1.archive"
+                if archive.exists():
+                    return False,"functional-gate-recovery-ready-archive-exists"
+
+                row={
+                    "protocol":SPLIT_WRITER_FUNCTIONAL_GATE_RECOVERY_PROTOCOL,
+                    "state":"prepared",
+                    "parent":parent,
+                    "writer":writer_id,
+                    "writer_attempt":writer_count,
+                    "transaction_id":txn.get("transaction_id"),
+                    "parent_failure_result":result,
+                    "correction_sha256":digest,
+                    "ready_archive":str(archive.relative_to(project)),
+                    "prepared_at":time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                    ),
+                }
+                rows.append(row)
+                save_attempts(attempts)
+
+                child_correction={
+                    "owner":"supervisor",
+                    "protocol":"v2-external-execution-contract-correction-v1",
+                    "deliverable":writer_id,
+                    "correction":correction,
+                    "correction_sha256":digest,
+                    "authoritative_sources":list(
+                        parent_correction.get("authoritative_sources") or []
+                    ),
+                    "functional_diagnostic":copy.deepcopy(diagnostic),
+                    "inherited_from_parent":parent,
+                    "timestamp":time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                    ),
+                }
+                atomic_write_json(
+                    execution_contract_correction_path(writer_id),
+                    child_correction,
+                )
+                atomic_write_text(archive,ready_text)
+                ready_path.unlink()
+
+                save_split_status(
+                    parent,"accepted",
+                    generation=int(txn.get("generation") or 1),
+                    children=[first_id,writer_id],
+                    transaction_id=txn.get("transaction_id"),
+                    parent_finalize_failures=0,
+                    parent_finalize_last_result="",
+                    reason="",
+                    functional_gate_recovery={
+                        "protocol":SPLIT_WRITER_FUNCTIONAL_GATE_RECOVERY_PROTOCOL,
+                        "writer":writer_id,
+                        "correction_sha256":digest,
+                    },
+                    lease_until_epoch=0,
+                )
+                _split_parent_finalize_next.pop(parent,None)
+
+                attempts=load_attempts()
+                parent_entry=(attempts.get("deliverables") or {}).get(parent)
+                rows=(
+                    parent_entry.get("split_writer_functional_gate_recoveries")
+                    if isinstance(parent_entry,dict) else None
+                )
+                target=rows[-1] if isinstance(rows,list) and rows else None
+                if not isinstance(target,dict):
+                    raise StateCorruptionError(
+                        f"{parent} functional gate recovery record disappeared"
+                    )
+                target["state"]="committed"
+                target["committed_at"]=time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                )
+                save_attempts(attempts)
+
+    log(
+        f"SPLIT_WRITER_FUNCTIONAL_GATE_RECOVERED parent={parent} "
+        f"writer={writer_id} result={result}"
+    )
+    csv(
+        "SPLIT_WRITER_FUNCTIONAL_GATE_RECOVERED","", "supervisor",
+        f"{parent} writer={writer_id} result={result}",
+    )
+    return True,"writer-functional-repair-ready"
+
+
 LEGACY_HANDOFF_WRITER_VERIFY_UPGRADE_PROTOCOL=(
     "v2-legacy-handoff-writer-verify-upgrade-v1"
 )
@@ -6928,6 +7151,40 @@ def functional_diagnostic_evidence_path(did):
     )
 
 
+def effective_functional_diagnostic_correction(did):
+    """Return the functional contract that must gate this leaf's readiness.
+
+    A split writer can inherit a supervisor-owned parent functional diagnostic
+    when it owns the complete parent artifact set and consumes the preceding
+    progress handoff. This closes the gap where a shallow child Verify could
+    mark the writer READY even though the parent functional contract still
+    failed immediately afterward.
+    """
+    direct=load_supervisor_execution_contract_correction(did)
+    if isinstance(direct.get("functional_diagnostic"),dict):
+        return did,direct
+
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict):
+        return "",{}
+    parent=str(leaf.get("parent") or "")
+    handoff=str(leaf.get("split_handoff_source") or "")
+    owned=set(owned_artifact_paths(leaf))
+    if not parent or not handoff or not owned:
+        return "",{}
+
+    parent_leaf=(load_manifest().get("leaves") or {}).get(parent)
+    if not isinstance(parent_leaf,dict):
+        return "",{}
+    if owned != set(owned_artifact_paths(parent_leaf)):
+        return "",{}
+
+    inherited=load_supervisor_execution_contract_correction(parent)
+    if isinstance(inherited.get("functional_diagnostic"),dict):
+        return parent,inherited
+    return "",{}
+
+
 def _functional_json_tokens(value,keys,tokens):
     if isinstance(value,dict):
         for key,item in value.items():
@@ -6942,11 +7199,14 @@ def _functional_json_tokens(value,keys,tokens):
         tokens.add(value.lower())
 
 
-def persist_functional_diagnostic_evidence(did,sid,command,checked,result,error=""):
+def persist_functional_diagnostic_evidence(
+    did,sid,command,checked,result,error="",contract_source=""
+):
     item={
         "owner":"supervisor",
         "protocol":"v2-functional-diagnostic-evidence-v1",
         "deliverable":did,
+        "contract_source_deliverable":str(contract_source or did),
         "session":str(sid or ""),
         "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
         "command":str(command or "")[:3000],
@@ -6972,7 +7232,7 @@ def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
     It is allowed only when carried by a hash-valid supervisor execution
     correction and must be read-only across project artifacts.
     """
-    correction=load_supervisor_execution_contract_correction(did)
+    contract_source,correction=effective_functional_diagnostic_correction(did)
     diagnostic=correction.get("functional_diagnostic")
     if not isinstance(diagnostic,dict):
         return True,"functional-diagnostic-not-required"
@@ -6990,7 +7250,8 @@ def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
     except (OSError,subprocess.TimeoutExpired) as exc:
         result=f"functional-diagnostic-error-{type(exc).__name__}"
         persist_functional_diagnostic_evidence(
-            did,sid,command,None,result,error=str(exc)
+            did,sid,command,None,result,error=str(exc),
+            contract_source=contract_source,
         )
         return False,result
     after=project_fingerprints()
@@ -7000,11 +7261,17 @@ def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
     )
     if changed:
         result="functional-diagnostic-mutated-project:"+",".join(changed[:4])
-        persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+        persist_functional_diagnostic_evidence(
+            did,sid,command,checked,result,
+            contract_source=contract_source,
+        )
         return False,result
     if detail!="verified":
         result="functional-diagnostic-"+detail
-        persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+        persist_functional_diagnostic_evidence(
+            did,sid,command,checked,result,
+            contract_source=contract_source,
+        )
         return False,result
 
     contract=diagnostic.get("stdout_json")
@@ -7012,14 +7279,18 @@ def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
         raw=str(getattr(checked,"stdout","") or "")
         if not raw.strip():
             result="functional-diagnostic-empty-json-output"
-            persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+            persist_functional_diagnostic_evidence(
+                did,sid,command,checked,result,
+                contract_source=contract_source,
+            )
             return False,result
         try:
             parsed=json.loads(raw)
         except json.JSONDecodeError as exc:
             result="functional-diagnostic-invalid-json-output"
             persist_functional_diagnostic_evidence(
-                did,sid,command,checked,result,error=str(exc)
+                did,sid,command,checked,result,error=str(exc),
+                contract_source=contract_source,
             )
             return False,result
         keys=[]
@@ -7036,7 +7307,10 @@ def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
                 "functional-diagnostic-json-missing-tokens:"+
                 ",".join(missing_tokens[:8])
             )
-            persist_functional_diagnostic_evidence(did,sid,command,checked,result)
+            persist_functional_diagnostic_evidence(
+                did,sid,command,checked,result,
+                contract_source=contract_source,
+            )
             return False,result
         for group in contract.get("required_key_substring_groups",[]):
             if not isinstance(group,list) or not group:
@@ -7050,12 +7324,14 @@ def run_supervisor_functional_diagnostic(did,sid="",runner=subprocess.run):
                     "|".join(choices[:8])
                 )
                 persist_functional_diagnostic_evidence(
-                    did,sid,command,checked,result
+                    did,sid,command,checked,result,
+                    contract_source=contract_source,
                 )
                 return False,result
 
     persist_functional_diagnostic_evidence(
-        did,sid,command,checked,"functional-verified"
+        did,sid,command,checked,"functional-verified",
+        contract_source=contract_source,
     )
     return True,"functional-verified"
 
