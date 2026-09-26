@@ -289,7 +289,9 @@ class DirectOwnedWritePromptTests(unittest.TestCase):
             )
         self.assertIn("Start with a SMALL, parseable, contract-shaped artifact",prompt)
         self.assertIn("minimal executable/exportable skeleton",prompt)
-        self.assertIn("extend it with bounded edits after the write succeeds",prompt)
+        self.assertIn("repair it with SMALL TARGETED EDITS",prompt)
+        self.assertIn("do not replace the whole file with one large write",prompt)
+        self.assertIn("continue with bounded edits rather than monolithic",prompt)
         self.assertIn("avoids malformed tool JSON from oversized content",prompt)
 
 
