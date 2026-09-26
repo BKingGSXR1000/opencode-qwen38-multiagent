@@ -689,19 +689,23 @@ def implementation_runtime_prompt(did,agent):
     if agent in IMPLEMENTATION_AGENTS and owned:
         implementer_direct_write=(
             "\n\nIMPLEMENTER DIRECT-WRITE ORDER — EXACT:\n"
-            "1. Read the authoritative context packet exactly once. If a named owned artifact "
-            "already exists, inspect only that artifact; do not explore the plan, repository, "
-            "or unrelated runtime state before making progress.\n"
-            "2. Your NEXT tool-bearing response MUST write or edit an owned project artifact. "
-            "Start with a SMALL, parseable, contract-shaped artifact rather than trying to emit "
-            "the full implementation in one large tool call. Keep the first write concise "
-            "(prefer a minimal executable/exportable skeleton with no long prose/comments), "
-            "then extend it with bounded edits after the write succeeds. This avoids malformed "
-            "tool JSON from oversized content. Missing evidence is a value to record or validate "
-            "after the artifact exists, not permission for more unbounded discovery.\n"
-            "3. After the first owned-artifact change, inspect only direct dependencies needed "
+            "1. Read the authoritative context packet exactly once.\n"
+            "2. BEFORE the first write, you may do ONLY the bounded reads explicitly required "
+            "to preserve existing state: read the named split_handoff_source progress file once "
+            "when the packet names one, and read each existing owned artifact at most once. "
+            "Batch those reads in one tool-bearing response when possible. Do not explore the "
+            "plan, repository, caches, unrelated dependencies, or runtime state.\n"
+            "3. After those bounded reads, your NEXT tool-bearing response MUST write or edit "
+            "an owned project artifact. Start with a SMALL, parseable, contract-shaped artifact "
+            "rather than trying to emit the full implementation in one large tool call. Keep "
+            "the first write concise (prefer a minimal executable/exportable skeleton with no "
+            "long prose/comments), then extend it with bounded edits after the write succeeds. "
+            "This avoids malformed tool JSON from oversized content. Missing evidence is a value "
+            "to record or validate after the artifact exists, not permission for unbounded "
+            "discovery.\n"
+            "4. After the first owned-artifact change, inspect only direct dependencies needed "
             "to complete it, run the exact Verify command, and repair only owned artifacts.\n"
-            "4. Call the bash tool with ONLY the intended shell command. Never invoke "
+            "5. Call the bash tool with ONLY the intended shell command. Never invoke "
             "worker_sandbox.py, run-bash, bubblewrap, or any sandbox wrapper yourself; "
             "the runtime wraps bash automatically.\n"
             "The Early Write Gate below is a ceiling, not a target."
@@ -8264,8 +8268,8 @@ def write_implementation_progress_read_marker(did,attempt,sid,source):
     return marker
 
 
-def persisted_implementation_progress_read_seen(sid,did):
-    progress_rel=f".opencode-v2/work/{did}.progress.md"
+def persisted_exact_project_read_seen(sid,target_rel):
+    """Whether this session already completed a read of one exact project path."""
     try:
         records=_v1_message_records(sid)
     except Exception:
@@ -8289,9 +8293,34 @@ def persisted_implementation_progress_read_seen(sid,did):
                     tool_args={}
             else:
                 tool_args={}
-            if _tool_targets_exact_project_path("read",tool_args,progress_rel):
+            if _tool_targets_exact_project_path("read",tool_args,target_rel):
                 return True
     return False
+
+
+def persisted_implementation_progress_read_seen(sid,did):
+    return persisted_exact_project_read_seen(
+        sid,f".opencode-v2/work/{did}.progress.md"
+    )
+
+
+def implementation_prewrite_read_targets(leaf):
+    """Exact bounded reads allowed before an implementation worker's first write."""
+    if not isinstance(leaf,dict):
+        return []
+    targets=[]
+    handoff=str(leaf.get("split_handoff_source") or "").strip()
+    if handoff:
+        targets.append(f".opencode-v2/work/{handoff}.progress.md")
+    for rel in owned_artifact_paths(leaf):
+        try:
+            exists=(Path(PROJECT)/rel).is_file()
+        except OSError:
+            exists=False
+        if exists:
+            targets.append(rel)
+    # Preserve order while removing duplicates.
+    return list(dict.fromkeys(targets))
 
 
 def reconcile_implementation_progress_read_marker(sid,did,attempt):
@@ -8309,12 +8338,12 @@ def reconcile_implementation_progress_read_marker(sid,did,attempt):
 
 
 def implementation_direct_write_gate_state(sid,tool="",args=None):
-    """After context inspection, steer implementation leaves to an owned write.
+    """After bounded state-preserving reads, steer implementation leaves to a write.
 
-    A pre-existing progress file may contain supervisor/predecessor state that
-    cannot fit on one JSON context line. Permit exactly one direct read of that
-    exact file before requiring the owned write. All other discovery remains
-    denied.
+    Before the first owned mutation, allow only exact reads needed to preserve
+    already-existing state: this leaf's progress file once, the named split
+    predecessor handoff once, and each existing owned artifact once. All other
+    discovery remains denied until an owned delta exists.
     """
     agent=_session_agent_db(sid)
     if agent not in IMPLEMENTATION_AGENTS or agent in READ_ONLY_SPLIT_ROLES:
@@ -8342,10 +8371,22 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
         turns=persisted_completed_tool_turns(sid)
         return "implementation-progress-read-once",(
             f"implementation_direct_write completed_tool_turns={turns} "
-            f"allowed_once=read {progress_rel} next_tool=direct-owned-artifact-write"
+            f"allowed_once=read {progress_rel} next_tool=bounded-state-read-or-write"
         )
 
     turns=persisted_completed_tool_turns(sid)
+    deadline=early_write_completed_turn_limit(leaf)
+    if turns < deadline and tool=="read":
+        for target_rel in implementation_prewrite_read_targets(leaf):
+            if (
+                _tool_targets_exact_project_path(tool,args,target_rel)
+                and not persisted_exact_project_read_seen(sid,target_rel)
+            ):
+                return "implementation-bounded-read-once",(
+                    f"implementation_direct_write completed_tool_turns={turns} "
+                    f"allowed_once=read {target_rel} next_tool=bounded-state-read-or-write"
+                )
+
     if turns < 1:
         return "allow",f"implementation_direct_write completed_tool_turns={turns} required=1"
     if ready_info(did):
@@ -8411,6 +8452,7 @@ def enforce_early_write_gate(sid,tool="",args=None):
     if implementation_state in {
         "implementation-write-only",
         "implementation-progress-read-once",
+        "implementation-bounded-read-once",
         "satisfied",
     }:
         return implementation_state,implementation_detail

@@ -960,11 +960,89 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
                 self.sid,"read",{"filePath":progress}
             )
         self.assertEqual(state,"implementation-progress-read-once")
-        self.assertIn("next_tool=direct-owned-artifact-write",detail)
+        self.assertIn("next_tool=bounded-state-read-or-write",detail)
         marker=supervisor.implementation_progress_read_marker("D001",7)
         self.assertTrue(marker.is_file())
         payload=json.loads(marker.read_text())
         self.assertEqual(payload["source"],"current-tool-preexecution")
+
+    def test_split_writer_can_read_required_handoff_and_owned_artifact_once(self):
+        self.leaf["split_handoff_source"]="D000"
+        (self.work/"D000.progress.md").write_text("HANDOFF_READY: true\n")
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.leaf},
+        }))
+        prompt="DELIVERABLE: D001\n"
+        common=(
+            mock.patch.object(
+                supervisor,"_session_agent_db",return_value="implementer"
+            ),
+            mock.patch.object(
+                supervisor,"first_user_text_db",return_value=prompt
+            ),
+            mock.patch.object(
+                supervisor,"persisted_completed_tool_turns",return_value=1
+            ),
+            mock.patch.object(
+                supervisor,"attempt_sequence_for_session",return_value=7
+            ),
+            mock.patch.object(
+                supervisor,"_owned_artifact_changed_since_execution_baseline",
+                return_value=(False,"unchanged")
+            ),
+            mock.patch.object(
+                supervisor,"persisted_exact_project_read_seen",
+                return_value=False
+            ),
+        )
+        handoff=str(self.work/"D000.progress.md")
+        owned=str(self.project/"owned.txt")
+        with common[0],common[1],common[2],common[3],common[4],common[5]:
+            state,detail=supervisor.enforce_early_write_gate(
+                self.sid,"read",{"filePath":handoff}
+            )
+            self.assertEqual(state,"implementation-bounded-read-once")
+            self.assertIn("D000.progress.md",detail)
+            state,detail=supervisor.enforce_early_write_gate(
+                self.sid,"read",{"filePath":owned}
+            )
+            self.assertEqual(state,"implementation-bounded-read-once")
+            self.assertIn("owned.txt",detail)
+
+    def test_split_writer_repeated_or_unrelated_read_is_denied(self):
+        self.leaf["split_handoff_source"]="D000"
+        (self.work/"D000.progress.md").write_text("HANDOFF_READY: true\n")
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "protocol":"V2.6.9","project":str(self.project),
+            "recursive_split_protocol":control_state.RECURSIVE_SPLIT_PROTOCOL,
+            "leaves":{"D001":self.leaf},
+        }))
+        prompt="DELIVERABLE: D001\n"
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value=prompt
+        ), mock.patch.object(
+            supervisor,"persisted_completed_tool_turns",return_value=2
+        ), mock.patch.object(
+            supervisor,"attempt_sequence_for_session",return_value=7
+        ), mock.patch.object(
+            supervisor,"_owned_artifact_changed_since_execution_baseline",
+            return_value=(False,"unchanged")
+        ), mock.patch.object(
+            supervisor,"persisted_exact_project_read_seen",return_value=True
+        ):
+            state,detail=supervisor.implementation_direct_write_gate_state(
+                self.sid,"read",{"filePath":str(self.work/"D000.progress.md")}
+            )
+            self.assertEqual(state,"implementation-write-required")
+            self.assertIn("IMPLEMENTATION_WRITE_REQUIRED",detail)
+            state,detail=supervisor.implementation_direct_write_gate_state(
+                self.sid,"read",{"filePath":str(self.project/"unrelated.txt")}
+            )
+            self.assertEqual(state,"implementation-write-required")
 
     def test_completed_progress_read_reconciles_missing_marker(self):
         progress=str(self.work/"D001.progress.md")
@@ -1020,7 +1098,7 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
                 self.sid,"read",{"filePath":progress}
             )
             self.assertEqual(state,"implementation-progress-read-once")
-            self.assertIn("next_tool=direct-owned-artifact-write",detail)
+            self.assertIn("next_tool=bounded-state-read-or-write",detail)
             marker=supervisor.implementation_progress_read_marker("D001",7)
             self.assertTrue(marker.is_file())
             with mock.patch.object(
