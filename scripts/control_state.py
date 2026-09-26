@@ -737,12 +737,23 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         # a sequence already covered by supervisor-only credits. Keep accepting
         # only that harmless exact shape without charging a human grant.
         if sequence<=non_operator_ceiling:
-            if (
-                status!="reserved"
-                or item.get("consumes_operator_grant") is not False
-            ):
-                return state
-            continue
+            # A dispatch can begin under a human operator grant and only later
+            # be proven to have failed because of supervisor/runtime
+            # infrastructure. Once the same sequence is covered by a durable
+            # supervisor credit, preserve the terminal audit record but refund
+            # the human grant. Historical harmless reservations remain valid.
+            if status=="reserved":
+                if item.get("consumes_operator_grant") is not False:
+                    return state
+                continue
+            if status=="infrastructure_abort":
+                if (
+                    item.get("consumes_operator_grant") is not False
+                    or not item.get("outcome")
+                ):
+                    return state
+                continue
+            return state
 
         operator_record_count+=1
         if status=="consumed":

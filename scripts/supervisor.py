@@ -8929,6 +8929,23 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
             if not isinstance(failures,list):
                 return False,"attempt-ledger-invalid"
             if any(isinstance(item,dict) and item.get("session")==sid for item in failures):
+                normalized=normalize_operator_attempt_after_infrastructure_abort(
+                    entry,sid,reason,timestamp
+                )
+                if normalized:
+                    projected=attempt_state(entry)
+                    if not projected.get("valid"):
+                        return False,"attempt-ledger-invalid-after-operator-infrastructure-normalization"
+                    save_attempts(data)
+                    log(
+                        f"OPERATOR_RETRY_INFRASTRUCTURE_NORMALIZED session={sid} "
+                        f"deliverable={did} reason={reason}"
+                    )
+                    csv(
+                        "OPERATOR_RETRY_INFRASTRUCTURE_NORMALIZED",sid,"supervisor",
+                        f"{did} reason={reason}",
+                    )
+                    return True,"already-recorded-operator-normalized"
                 return False,"already-recorded"
 
             state=attempt_state(entry)
@@ -8995,6 +9012,9 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
                     "reason":reason,
                 })
                 trial["infrastructure_retry_grants"]=grants+1
+                normalize_operator_attempt_after_infrastructure_abort(
+                    trial,sid,reason,timestamp
+                )
                 projected=attempt_state(trial)
                 if not (
                     projected.get("valid")
@@ -9018,6 +9038,12 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
                     "reason":reason,
                 })
                 entry["infrastructure_retry_grants"]=state["infrastructure_retry_grants"]+1
+                normalize_operator_attempt_after_infrastructure_abort(
+                    entry,sid,reason,timestamp
+                )
+                projected=attempt_state(entry)
+                if not projected.get("valid"):
+                    return False,"attempt-ledger-invalid-after-infrastructure-grant"
                 save_attempts(data)
     if race_recovered:
         log(
@@ -9649,6 +9675,33 @@ def consume_operator_reservation(sid,did,evidence):
                     csv("OPERATOR_RETRY_CONSUMED",sid,"supervisor",f"{did} evidence={evidence}")
                     return True,"consumed"
     return False,"not-reserved"
+
+def normalize_operator_attempt_after_infrastructure_abort(entry,sid,reason,timestamp=None):
+    """Refund a consumed human retry when this same dispatch is proven infrastructure.
+
+    The immutable attempt/session history is preserved. Only the authority
+    accounting for the matching operator record changes.
+    """
+    if not isinstance(entry,dict):
+        return False
+    timestamp=timestamp or time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    changed=False
+    for item in entry.get("operator_retry_attempts",[]) or []:
+        if not isinstance(item,dict) or item.get("session")!=sid:
+            continue
+        if item.get("state") not in {"reserved","consumed"}:
+            continue
+        item.update({
+            "state":"infrastructure_abort",
+            "outcome":"infrastructure_abort",
+            "consumes_operator_grant":False,
+            "evidence":reason,
+            "resolved_at":timestamp,
+            "normalized_by":"supervisor-infrastructure-authority-v1",
+        })
+        changed=True
+    return changed
+
 
 def release_operator_reservation(sid,did,reason):
     """Release one proven pre-execution abort; block a repeated one.

@@ -483,6 +483,52 @@ class V2612OperatorRetryCompatibilityTests(unittest.TestCase):
         self.assertEqual(state["operator_grants_remaining"],0)
         self.assertTrue(state["operator_authorized_attempt"])
 
+    def test_repaired_infrastructure_ledger_accepts_refunded_operator_abort(self):
+        entry=self.entry()
+        entry["operator_retry_attempts"]=[{
+            "sequence":5,
+            "session":"s5",
+            "state":"infrastructure_abort",
+            "outcome":"infrastructure_abort",
+            "consumes_operator_grant":False,
+            "evidence":"late supervisor infrastructure attribution",
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:04:00Z",
+        }]
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"],state)
+        self.assertEqual(state["operator_grants_remaining"],1)
+        self.assertEqual(state["operator_grants_used"],0)
+        self.assertEqual(state["allowed_attempts"],6)
+
+    def test_late_infrastructure_abort_refunds_consumed_operator_record(self):
+        entry=self.entry()
+        entry["operator_retry_attempts"]=[{
+            "sequence":5,
+            "session":"s5",
+            "state":"consumed",
+            "outcome":"meaningful_execution",
+            "consumes_operator_grant":True,
+            "evidence":"completed-worker-tool-action",
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:04:00Z",
+            "consumed_at":"2026-09-25T00:04:10Z",
+        }]
+        self.assertTrue(
+            supervisor.normalize_operator_attempt_after_infrastructure_abort(
+                entry,"s5","late supervisor infrastructure attribution",
+                "2026-09-25T00:05:00Z",
+            )
+        )
+        row=entry["operator_retry_attempts"][0]
+        self.assertEqual(row["state"],"infrastructure_abort")
+        self.assertEqual(row["outcome"],"infrastructure_abort")
+        self.assertFalse(row["consumes_operator_grant"])
+        self.assertEqual(
+            row["normalized_by"],
+            "supervisor-infrastructure-authority-v1",
+        )
+
     def test_repaired_infrastructure_ledger_rejects_unaudited_operator_override(self):
         entry=self.entry()
         entry["operator_overrides"][0]["source"]="model"
