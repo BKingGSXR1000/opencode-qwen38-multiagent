@@ -676,11 +676,16 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         return state
     if genuine_failures > (
         automatic_limit
+        + operator_grants
         + plan_contract_credits
         + context_delivery_credits
         + external_contract_credits
         + bad_plan_credits
     ):
+        # A human-authorized retry is allowed to fail genuinely. The detailed
+        # operator-attempt validation below still requires every excess
+        # operator-funded sequence to be durably accounted for, so including
+        # the grant here does not weaken the trust boundary.
         return state
     # Every bad-plan row must be backed by the durable supervisor repair
     # resolution; otherwise this compatibility path must stay fail-closed.

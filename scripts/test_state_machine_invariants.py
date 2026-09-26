@@ -529,6 +529,34 @@ class V2612OperatorRetryCompatibilityTests(unittest.TestCase):
             "supervisor-infrastructure-authority-v1",
         )
 
+    def test_operator_authorized_attempt_may_fail_genuinely_without_invalidating_ledger(self):
+        entry=self.entry()
+        entry["failure_history"].append(
+            {"attempt":5,"classification":"genuine","reason":"functional-failed"}
+        )
+        entry["count"]=6
+        entry["sessions"].append("s6")
+        entry["failure_history"].append(
+            {"attempt":6,"classification":"genuine","reason":"functional-failed-again"}
+        )
+        entry["operator_retry_attempts"]=[{
+            "sequence":6,
+            "session":"s6",
+            "state":"consumed",
+            "outcome":"meaningful_execution",
+            "consumes_operator_grant":True,
+            "evidence":"completed-worker-tool-action",
+            "source":"supervisor",
+            "timestamp":"2026-09-25T00:05:00Z",
+            "consumed_at":"2026-09-25T00:05:10Z",
+        }]
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"],state)
+        self.assertEqual(state["allowed_attempts"],6)
+        self.assertEqual(state["count"],6)
+        self.assertEqual(state["operator_grants_used"],1)
+        self.assertEqual(state["operator_grants_remaining"],0)
+
     def test_repaired_infrastructure_ledger_rejects_unaudited_operator_override(self):
         entry=self.entry()
         entry["operator_overrides"][0]["source"]="model"
