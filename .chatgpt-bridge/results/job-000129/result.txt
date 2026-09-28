@@ -1,0 +1,629 @@
+======================================================================
+JOB: job-000129
+JOB_COMMIT: d32c3275e190fd188562164e23aa716ef1597026
+STARTED: 2026-09-28T17:29:36Z
+======================================================================
+
+=== GIT STATUS ===
+ M scripts/control-guard.py
+ M scripts/control_query_views.py
+ M scripts/control_state.py
+ M scripts/deterministic_dispatch.py
+ M scripts/drive-stage-a-run.py
+ M scripts/leaf_contract.py
+ M scripts/run-a2-v11831-server.sh
+ M scripts/run-checks.py
+ M scripts/stage_a_controller.py
+ M scripts/supervisor.py
+ M scripts/test_stage_a_stabilization.py
+ M scripts/test_state_machine_invariants.py
+ M scripts/worker_sandbox.py
+ M xdg/config/opencode/agents/implementation-planner.md
+ M xdg/config/opencode/agents/reference-researcher.md
+ M xdg/config/opencode/plugins/v2-bounded-subagent.js
+?? scripts/control_policy.py
+?? scripts/runtime_contract.py
+
+=== RECOVERY FUNCTION LOCATIONS ===
+scripts/control-guard.py:22:    validate_contract_challenge_reason,
+scripts/control-guard.py:1015:        "runtime-leaf-contract-challenge",
+scripts/control-guard.py:1023:    if repair.get("source")=="runtime-leaf-contract-challenge":
+scripts/control-guard.py:1026:        challenge_errors=validate_contract_challenge_reason(reason)
+scripts/control-guard.py:1029:                "runtime leaf contract challenge invalid: "+challenge_errors[0]
+scripts/control_state.py:1217:    "runtime-leaf-contract-challenge",
+scripts/leaf_contract.py:43:def validate_contract_challenge_reason(reason: str):
+scripts/leaf_contract.py:48:        errors.append("contract challenge reason must be 20..800 chars")
+scripts/leaf_contract.py:52:        errors.append("contract challenge must name canonical Verify")
+scripts/leaf_contract.py:55:            "contract challenge must name Acceptance, Done-when, contract, verify_command, or Axxx authority"
+scripts/leaf_contract.py:58:        errors.append("contract challenge explicitly negates a contract contradiction")
+scripts/leaf_contract.py:60:        errors.append("contract challenge must positively assert a conflict or contradiction")
+scripts/supervisor.py:26:    validate_verify_adequacy, validate_contract_challenge_reason,
+scripts/supervisor.py:703:def max_step_terminal_summary_db(sid):
+scripts/supervisor.py:810:def parse_contract_challenge(text):
+scripts/supervisor.py:815:    return "" if validate_contract_challenge_reason(reason) else reason
+scripts/supervisor.py:5572:        and row.get("recovery_kind")=="write-serialization"
+scripts/supervisor.py:5589:    recovery_kind=(
+scripts/supervisor.py:5672:                "recovery_kind":recovery_kind,
+scripts/supervisor.py:5712:        f"kind={recovery_kind} denied={','.join(denied)} "
+scripts/supervisor.py:5992:def trusted_verify_reverify_visibility_evidence(sid,did,canonical):
+scripts/supervisor.py:6125:def recover_implementation_max_step_continuation(did,diagnostic=""):
+scripts/supervisor.py:6191:                and prior[0].get("recovery_kind")=="initial"
+scripts/supervisor.py:6192:                and prior[1].get("recovery_kind")=="trusted-verify-visibility"
+scripts/supervisor.py:6350:    recovery_kind=(
+scripts/supervisor.py:6373:        f"RECOVERY_KIND: {recovery_kind}\n"
+scripts/supervisor.py:6388:        f"{did}\0{count}\0{sid}\0{recovery_kind}".encode()
+scripts/supervisor.py:6425:                and prior_now[0].get("recovery_kind")=="initial"
+scripts/supervisor.py:6426:                and prior_now[1].get("recovery_kind")=="trusted-verify-visibility"
+scripts/supervisor.py:6430:            if recovery_kind=="initial":
+scripts/supervisor.py:6433:            elif recovery_kind=="legacy-missing-handoff":
+scripts/supervisor.py:6436:            elif recovery_kind in {
+scripts/supervisor.py:6444:            elif recovery_kind=="reverify-single-write-cadence":
+scripts/supervisor.py:6503:                "recovery_kind":recovery_kind,
+scripts/supervisor.py:6525:            if recovery_kind in {
+scripts/supervisor.py:6534:            if recovery_kind=="trusted-verify-visibility":
+scripts/supervisor.py:6559:            if recovery_kind=="latest-verify-clean-tail":
+scripts/supervisor.py:6587:            if recovery_kind=="reverify-single-write-cadence":
+scripts/supervisor.py:6620:                "recovery_kind":recovery_kind,
+scripts/supervisor.py:6640:        f"attempt={count} session={sid} kind={recovery_kind} "
+scripts/supervisor.py:6645:        f"{did} attempt={count} kind={recovery_kind} "
+scripts/supervisor.py:10392:        "recovery_kind":"max-step-after-valid-immutable-report",
+scripts/supervisor.py:10537:def request_leaf_contract_challenge_repair(did,sid,reason):
+scripts/supervisor.py:10540:        return False,"contract-challenge-missing-identity"
+scripts/supervisor.py:10542:    reason_errors=validate_contract_challenge_reason(reason)
+scripts/supervisor.py:10544:        return False,"contract-challenge-reason-invalid:"+reason_errors[0]
+scripts/supervisor.py:10548:        return False,"contract-challenge-leaf-missing"
+scripts/supervisor.py:10552:        return False,"contract-challenge-verify-missing"
+scripts/supervisor.py:10564:            existing.get("source")=="runtime-leaf-contract-challenge"
+scripts/supervisor.py:10569:        return False,"contract-challenge-repair-already-pending"
+scripts/supervisor.py:10582:        "source":"runtime-leaf-contract-challenge",
+scripts/supervisor.py:10587:            "code":"runtime-leaf-contract-challenge",
+scripts/supervisor.py:10602:        Path(PROJECT)/".opencode-v2"/"work"/f"{did}.contract-challenge.json",
+scripts/supervisor.py:10605:            "protocol":"v2-leaf-contract-challenge-v1",
+scripts/supervisor.py:10626:    return True,"contract-challenge-repair"
+scripts/supervisor.py:10629:def reconcile_invalid_leaf_contract_challenge_repair():
+scripts/supervisor.py:10643:    if repair.get("source")!="runtime-leaf-contract-challenge":
+scripts/supervisor.py:10649:    errors=validate_contract_challenge_reason(reason)
+scripts/supervisor.py:10659:        f"{safe_did}.contract-challenge.rejected-{digest[:12]}.json"
+scripts/supervisor.py:10665:            "protocol":"v2-leaf-contract-challenge-rejection-v1",
+scripts/supervisor.py:10673:    challenge_path=ctrl/"work"/f"{safe_did}.contract-challenge.json"
+scripts/supervisor.py:10677:                challenge_path,label=f"{safe_did} contract challenge"
+scripts/supervisor.py:11009:            "recovery_kind":(
+scripts/supervisor.py:12220:    "EARLY_WRITE_IMPLEMENTATION_CONTRACT_CHALLENGE_REQUIRED",
+scripts/supervisor.py:13013:        return "implementation-contract-challenge-required",(
+scripts/supervisor.py:13014:            f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} "
+scripts/supervisor.py:13173:        "implementation-contract-challenge-required",
+scripts/supervisor.py:17777:def handle_leaf_contract_challenge(sid,agent,did):
+scripts/supervisor.py:17779:    reason=parse_contract_challenge(last_assistant_text_db(sid))
+scripts/supervisor.py:17816:    requested,request_detail=request_leaf_contract_challenge_repair(
+scripts/supervisor.py:17864:    if handle_leaf_contract_challenge(sid,agent,did):
+scripts/supervisor.py:18172:            reconcile_invalid_leaf_contract_challenge_repair()
+scripts/test_state_machine_invariants.py:659:    def test_leaf_contract_challenge_requires_a_changed_affected_leaf(self):
+scripts/test_state_machine_invariants.py:672:                "source":"runtime-leaf-contract-challenge",
+scripts/test_state_machine_invariants.py:700:        self.sid="ses-contract-challenge"
+scripts/test_state_machine_invariants.py:740:            supervisor.parse_contract_challenge(
+scripts/test_state_machine_invariants.py:746:            supervisor.parse_contract_challenge("CONTRACT_CHALLENGE: too short"),
+scripts/test_state_machine_invariants.py:750:            supervisor.parse_contract_challenge(
+scripts/test_state_machine_invariants.py:757:            supervisor.parse_contract_challenge(
+scripts/test_state_machine_invariants.py:772:        parsed=supervisor.parse_contract_challenge(text)
+scripts/test_state_machine_invariants.py:775:            leaf_contract.validate_contract_challenge_reason(parsed),[]
+scripts/test_state_machine_invariants.py:784:        parsed=supervisor.parse_contract_challenge(text)
+scripts/test_state_machine_invariants.py:787:            leaf_contract.validate_contract_challenge_reason(parsed),[]
+scripts/test_state_machine_invariants.py:796:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+scripts/test_state_machine_invariants.py:808:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+scripts/test_state_machine_invariants.py:815:        self.assertIn("contract-challenge-reason-invalid",detail)
+scripts/test_state_machine_invariants.py:828:            "source":"runtime-leaf-contract-challenge",
+scripts/test_state_machine_invariants.py:844:        challenge_path=self.work/f"{self.did}.contract-challenge.json"
+scripts/test_state_machine_invariants.py:847:            "protocol":"v2-leaf-contract-challenge-v1",
+scripts/test_state_machine_invariants.py:856:                supervisor.reconcile_invalid_leaf_contract_challenge_repair()
+scripts/test_state_machine_invariants.py:867:                f"{self.did}.contract-challenge.rejected-*.json"
+scripts/test_state_machine_invariants.py:879:            "source":"runtime-leaf-contract-challenge",
+scripts/test_state_machine_invariants.py:885:        self.assertIn("runtime leaf contract challenge invalid",errors[0])
+scripts/test_state_machine_invariants.py:888:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+scripts/test_state_machine_invariants.py:894:        self.assertEqual(detail,"contract-challenge-repair")
+scripts/test_state_machine_invariants.py:898:        self.assertEqual(repair["source"],"runtime-leaf-contract-challenge")
+scripts/test_state_machine_invariants.py:903:        self.assertTrue((self.work/f"{self.did}.contract-challenge.json").exists())
+scripts/test_state_machine_invariants.py:915:            supervisor,"request_leaf_contract_challenge_repair"
+scripts/test_state_machine_invariants.py:918:                supervisor.handle_leaf_contract_challenge(
+scripts/test_state_machine_invariants.py:939:            supervisor,"request_leaf_contract_challenge_repair",
+scripts/test_state_machine_invariants.py:940:            return_value=(True,"contract-challenge-repair")
+scripts/test_state_machine_invariants.py:947:                supervisor.handle_leaf_contract_challenge(
+scripts/test_state_machine_invariants.py:1524:        self.assertEqual(recovery["recovery_kind"],"initial")
+scripts/test_state_machine_invariants.py:1667:            "recovery_kind":"initial",
+scripts/test_state_machine_invariants.py:1707:        self.assertEqual(latest["recovery_kind"],"trusted-verify-visibility")
+scripts/test_state_machine_invariants.py:1733:            "recovery_kind":"initial",
+scripts/test_state_machine_invariants.py:1775:        self.assertEqual(latest["recovery_kind"],"latest-verify-clean-tail")
+scripts/test_state_machine_invariants.py:1794:                "recovery_kind":"initial",
+scripts/test_state_machine_invariants.py:1802:                "recovery_kind":"trusted-verify-visibility",
+scripts/test_state_machine_invariants.py:1845:            latest["recovery_kind"],"reverify-single-write-cadence"
+scripts/test_state_machine_invariants.py:1902:        self.assertEqual(latest["recovery_kind"],"legacy-missing-handoff")
+scripts/test_state_machine_invariants.py:4119:    def test_two_failed_exact_verifies_force_contract_challenge_before_more_tools(self):
+scripts/test_state_machine_invariants.py:4142:            state,"implementation-contract-challenge-required"
+scripts/test_state_machine_invariants.py:4144:        self.assertIn("CONTRACT_CHALLENGE_REQUIRED",detail)
+scripts/test_state_machine_invariants.py:4578:        self.assertEqual(recovery["recovery_kind"],"write-serialization")
+scripts/test_state_machine_invariants.py:4600:            "recovery_kind":"write-serialization",
+scripts/test_state_machine_invariants.py:5835:    def write_runtime_repair(self, *, baseline=None, source="runtime-leaf-contract-challenge"):
+scripts/test_state_machine_invariants.py:5938:            data["infrastructure_recoveries"][0]["recovery_kind"],
+scripts/test_state_machine_invariants.py:11432:            audit["recovery_kind"],
+
+=== RECOVERY FUNCTION BODY ===
+--- scripts/supervisor.py:6105-6384 ---
+6105:        "current_classifier_state":plan_contract_session_exact_verify_state(
+6106:            sid,(load_manifest().get("leaves") or {}).get(did,{})
+6107:        ),
+6108:        "owned_mutation_seen":session_owned_mutation_seen(sid,did),
+6109:        "maximum_steps_reached":bool(max_step_terminal_summary_db(sid)),
+6110:    }
+6111:
+6112:
+6113:def reverify_single_write_cadence_fix_installed():
+6114:    try:
+6115:        source=Path(__file__).read_text(errors="replace")
+6116:    except OSError:
+6117:        return False
+6118:    return (
+6119:        "one_repair_per_verify_cycle=true" in source
+6120:        and "Rerun exact Verify immediately before any additional owned mutation."
+6121:        in source
+6122:    )
+6123:
+6124:
+6125:def recover_implementation_max_step_continuation(did,diagnostic=""):
+6126:    """Rearm a bounded same-attempt continuation stopped by the agent step cap.
+6127:
+6128:    This never adds a retry grant or increments the attempt. A normal attempt
+6129:    gets at most one continuation. Additional same-attempt continuations are
+6130:    permitted only for bounded compatibility defects proven from persisted
+6131:    history: historical missing handoff, stale trusted-Verify classification,
+6132:    or the old multi-edit-after-failed-Verify cadence.
+6133:    """
+6134:    if not valid_deliverable_id(did):
+6135:        return False,"invalid-deliverable"
+6136:    if ready_info(did):
+6137:        return True,"already-complete"
+6138:    diagnostic=str(diagnostic or "").strip()
+6139:    if len(diagnostic)>1500 or "\x00" in diagnostic:
+6140:        return False,"max-step-continuation-diagnostic-invalid"
+6141:
+6142:    leaf=(load_manifest().get("leaves") or {}).get(did)
+6143:    if not isinstance(leaf,dict) or leaf_children(did):
+6144:        return False,"max-step-continuation-requires-executable-leaf"
+6145:    canonical=str(leaf.get("verify_command") or "")
+6146:    if not canonical:
+6147:        return False,"max-step-continuation-missing-verify"
+6148:    progress_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+6149:
+6150:    with dispatch_lock:
+6151:        with attempt_lock():
+6152:            data=load_attempts()
+6153:            entry=(data.get("deliverables") or {}).get(did)
+6154:            if not isinstance(entry,dict):
+6155:                return False,"max-step-continuation-missing-ledger-entry"
+6156:            state=attempt_state(entry)
+6157:            if not state.get("valid"):
+6158:                return False,"max-step-continuation-invalid-ledger"
+6159:            count=int(entry.get("count") or 0)
+6160:            sessions=entry.get("sessions")
+6161:            if (
+6162:                count<1
+6163:                or not isinstance(sessions,list)
+6164:                or len(sessions)!=count
+6165:                or not isinstance(sessions[-1],str)
+6166:                or not sessions[-1]
+6167:                or sessions[-1].startswith("dispatch:")
+6168:            ):
+6169:                return False,"max-step-continuation-current-session-mismatch"
+6170:            sid=sessions[-1]
+6171:            history=entry.get("implementation_max_step_continuations") or []
+6172:            if not isinstance(history,list):
+6173:                return False,"max-step-continuation-history-invalid"
+6174:            prior=[
+6175:                row for row in history
+6176:                if isinstance(row,dict)
+6177:                and int(row.get("attempt") or 0)==count
+6178:            ]
+6179:            legacy_missing_handoff=(
+6180:                len(prior)==1
+6181:                and not prior[0].get("handoff_progress_sha256")
+6182:                and not progress_path.exists()
+6183:            )
+6184:            trusted_verify_visibility_candidate=(
+6185:                len(prior)==1
+6186:                and bool(prior[0].get("handoff_progress_sha256"))
+6187:                and progress_path.exists()
+6188:            )
+6189:            reverify_single_write_cadence_candidate=(
+6190:                len(prior)==2
+6191:                and prior[0].get("recovery_kind")=="initial"
+6192:                and prior[1].get("recovery_kind")=="trusted-verify-visibility"
+6193:                and bool(prior[1].get("handoff_progress_sha256"))
+6194:                and progress_path.exists()
+6195:            )
+6196:            if len(prior)>2:
+6197:                return False,"max-step-continuation-limit"
+6198:            if prior and not (
+6199:                legacy_missing_handoff
+6200:                or trusted_verify_visibility_candidate
+6201:                or reverify_single_write_cadence_candidate
+6202:            ):
+6203:                return False,"max-step-continuation-limit"
+6204:            failures=[
+6205:                row for row in (entry.get("failure_history") or [])
+6206:                if isinstance(row,dict)
+6207:                and int(row.get("attempt") or 0)==count
+6208:            ]
+6209:            operator_rows=[
+6210:                row for row in (entry.get("operator_retry_attempts") or [])
+6211:                if isinstance(row,dict)
+6212:                and int(row.get("sequence") or 0)==count
+6213:                and row.get("session")==sid
+6214:            ]
+6215:            if len(failures)!=1 or len(operator_rows)>1:
+6216:                return False,"max-step-continuation-records-mismatch"
+6217:            failure=failures[0]
+6218:            operator_funded=(len(operator_rows)==1)
+6219:            op=operator_rows[0] if operator_funded else None
+6220:            failure_match=re.fullmatch(
+6221:                r"verify-failed-([1-9]\d*)",
+6222:                str(failure.get("reason") or ""),
+6223:            )
+6224:            if not (
+6225:                failure.get("classification")=="genuine"
+6226:                and failure_match
+6227:            ):
+6228:                return False,"max-step-continuation-terminal-state-mismatch"
+6229:            if operator_funded and not (
+6230:                op.get("state")=="consumed"
+6231:                and op.get("outcome")=="meaningful_execution"
+6232:                and op.get("consumes_operator_grant") is True
+6233:            ):
+6234:                return False,"max-step-continuation-terminal-state-mismatch"
+6235:            verify_exit_code=int(failure_match.group(1))
+6236:
+6237:    status=v1_session_status_snapshot().get(sid)
+6238:    if isinstance(status,dict) and str(
+6239:        status.get("type") or status.get("status") or ""
+6240:    ).lower()=="busy":
+6241:        return False,"max-step-continuation-session-still-active"
+6242:    trusted_verify_visibility_evidence={}
+6243:    trusted_visibility_proven=False
+6244:    latest_verify_clean_tail_proven=False
+6245:    if (
+6246:        trusted_verify_visibility_candidate
+6247:        or reverify_single_write_cadence_candidate
+6248:    ):
+6249:        trusted_verify_visibility_evidence=(
+6250:            trusted_verify_reverify_visibility_evidence(
+6251:                sid,did,canonical
+6252:            )
+6253:        )
+6254:        if not trusted_verify_visibility_evidence:
+6255:            return False,"max-step-continuation-limit"
+6256:    if trusted_verify_visibility_candidate:
+6257:        trusted_visibility_proven=bool(
+6258:            int(trusted_verify_visibility_evidence.get(
+6259:                "trusted_exact_verify_failures"
+6260:            ) or 0)>=1
+6261:            and int(trusted_verify_visibility_evidence.get(
+6262:                "post_verify_exact_required_denials"
+6263:            ) or 0)>=1
+6264:            and trusted_verify_visibility_evidence.get(
+6265:                "current_classifier_state"
+6266:            )=="failed"
+6267:            and trusted_verify_visibility_evidence.get(
+6268:                "owned_mutation_seen"
+6269:            ) is False
+6270:            and trusted_verify_visibility_evidence.get(
+6271:                "maximum_steps_reached"
+6272:            ) is True
+6273:        )
+6274:        latest_verify_clean_tail_proven=bool(
+6275:            int(trusted_verify_visibility_evidence.get(
+6276:                "trusted_exact_verify_failures"
+6277:            ) or 0)>=1
+6278:            and int(trusted_verify_visibility_evidence.get(
+6279:                "post_latest_verify_owned_edits"
+6280:            ) or 0)==0
+6281:            and trusted_verify_visibility_evidence.get(
+6282:                "current_classifier_state"
+6283:            )=="failed"
+6284:            and trusted_verify_visibility_evidence.get(
+6285:                "owned_mutation_seen"
+6286:            ) is True
+6287:            and trusted_verify_visibility_evidence.get(
+6288:                "maximum_steps_reached"
+6289:            ) is True
+6290:        )
+6291:        if not (
+6292:            trusted_visibility_proven
+6293:            or latest_verify_clean_tail_proven
+6294:        ):
+6295:            return (
+6296:                False,
+6297:                "max-step-continuation-trusted-verify-visibility-proof-mismatch",
+6298:            )
+6299:    if reverify_single_write_cadence_candidate:
+6300:        if not (
+6301:            int(trusted_verify_visibility_evidence.get(
+6302:                "trusted_exact_verify_failures"
+6303:            ) or 0)>=1
+6304:            and int(trusted_verify_visibility_evidence.get(
+6305:                "post_verify_owned_edits"
+6306:            ) or 0)>=2
+6307:            and trusted_verify_visibility_evidence.get(
+6308:                "current_classifier_state"
+6309:            )=="failed"
+6310:            and trusted_verify_visibility_evidence.get(
+6311:                "owned_mutation_seen"
+6312:            ) is True
+6313:            and trusted_verify_visibility_evidence.get(
+6314:                "maximum_steps_reached"
+6315:            ) is True
+6316:            and reverify_single_write_cadence_fix_installed()
+6317:        ):
+6318:            return (
+6319:                False,
+6320:                "max-step-continuation-reverify-cadence-proof-mismatch",
+6321:            )
+6322:    terminal_summary=(max_step_terminal_summary_db(sid) or "").strip()
+6323:    if not terminal_summary:
+6324:        return False,"max-step-continuation-no-max-step-terminal"
+6325:    if not durable_worker_execution(did,sid):
+6326:        return False,"max-step-continuation-no-durable-owned-progress"
+6327:    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+6328:    if not changed or delta!="changed":
+6329:        return False,"max-step-continuation-owned-state-not-changed"
+6330:    project=Path(PROJECT)
+6331:    if worker_sandbox_has_fatal_violation(project,did,sid):
+6332:        return False,"max-step-continuation-fatal-sandbox-violation"
+6333:    violations=ownership_violations(did,sid)
+6334:    if violations:
+6335:        return False,"max-step-continuation-ownership-violation:"+",".join(violations[:4])
+6336:    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+6337:    if not (
+6338:        isinstance(verify,dict)
+6339:        and int(verify.get("attempt") or 0)==count
+6340:        and verify.get("session")==sid
+6341:        and verify.get("executed") is True
+6342:        and verify.get("result")==f"verify-failed-{verify_exit_code}"
+6343:        and int(verify.get("exit_code") or -1)==verify_exit_code
+6344:        and str(verify.get("command") or "")==canonical
+6345:    ):
+6346:        return False,"max-step-continuation-verify-evidence-mismatch"
+6347:    if not diagnostic:
+6348:        diagnostic=verify_evidence_failure_diagnostic(verify)
+6349:
+6350:    recovery_kind=(
+6351:        "reverify-single-write-cadence"
+6352:        if reverify_single_write_cadence_candidate
+6353:        else (
+6354:            "latest-verify-clean-tail"
+6355:            if latest_verify_clean_tail_proven
+6356:            else (
+6357:                "trusted-verify-visibility"
+6358:                if trusted_visibility_proven
+6359:                else (
+6360:                    "legacy-missing-handoff"
+6361:                    if legacy_missing_handoff
+6362:                    else "initial"
+6363:                )
+6364:            )
+6365:        )
+6366:    )
+6367:    summary_tail=terminal_summary[-6500:]
+6368:    progress_text=(
+6369:        "SUPERVISOR_MAX_STEP_CONTINUATION: true\n"
+6370:        f"DELIVERABLE: {did}\n"
+6371:        f"ATTEMPT: {count}\n"
+6372:        f"SOURCE_SESSION: {sid}\n"
+6373:        f"RECOVERY_KIND: {recovery_kind}\n"
+6374:        "AUTHORITATIVE_CONTRACT: context-packet-wins\n"
+6375:        f"EXACT_VERIFY_RESULT: verify-failed-{verify_exit_code}\n"
+6376:        + (
+6377:            "SUPERVISOR_DIAGNOSTIC: "
+6378:            + diagnostic.replace("\n"," ")
+6379:            + "\n"
+6380:            if diagnostic else ""
+6381:        )
+6382:        + "\nTerminal worker summary (continue from actual filesystem state):\n"
+6383:        f"{summary_tail}\n"
+6384:    )
+
+=== RELATED TESTS ===
+scripts/test_checks_contract.py:11:    "required": ["checks"],
+scripts/test_checks_contract.py:19:                "required": ["name", "command"],
+scripts/test_checks_contract.py:27:        "required_files": {
+scripts/test_stage_a_stabilization.py:1352:            "split_required":[{
+scripts/test_stage_a_stabilization.py:1620:                "required_executable":True,
+scripts/test_stage_a_stabilization.py:1630:            "missing_required_files":[],
+scripts/test_stage_a_stabilization.py:2247:            "missing_required_files":[],
+scripts/test_stage_a_stabilization.py:2434:        self.assertEqual(supervisor.record_leaf_failure("D001", "verify failed"), (True, "split-required"))
+scripts/test_stage_a_stabilization.py:2440:        state["split_required"] = [{
+scripts/test_stage_a_stabilization.py:2441:            "deliverable": "D001", "split_state": "split-required",
+scripts/test_stage_a_stabilization.py:2495:        entry.pop("split_required")
+scripts/test_state_machine_invariants.py:34:            "- [ ] A001: required.\n- [ ] A002: required too.\n"
+scripts/test_state_machine_invariants.py:41:        text="- [ ] A001: required.\n- [ ] A002: required too.\n"
+scripts/test_state_machine_invariants.py:118:                "render_report returns exactly the required three-line output.",
+scripts/test_state_machine_invariants.py:124:            "render_report returns exactly the required three-line output.",
+scripts/test_state_machine_invariants.py:370:            "## MUST checks\n- [ ] A001: required.\n"
+scripts/test_state_machine_invariants.py:541:            "No external reference, network, or externally maintained source is\nrequired."
+scripts/test_state_machine_invariants.py:560:            "An externally maintained source is required for the expected truth."
+scripts/test_state_machine_invariants.py:563:            "No local fixture is needed, but an externally maintained source is required."
+scripts/test_state_machine_invariants.py:659:    def test_leaf_contract_challenge_requires_a_changed_affected_leaf(self):
+scripts/test_state_machine_invariants.py:672:                "source":"runtime-leaf-contract-challenge",
+scripts/test_state_machine_invariants.py:700:        self.sid="ses-contract-challenge"
+scripts/test_state_machine_invariants.py:740:            supervisor.parse_contract_challenge(
+scripts/test_state_machine_invariants.py:746:            supervisor.parse_contract_challenge("CONTRACT_CHALLENGE: too short"),
+scripts/test_state_machine_invariants.py:750:            supervisor.parse_contract_challenge(
+scripts/test_state_machine_invariants.py:757:            supervisor.parse_contract_challenge(
+scripts/test_state_machine_invariants.py:772:        parsed=supervisor.parse_contract_challenge(text)
+scripts/test_state_machine_invariants.py:775:            leaf_contract.validate_contract_challenge_reason(parsed),[]
+scripts/test_state_machine_invariants.py:784:        parsed=supervisor.parse_contract_challenge(text)
+scripts/test_state_machine_invariants.py:787:            leaf_contract.validate_contract_challenge_reason(parsed),[]
+scripts/test_state_machine_invariants.py:796:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+scripts/test_state_machine_invariants.py:808:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+scripts/test_state_machine_invariants.py:815:        self.assertIn("contract-challenge-reason-invalid",detail)
+scripts/test_state_machine_invariants.py:828:            "source":"runtime-leaf-contract-challenge",
+scripts/test_state_machine_invariants.py:844:        challenge_path=self.work/f"{self.did}.contract-challenge.json"
+scripts/test_state_machine_invariants.py:847:            "protocol":"v2-leaf-contract-challenge-v1",
+scripts/test_state_machine_invariants.py:856:                supervisor.reconcile_invalid_leaf_contract_challenge_repair()
+scripts/test_state_machine_invariants.py:867:                f"{self.did}.contract-challenge.rejected-*.json"
+scripts/test_state_machine_invariants.py:879:            "source":"runtime-leaf-contract-challenge",
+scripts/test_state_machine_invariants.py:885:        self.assertIn("runtime leaf contract challenge invalid",errors[0])
+scripts/test_state_machine_invariants.py:888:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+scripts/test_state_machine_invariants.py:894:        self.assertEqual(detail,"contract-challenge-repair")
+scripts/test_state_machine_invariants.py:898:        self.assertEqual(repair["source"],"runtime-leaf-contract-challenge")
+scripts/test_state_machine_invariants.py:903:        self.assertTrue((self.work/f"{self.did}.contract-challenge.json").exists())
+scripts/test_state_machine_invariants.py:915:            supervisor,"request_leaf_contract_challenge_repair"
+scripts/test_state_machine_invariants.py:918:                supervisor.handle_leaf_contract_challenge(
+scripts/test_state_machine_invariants.py:939:            supervisor,"request_leaf_contract_challenge_repair",
+scripts/test_state_machine_invariants.py:940:            return_value=(True,"contract-challenge-repair")
+scripts/test_state_machine_invariants.py:947:                supervisor.handle_leaf_contract_challenge(
+scripts/test_state_machine_invariants.py:1310:                    "split_required":{
+scripts/test_state_machine_invariants.py:1377:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:1400:        self.assertIn("split_required",entry)
+scripts/test_state_machine_invariants.py:1497:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1508:            "dispatch:max-step-continuation:"
+scripts/test_state_machine_invariants.py:1521:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1551:        entry["split_required"]={
+scripts/test_state_machine_invariants.py:1559:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1568:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:1570:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1594:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1602:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1639:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1647:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1664:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1670:            "replacement":"dispatch:max-step-continuation:prior:D001",
+scripts/test_state_machine_invariants.py:1680:            "post_verify_exact_required_denials":2,
+scripts/test_state_machine_invariants.py:1696:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1705:        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+scripts/test_state_machine_invariants.py:1706:        latest=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1717:                "post_verify_exact_required_denials"
+scripts/test_state_machine_invariants.py:1730:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1736:            "replacement":"dispatch:max-step-continuation:prior:D001",
+scripts/test_state_machine_invariants.py:1746:            "post_verify_exact_required_denials":0,
+scripts/test_state_machine_invariants.py:1764:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1773:        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+scripts/test_state_machine_invariants.py:1774:        latest=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1775:        self.assertEqual(latest["recovery_kind"],"latest-verify-clean-tail")
+scripts/test_state_machine_invariants.py:1777:        evidence=latest["latest_verify_clean_tail_evidence"]
+scripts/test_state_machine_invariants.py:1785:    def test_allows_third_continuation_only_for_reverify_single_write_cadence_bug(self):
+scripts/test_state_machine_invariants.py:1790:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1815:            "post_verify_exact_required_denials":0,
+scripts/test_state_machine_invariants.py:1832:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1841:        history=entry["implementation_max_step_continuations"]
+scripts/test_state_machine_invariants.py:1845:            latest["recovery_kind"],"reverify-single-write-cadence"
+scripts/test_state_machine_invariants.py:1851:            latest["reverify_single_write_cadence_evidence"][
+scripts/test_state_machine_invariants.py:1865:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1874:            supervisor.recover_implementation_max_step_continuation(self.did),
+scripts/test_state_machine_invariants.py:1875:            (False,"max-step-continuation-limit"),
+scripts/test_state_machine_invariants.py:1881:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1890:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1899:        history=entry["implementation_max_step_continuations"]
+scripts/test_state_machine_invariants.py:1995:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1998:                (False,"max-step-continuation-no-max-step-terminal"),
+scripts/test_state_machine_invariants.py:2484:            "verify_shadow_required_file_failures":1,
+scripts/test_state_machine_invariants.py:2517:        self.assertEqual(marker["verify_shadow_required_file_failures"],1)
+scripts/test_state_machine_invariants.py:2527:            "verify_shadow_required_file_failures":1,
+scripts/test_state_machine_invariants.py:2588:                    "reason":"trusted-verify-shadow-required-file-false-escape",
+scripts/test_state_machine_invariants.py:2624:            "verify_shadow_required_file_failures":1,
+scripts/test_state_machine_invariants.py:2922:                    "split_required":{
+scripts/test_state_machine_invariants.py:2948:                self.assertNotIn("split_required",repaired)
+scripts/test_state_machine_invariants.py:3100:        progress.write_text("supervisor correction with required parameters\n")
+scripts/test_state_machine_invariants.py:3171:            "write_required_denials":13,
+scripts/test_state_machine_invariants.py:3370:        self.assertEqual(evidence["write_required_denials"],4)
+scripts/test_state_machine_invariants.py:3400:    def test_split_writer_can_read_required_handoff_and_owned_artifact_once(self):
+scripts/test_state_machine_invariants.py:3471:            self.assertEqual(state,"implementation-write-required")
+scripts/test_state_machine_invariants.py:3476:            self.assertEqual(state,"implementation-write-required")
+scripts/test_state_machine_invariants.py:3635:                supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3650:            self.assertEqual(state,"implementation-exact-verify-required")
+scripts/test_state_machine_invariants.py:3695:            supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3706:        self.assertEqual(state,"implementation-return-required")
+scripts/test_state_machine_invariants.py:3801:            self.assertEqual(state,"implementation-exact-verify-required")
+scripts/test_state_machine_invariants.py:3804:    def test_max_step_continuation_requires_exact_reverify_before_historical_delta(self):
+scripts/test_state_machine_invariants.py:3826:                supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3844:            self.assertEqual(state,"implementation-exact-verify-required")
+scripts/test_state_machine_invariants.py:3845:            self.assertIn("max-step-continuation",detail)
+scripts/test_state_machine_invariants.py:3851:            self.assertIn("max-step-continuation",detail)
+scripts/test_state_machine_invariants.py:3853:    def test_max_step_continuation_failed_verify_allows_only_owned_repair(self):
+scripts/test_state_machine_invariants.py:3875:                supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3898:            self.assertEqual(state,"implementation-write-required")
+scripts/test_state_machine_invariants.py:3913:        entry["implementation_max_step_continuations"]=[{
+scripts/test_state_machine_invariants.py:3921:            supervisor.implementation_max_step_continuation_session_pending(
+scripts/test_state_machine_invariants.py:3926:            supervisor.implementation_max_step_continuation_session_pending(
+scripts/test_state_machine_invariants.py:3969:        self.assertEqual(state,"implementation-return-required")
+scripts/test_state_machine_invariants.py:3998:            self.assertEqual(state,"implementation-write-required")
+scripts/test_state_machine_invariants.py:4119:    def test_two_failed_exact_verifies_force_contract_challenge_before_more_tools(self):
+scripts/test_state_machine_invariants.py:4142:            state,"implementation-contract-challenge-required"
+scripts/test_state_machine_invariants.py:4194:            self.assertEqual(state,"implementation-write-required")
+scripts/test_state_machine_invariants.py:4217:            self.assertEqual(state,"implementation-write-required")
+scripts/test_state_machine_invariants.py:4293:            self.assertEqual(state,"implementation-exact-verify-required")
+scripts/test_state_machine_invariants.py:4309:            self.assertEqual(state,"implementation-exact-verify-required")
+scripts/test_state_machine_invariants.py:4530:        self.assertEqual(evidence["write_required_denials"],1)
+scripts/test_state_machine_invariants.py:4539:            "write_required_denials":1,
+scripts/test_state_machine_invariants.py:4587:        self.assertEqual(recovery["write_required_denials"],1)
+scripts/test_state_machine_invariants.py:4609:            "write_required_denials":1,
+scripts/test_state_machine_invariants.py:4714:            "split_required":{
+scripts/test_state_machine_invariants.py:4788:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:4815:        self.assertIn("split_required",entry)
+scripts/test_state_machine_invariants.py:4836:        entry["split_required"]={
+scripts/test_state_machine_invariants.py:4903:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:4969:            "split_required":{
+scripts/test_state_machine_invariants.py:4986:                "write_required_denials":1,
+scripts/test_state_machine_invariants.py:5043:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:5045:        self.assertEqual(recovery["write_required_denials"],1)
+scripts/test_state_machine_invariants.py:5054:            "write_required_denials":1,
+scripts/test_state_machine_invariants.py:5205:            "# Acceptance\n\nReference policy: external-required\n"
+scripts/test_state_machine_invariants.py:5699:        required={
+scripts/test_state_machine_invariants.py:5710:            "edit",{"filePath":".opencode-v2/IMPLEMENTATION_PLAN.structured.json"},seen=required
+scripts/test_state_machine_invariants.py:5714:            "write",{"filePath":".opencode-v2/IMPLEMENTATION_PLAN.structured.json"},seen=required
+scripts/test_state_machine_invariants.py:5718:        state,detail=self.boundary("edit",{"filePath":"package.json"},seen=required)
+scripts/test_state_machine_invariants.py:5742:        self.assertIn("targeted-repair-required-read",detail)
+scripts/test_state_machine_invariants.py:5835:    def write_runtime_repair(self, *, baseline=None, source="runtime-leaf-contract-challenge"):
+scripts/test_state_machine_invariants.py:6197:        self.assertIn("required_item=V2-next",detail)
+scripts/test_state_machine_invariants.py:7095:                "required_tokens":["Io","Europa","Ganymede","Callisto"],
+scripts/test_state_machine_invariants.py:7096:                "required_key_substring_groups":[
+scripts/test_state_machine_invariants.py:7122:                "required_tokens":["Io","Europa","Ganymede","Callisto"],
+scripts/test_state_machine_invariants.py:7123:                "required_key_substring_groups":[
+scripts/test_state_machine_invariants.py:7155:                "required_tokens":["Io","Europa","Ganymede","Callisto"],
+scripts/test_state_machine_invariants.py:7156:                "required_key_substring_groups":[
+scripts/test_state_machine_invariants.py:7294:        entry["split_required"]={
+scripts/test_state_machine_invariants.py:7308:                "generation":1,"state":"split-required",
+scripts/test_state_machine_invariants.py:7331:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:7469:            "split_required":{
+scripts/test_state_machine_invariants.py:7477:        supervisor.save_split_status("D001","split-required",generation=1)
+scripts/test_state_machine_invariants.py:7497:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:7612:        self.assertIsInstance(ledger["deliverables"]["D001"].get("split_required"),dict)
+scripts/test_state_machine_invariants.py:7614:        supervisor.reconcile_required_splits()
+scripts/test_state_machine_invariants.py:7653:            (True,"split-required"),
+scripts/test_state_machine_invariants.py:7673:            (True,"split-required"),
+scripts/test_state_machine_invariants.py:7780:            (True,"split-required"),
+scripts/test_state_machine_invariants.py:7819:            (True,"split-required"),
+scripts/test_state_machine_invariants.py:7853:            (True,"split-required"),
+scripts/test_state_machine_invariants.py:7911:            (True,"split-required"),
+scripts/test_state_machine_invariants.py:8416:        entry["split_required"]={
+scripts/test_state_machine_invariants.py:8434:        self.assertNotIn("split_required",after)
+scripts/test_state_machine_invariants.py:8569:        entry["split_required"]={
+scripts/test_state_machine_invariants.py:8793:        self.assertIn("required bare JSON",sent[0][1])
+scripts/test_state_machine_invariants.py:8987:                "done_when":"the fixture directory contains the required records",
+scripts/test_state_machine_invariants.py:9095:            "leaves":{"D001":{"complete":False,"split_required":False,"attempt_limit_reached":False}},
+scripts/test_state_machine_invariants.py:9107:                "D001":{"complete":False,"split_required":False,"eligible":True},
+scripts/test_state_machine_invariants.py:9108:                "D002":{"complete":False,"split_required":False,"eligible":False},
+scripts/test_state_machine_invariants.py:9199:    def test_verify_shadow_snapshots_test_checks_as_regular_file_for_required_files(self):
+scripts/test_state_machine_invariants.py:9203:            "required_files":[".opencode-v2/TEST_CHECKS.json"],
+scripts/test_state_machine_invariants.py:9211:        self.assertEqual(json.loads(copied.read_text())["required_files"],[
+scripts/test_state_machine_invariants.py:9284:        attempts["deliverables"]["D001"]["split_required"]={
+scripts/test_state_machine_invariants.py:9312:        self.assertNotIn("split_required",entry)
+scripts/test_state_machine_invariants.py:10245:                "## MUST checks\n- [ ] A001: required behavior.\n"
+scripts/test_state_machine_invariants.py:11161:                "required_executable":True,
+scripts/test_state_machine_invariants.py:11171:            "missing_required_files":[],
+scripts/test_state_machine_invariants.py:11227:                "required_executable":True,
+scripts/test_state_machine_invariants.py:11260:                "required_executable":True,
+
+
+======================================================================
+FINISHED: 2026-09-28T17:29:36Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
