@@ -1,0 +1,30 @@
+======================================================================
+JOB: job-000122
+JOB_COMMIT: 029ab9419bc02bd4ba7baa8657ede2ca56e8f861
+STARTED: 2026-09-28T16:56:39Z
+======================================================================
+
+=== SNAP FIREFOX PROFILES ===
+
+=== USERSCRIPT MANAGER EXTENSIONS ===
+PROFILE /home/bking/snap/firefox/common/.mozilla/firefox/00gk3ylw.default
+{"id": "{aecec67f-0d10-4fa7-b7c7-609a2db280cf}", "name": "Violentmonkey", "path": "/home/bking/snap/firefox/common/.mozilla/firefox/00gk3ylw.default/extensions/{aecec67f-0d10-4fa7-b7c7-609a2db280cf}.xpi", "active": true, "version": "2.49.0", "type": "extension"}
+
+=== FIND BRIDGE STRINGS IN SNAP PROFILE ===
+/home/bking/snap/firefox/common/.mozilla/firefox/00gk3ylw.default/sessionstore-backups/recovery.baklz4
+/home/bking/snap/firefox/common/.mozilla/firefox/00gk3ylw.default/sessionstore-backups/recovery.jsonlz4
+
+=== SERVED HEADER / INTERNAL VERSION ===
+// @version      2.10
+  const WAKE_NEXT_ENDPOINT = "http://127.0.0.1:8767/wake-next";
+  const BRIDGE_VERSION = "2.11";
+    el.textContent="AI-Beast bridge v"+BRIDGE_VERSION+": "+text;
+      const reply=await bridgeRequest("GET",WAKE_NEXT_ENDPOINT);
+
+
+======================================================================
+FINISHED: 2026-09-28T16:56:48Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
