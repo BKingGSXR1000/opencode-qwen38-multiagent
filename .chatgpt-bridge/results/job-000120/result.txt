@@ -1,0 +1,72 @@
+======================================================================
+JOB: job-000120
+JOB_COMMIT: 7865a111ab054c3b8b31d447880e8a8db71f17f2
+STARTED: 2026-09-28T14:20:58Z
+======================================================================
+
+=== NEW WAKE SCRIPT ===
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+QUEUE=/home/bking/AI/chatgpt-job-ingress/wake-queue
+LEGACY=/home/bking/AI/chatgpt-wakeup-xdotool.sh
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 'message to send'"
+    exit 2
+fi
+
+MESSAGE="$*"
+mkdir -p "$QUEUE"
+
+WAKE_ID="$(
+python3 - "$MESSAGE" <<'PY'
+import hashlib, os, sys, time
+msg=sys.argv[1]
+stamp=str(time.time_ns())
+suffix=hashlib.sha256(
+    (stamp+"\0"+msg+"\0"+str(os.getpid())).encode()
+).hexdigest()[:16]
+print(f"{stamp}-{suffix}")
+PY
+)"
+
+TARGET="$QUEUE/$WAKE_ID.json"
+TMP="$QUEUE/.$WAKE_ID.tmp"
+
+python3 - "$WAKE_ID" "$MESSAGE" "$TMP" <<'PY'
+import json, sys
+from pathlib import Path
+wake_id,msg,tmp=sys.argv[1:]
+Path(tmp).write_text(json.dumps({
+    "id":wake_id,
+    "message":msg,
+}, ensure_ascii=False, sort_keys=True)+"\n")
+PY
+mv -f "$TMP" "$TARGET"
+
+for _ in $(seq 1 12); do
+    if [[ ! -e "$TARGET" ]]; then
+        echo "QUEUED_AND_ACKED: $MESSAGE"
+        exit 0
+    fi
+    sleep 1
+done
+
+echo "QUEUE_NOT_ACKED; using legacy xdotool fallback" >&2
+rm -f "$TARGET"
+exec "$LEGACY" "$MESSAGE"
+
+=== DIRECT TRANSITION TEST ===
+QUEUE_NOT_ACKED; using legacy xdotool fallback
+SENT: WAKE_V211_TRANSITION_TEST
+
+=== QUEUE AFTER TEST ===
+
+
+======================================================================
+FINISHED: 2026-09-28T14:21:27Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
