@@ -1,0 +1,342 @@
+======================================================================
+JOB: job-000105
+JOB_COMMIT: 1a31b983485ccd5db7d0269ba699fe494232fa1d
+STARTED: 2026-09-28T11:50:47Z
+======================================================================
+
+=== SUPERVISOR RECOVERY SYMBOLS ===
+703:def max_step_terminal_summary_db(sid):
+6125:def recover_implementation_max_step_continuation(did,diagnostic=""):
+10361:def recover_max_step_acceptance_report_terminal(sid,terminal,writes):
+12742:def implementation_max_step_continuation_prompt_pending(did):
+12781:def implementation_max_step_continuation_session_pending(sid,did,attempt):
+15441:class OpenCodeHTTP:
+
+=== CALL SITES ===
+grep: scripts/__pycache__/supervisor.cpython-312.pyc: binary file matches
+grep: scripts/__pycache__/supervisor.cpython-314.pyc: binary file matches
+grep: scripts/__pycache__/test_state_machine_invariants.cpython-314.pyc: binary file matches
+scripts/test_state_machine_invariants.py:1497:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1521:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1559:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1570:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1594:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1602:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1639:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1647:        recovery=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1664:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1696:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1705:        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+scripts/test_state_machine_invariants.py:1706:        latest=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1730:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1764:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1773:        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+scripts/test_state_machine_invariants.py:1774:        latest=entry["implementation_max_step_continuations"][-1]
+scripts/test_state_machine_invariants.py:1790:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1832:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1841:        history=entry["implementation_max_step_continuations"]
+scripts/test_state_machine_invariants.py:1865:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1874:            supervisor.recover_implementation_max_step_continuation(self.did),
+scripts/test_state_machine_invariants.py:1881:            "implementation_max_step_continuations"
+scripts/test_state_machine_invariants.py:1890:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:1899:        history=entry["implementation_max_step_continuations"]
+scripts/test_state_machine_invariants.py:1995:                supervisor.recover_implementation_max_step_continuation(
+scripts/test_state_machine_invariants.py:3635:                supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3695:            supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3804:    def test_max_step_continuation_requires_exact_reverify_before_historical_delta(self):
+scripts/test_state_machine_invariants.py:3826:                supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3853:    def test_max_step_continuation_failed_verify_allows_only_owned_repair(self):
+scripts/test_state_machine_invariants.py:3875:                supervisor,"implementation_max_step_continuation_session_pending",
+scripts/test_state_machine_invariants.py:3913:        entry["implementation_max_step_continuations"]=[{
+scripts/test_state_machine_invariants.py:3921:            supervisor.implementation_max_step_continuation_session_pending(
+scripts/test_state_machine_invariants.py:3926:            supervisor.implementation_max_step_continuation_session_pending(
+scripts/supervisor.py:1047:        continuation_prompt=implementation_max_step_continuation_prompt_pending(did)
+scripts/supervisor.py:1111:            or implementation_max_step_continuation_prompt_pending(did)
+scripts/supervisor.py:6125:def recover_implementation_max_step_continuation(did,diagnostic=""):
+scripts/supervisor.py:6171:            history=entry.get("implementation_max_step_continuations") or []
+scripts/supervisor.py:6405:            history=entry.get("implementation_max_step_continuations") or []
+scripts/supervisor.py:6611:                "implementation_max_step_continuations",[]
+scripts/supervisor.py:12742:def implementation_max_step_continuation_prompt_pending(did):
+scripts/supervisor.py:12756:    history=entry.get("implementation_max_step_continuations") or []
+scripts/supervisor.py:12781:def implementation_max_step_continuation_session_pending(sid,did,attempt):
+scripts/supervisor.py:12793:    history=entry.get("implementation_max_step_continuations") or []
+scripts/supervisor.py:13023:    continuation_reverify=implementation_max_step_continuation_session_pending(
+
+=== CONTROL QUERY USAGE ===
+usage: control_query_views.py --selftest
+usage: stage_a_controller.py [-h] [--project PROJECT] [--once] [--watch]
+                             [--poll POLL] [--require-supervisor-shadow]
+                             [--execute-first-implementation]
+                             [--execute-first-task-splitter]
+                             [--execute-first-planner]
+                             [--execute-first-semantic]
+                             [--execute-first-final-tests]
+                             [--reconcile-execution RECONCILE_EXECUTION]
+                             [--authorize-semantic-infrastructure-retry AUTHORIZE_SEMANTIC_INFRASTRUCTURE_RETRY]
+                             [--reason REASON] [--base-url BASE_URL]
+                             [--root-session ROOT_SESSION] [--selftest]
+
+Stage-A deterministic controller. Default operation is read-only; the
+explicitly gated implementation executor launches at most one native
+implementation SubtaskPart.
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT
+  --once
+  --watch
+  --poll POLL
+  --require-supervisor-shadow
+  --execute-first-implementation
+  --execute-first-task-splitter
+  --execute-first-planner
+  --execute-first-semantic
+  --execute-first-final-tests
+  --reconcile-execution RECONCILE_EXECUTION
+  --authorize-semantic-infrastructure-retry AUTHORIZE_SEMANTIC_INFRASTRUCTURE_RETRY
+  --reason REASON
+  --base-url BASE_URL
+  --root-session ROOT_SESSION
+  --selftest
+usage: drive-stage-a-run.py [-h] [--project PROJECT] [--base-url BASE_URL]
+                            [--root-session ROOT_SESSION]
+                            [--preflight-proof PREFLIGHT_PROOF] [--poll POLL]
+                            [--max-ticks MAX_TICKS] [--selftest]
+
+Drive a generic Stage-A run without reading model transcripts.
+
+options:
+  -h, --help            show this help message and exit
+  --project PROJECT
+  --base-url BASE_URL
+  --root-session ROOT_SESSION
+  --preflight-proof PREFLIGHT_PROOF
+  --poll POLL
+  --max-ticks MAX_TICKS
+  --selftest
+
+=== PROJECT .opencode-v2 TOP ===
+ACCEPTANCE.md
+ACCEPTANCE.ready
+bin/control-status
+bin/run-checks
+CONTROL_CONTRACT.md
+control-status.json
+GLOBAL_LESSONS.md
+IMPLEMENTATION_PLAN.guard.json
+IMPLEMENTATION_PLAN.md
+IMPLEMENTATION_PLAN.ready
+IMPLEMENTATION_PLAN.structured.json
+IMPLEMENTATION_PLAN.structured-map.json
+ORIGINAL_TASK.md
+query/blockers.json
+query/decision.json
+query/deterministic-shadow.json
+query/eligible.json
+query/split.json
+.stage-a-bootstrap.lock
+TEST_CHECKS.json
+work/abort-intents.json
+work/attempts.json
+work/attempts.json.lock
+work/D001.attempt-1.execution-baseline.json
+work/D001.ownership-baseline.json
+work/D001.ready
+work/D001.verify-evidence.json
+work/D002.attempt-1.execution-baseline.json
+work/D002.ownership-baseline.json
+work/D002.progress.md
+work/D002.ready
+work/D002.verify-evidence.json
+work/D003.attempt-1.execution-baseline.json
+work/D003.attempt-2.execution-baseline.json
+work/D003.attempt-3.execution-baseline.json
+work/D003.attempt-4.execution-baseline.json
+work/D003.attempt-5.execution-baseline.json
+work/D003.contract-challenge.json
+work/D003.ownership-baseline.json
+work/D003.ready
+work/D003.verify-evidence.json
+work/D004.attempt-1.execution-baseline.json
+work/D004.ownership-baseline.json
+work/D004.ready
+work/D004.verify-evidence.json
+work/D005.attempt-1.execution-baseline.json
+work/D005.attempt-2.execution-baseline.json
+work/D005.attempt-3.execution-baseline.json
+work/D005.contract-challenge.json
+work/D005.ownership-baseline.json
+work/D005.ready
+work/D005.verify-evidence.json
+work/D006-A.attempt-1.execution-baseline.json
+work/D006-A.attempt-2.execution-baseline.json
+work/D006-A.attempt-3.execution-baseline.json
+work/D006-A.ownership-baseline.json
+work/D006-A.progress.md
+work/D006-A.ready
+work/D006-A.scope.md
+work/D006.attempt-1.execution-baseline.json
+work/D006.attempt-2.execution-baseline.json
+work/D006.attempt-3.execution-baseline.json
+work/D006.attempt-4.execution-baseline.json
+work/D006.attempt-5.execution-baseline.json
+work/D006-A.verify-evidence.json
+work/D006-B.attempt-1.execution-baseline.json
+work/D006-B.ownership-baseline.json
+work/D006-B.ready
+work/D006-B.scope.md
+work/D006-B.verify-evidence.json
+work/D006.contract-challenge.json
+work/D006.ownership-baseline.json
+work/D006.ready
+work/D006.split-proposal.corrective-rejected-1.json
+work/D006.split-status.json
+work/D006.splitter.lock
+work/D006.splitter-primary-response-1.txt
+work/D006.split-transaction.json
+work/D006.verify-evidence.json
+work/D007-A.attempt-1.execution-baseline.json
+work/D007-A.ownership-baseline.json
+work/D007-A.progress.md
+work/D007-A.ready
+work/D007-A.scope.md
+work/D007.attempt-1.execution-baseline.json
+work/D007.attempt-2.execution-baseline.json
+work/D007-A.verify-evidence.json
+work/D007-B1.attempt-1.execution-baseline.json
+work/D007-B1.ownership-baseline.json
+work/D007-B1.progress.md
+work/D007-B1.ready
+work/D007-B1.scope.md
+work/D007-B1.verify-evidence.json
+work/D007-B2.attempt-1.execution-baseline.json
+work/D007-B2.ownership-baseline.json
+work/D007-B2.ready
+work/D007-B2.scope.md
+work/D007-B2.verify-evidence.json
+work/D007-B.attempt-1.execution-baseline.json
+work/D007-B.attempt-2.execution-baseline.json
+work/D007-B.attempt-3.execution-baseline.json
+work/D007-B.ownership-baseline.json
+work/D007-B.ready
+work/D007-B.scope.md
+work/D007-B.split-status.json
+work/D007-B.splitter.lock
+work/D007-B.split-transaction.json
+work/D007-B.verify-evidence.json
+work/D007.ownership-baseline.json
+work/D007.progress.md
+work/D007.ready
+work/D007.split-proposal.corrective-rejected-1.json
+work/D007.split-proposal.failed-1.json
+work/D007.split-proposal.failed-2.json
+work/D007.split-status.json
+work/D007.splitter.lock
+work/D007.splitter-primary-response-1.txt
+work/D007.split-transaction.json
+work/D007.verify-evidence.json
+work/D008.attempt-1.execution-baseline.json
+work/D008.ownership-baseline.json
+work/D008.ready
+work/D008.verify-evidence.json
+work/D009-A.attempt-1.execution-baseline.json
+work/D009-A.ownership-baseline.json
+work/D009-A.progress.md
+work/D009-A.ready
+work/D009-A.scope.md
+work/D009.attempt-1.execution-baseline.json
+work/D009.attempt-2.execution-baseline.json
+work/D009-A.verify-evidence.json
+work/D009-B.attempt-1.execution-baseline.json
+work/D009-B.ownership-baseline.json
+work/D009-B.ready
+work/D009-B.scope.md
+work/D009-B.verify-evidence.json
+work/D009.ownership-baseline.json
+work/D009.ready
+work/D009.split-proposal.corrective-rejected-1.json
+work/D009.split-proposal.failed-1.json
+work/D009.split-proposal.failed-2.json
+work/D009.split-status.json
+work/D009.splitter.lock
+work/D009.splitter-primary-response-1.txt
+work/D009.split-transaction.json
+work/D009.verify-evidence.json
+work/D010.attempt-1.execution-baseline.json
+work/D010.ownership-baseline.json
+work/D010.ready
+work/D010.verify-evidence.json
+work/D011-A.attempt-1.execution-baseline.json
+work/D011-A.attempt-2.execution-baseline.json
+work/D011-A.attempt-3.execution-baseline.json
+work/D011-A.ownership-baseline.json
+work/D011-A.progress.md
+work/D011-A.ready
+work/D011-A.scope.md
+work/D011.attempt-1.execution-baseline.json
+work/D011.attempt-2.execution-baseline.json
+work/D011-A.verify-evidence.json
+work/D011-B1.attempt-1.execution-baseline.json
+work/D011-B1.ownership-baseline.json
+work/D011-B1.progress.md
+work/D011-B1.ready
+work/D011-B1.scope.md
+work/D011-B1.verify-evidence.json
+work/D011-B2.attempt-1.execution-baseline.json
+work/D011-B2.attempt-2.execution-baseline.json
+work/D011-B2.attempt-3.execution-baseline.json
+work/D011-B2.attempt-4.execution-baseline.json
+work/D011-B2.attempt-4.implementation-progress-read.json
+work/D011-B2.ownership-baseline.json
+work/D011-B2.progress.md
+work/D011-B2.scope.md
+work/D011-B2.verify-evidence.json
+work/D011-B.attempt-1.execution-baseline.json
+work/D011-B.attempt-2.execution-baseline.json
+work/D011-B.ownership-baseline.json
+work/D011-B.scope.md
+work/D011-B.split-proposal.corrective-rejected-1.json
+work/D011-B.split-proposal.failed-1.json
+work/D011-B.split-proposal.failed-2.json
+work/D011-B.split-status.json
+work/D011-B.splitter.lock
+work/D011-B.splitter-primary-response-1.txt
+work/D011-B.split-transaction.json
+work/D011-B.verify-evidence.json
+work/D011.ownership-baseline.json
+work/D011.split-proposal.corrective-rejected-1.json
+work/D011.split-proposal.failed-1.json
+work/D011.split-proposal.failed-2.json
+work/D011.split-status.json
+work/D011.splitter.lock
+work/D011.splitter-primary-response-1.txt
+work/D011.split-transaction.json
+work/D011.verify-evidence.json
+work/planner-restarts.json
+work/scheduler.lock
+work/split-leaves.json
+work/splits.json
+work/stage-a-controller-executions.json
+work/stage-a-controller.lock
+work/supervisor.pid
+
+=== MATCH D011-B2 / ATTEMPT LEDGER ===
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/query/leaves/D011-B2-context.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/query/leaves/D011-B2.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.attempt-1.execution-baseline.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.attempt-2.execution-baseline.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.attempt-3.execution-baseline.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.attempt-4.execution-baseline.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.attempt-4.implementation-progress-read.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.ownership-baseline.json
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.progress.md
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.scope.md
+/home/bking/AI/a2-e2e/20260928-final-current-tree-proof2/project/.opencode-v2/work/D011-B2.verify-evidence.json
+
+
+======================================================================
+FINISHED: 2026-09-28T11:50:47Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
