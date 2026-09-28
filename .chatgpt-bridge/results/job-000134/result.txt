@@ -1,0 +1,24 @@
+======================================================================
+JOB: job-000134
+JOB_COMMIT: caab9062f6f3e22f63f675fc6a7b726753a23dee
+STARTED: 2026-09-28T18:44:41Z
+======================================================================
+
+=== D011-B2 LEDGER CANDIDATES ===
+MATCHING_LEDGERS 0
+
+=== ACTUAL SESSION PART TIMELINE ===
+Traceback (most recent call last):
+  File "<stdin>", line 6, in <module>
+NameError: name 'sid' is not defined. Did you mean: 'id'?
+
+=== D011-B2 PROGRESS FILES ===
+/home/bking/AI/github-chatgpt-runner/repo/.chatgpt-bridge/jobs/job-000134/run.sh: line 68: /dev/null:: Permission denied
+
+
+======================================================================
+FINISHED: 2026-09-28T18:44:41Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
