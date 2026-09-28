@@ -1,0 +1,51 @@
+======================================================================
+JOB: job-000119
+JOB_COMMIT: c6c44179a2a016735488232d1a93e74eaf60ac6b
+STARTED: 2026-09-28T14:17:20Z
+======================================================================
+
+=== PATCH CHECK ===
+178:  const WAKE_NEXT_ENDPOINT = "http://127.0.0.1:{port}/wake-next";
+179:  const WAKE_ACK_ENDPOINT = "http://127.0.0.1:{port}/wake-ack";
+182:  const BRIDGE_VERSION = "2.11";
+230:    el.textContent="AI-Beast bridge v"+BRIDGE_VERSION+": "+text;
+624:  async function sendComposerMessage(text) {{
+645:    return sendComposerMessage(AUTO_CONTINUE_TEXT);
+678:  async function pollPendingWake() {{
+683:      const reply=await bridgeRequest("GET",WAKE_NEXT_ENDPOINT);
+692:        const sent=await sendComposerMessage(wake.message);
+701:      await bridgeRequest("POST",WAKE_ACK_ENDPOINT,{{id:wake.id}});
+1012:  pollPendingWake();
+1015:  setInterval(pollPendingWake,2000);
+1063:        if path=="/wake-next":
+1092:        if path=="/wake-ack":
+
+=== RESTART CLEANLY UNDER SYSTEMD ===
+active
+● chatgpt-job-ingress.service - ChatGPT to AI-Beast local Git job ingress
+     Loaded: loaded (/home/bking/.config/systemd/user/chatgpt-job-ingress.service; enabled; preset: enabled)
+     Active: active (running) since Mon 2026-09-28 16:17:21 CEST; 1s ago
+   Main PID: 1748103 (python3)
+      Tasks: 1 (limit: 70834)
+     Memory: 11.0M (peak: 12.2M)
+        CPU: 47ms
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/chatgpt-job-ingress.service
+             └─1748103 /usr/bin/python3 /home/bking/AI/chatgpt-job-ingress/ingress.py
+
+Sep 28 16:17:21 AI-Beast systemd[2420]: Started chatgpt-job-ingress.service - ChatGPT to AI-Beast local Git job ingress.
+Sep 28 16:17:21 AI-Beast python3[1748103]: [ingress] listening http://127.0.0.1:8767 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation
+
+=== HEALTH ===
+{"branch": "chatgpt-automation", "ok": true, "repo": "BKingGSXR1000/opencode-qwen38-multiagent", "service": "ai-beast-chatgpt-ingress"}
+
+  const WAKE_NEXT_ENDPOINT = "http://127.0.0.1:8767/wake-next";
+  const BRIDGE_VERSION = "2.11";
+      const reply=await bridgeRequest("GET",WAKE_NEXT_ENDPOINT);
+
+
+======================================================================
+FINISHED: 2026-09-28T14:17:22Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
