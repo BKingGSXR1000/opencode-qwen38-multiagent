@@ -1,0 +1,1109 @@
+======================================================================
+JOB: job-000130
+JOB_COMMIT: 91d268f783809c026648d23663852a40194256f7
+STARTED: 2026-09-28T17:31:45Z
+======================================================================
+
+=== scripts/supervisor.py:6170-6665 ===
+  6170	            sid=sessions[-1]
+  6171	            history=entry.get("implementation_max_step_continuations") or []
+  6172	            if not isinstance(history,list):
+  6173	                return False,"max-step-continuation-history-invalid"
+  6174	            prior=[
+  6175	                row for row in history
+  6176	                if isinstance(row,dict)
+  6177	                and int(row.get("attempt") or 0)==count
+  6178	            ]
+  6179	            legacy_missing_handoff=(
+  6180	                len(prior)==1
+  6181	                and not prior[0].get("handoff_progress_sha256")
+  6182	                and not progress_path.exists()
+  6183	            )
+  6184	            trusted_verify_visibility_candidate=(
+  6185	                len(prior)==1
+  6186	                and bool(prior[0].get("handoff_progress_sha256"))
+  6187	                and progress_path.exists()
+  6188	            )
+  6189	            reverify_single_write_cadence_candidate=(
+  6190	                len(prior)==2
+  6191	                and prior[0].get("recovery_kind")=="initial"
+  6192	                and prior[1].get("recovery_kind")=="trusted-verify-visibility"
+  6193	                and bool(prior[1].get("handoff_progress_sha256"))
+  6194	                and progress_path.exists()
+  6195	            )
+  6196	            if len(prior)>2:
+  6197	                return False,"max-step-continuation-limit"
+  6198	            if prior and not (
+  6199	                legacy_missing_handoff
+  6200	                or trusted_verify_visibility_candidate
+  6201	                or reverify_single_write_cadence_candidate
+  6202	            ):
+  6203	                return False,"max-step-continuation-limit"
+  6204	            failures=[
+  6205	                row for row in (entry.get("failure_history") or [])
+  6206	                if isinstance(row,dict)
+  6207	                and int(row.get("attempt") or 0)==count
+  6208	            ]
+  6209	            operator_rows=[
+  6210	                row for row in (entry.get("operator_retry_attempts") or [])
+  6211	                if isinstance(row,dict)
+  6212	                and int(row.get("sequence") or 0)==count
+  6213	                and row.get("session")==sid
+  6214	            ]
+  6215	            if len(failures)!=1 or len(operator_rows)>1:
+  6216	                return False,"max-step-continuation-records-mismatch"
+  6217	            failure=failures[0]
+  6218	            operator_funded=(len(operator_rows)==1)
+  6219	            op=operator_rows[0] if operator_funded else None
+  6220	            failure_match=re.fullmatch(
+  6221	                r"verify-failed-([1-9]\d*)",
+  6222	                str(failure.get("reason") or ""),
+  6223	            )
+  6224	            if not (
+  6225	                failure.get("classification")=="genuine"
+  6226	                and failure_match
+  6227	            ):
+  6228	                return False,"max-step-continuation-terminal-state-mismatch"
+  6229	            if operator_funded and not (
+  6230	                op.get("state")=="consumed"
+  6231	                and op.get("outcome")=="meaningful_execution"
+  6232	                and op.get("consumes_operator_grant") is True
+  6233	            ):
+  6234	                return False,"max-step-continuation-terminal-state-mismatch"
+  6235	            verify_exit_code=int(failure_match.group(1))
+  6236	
+  6237	    status=v1_session_status_snapshot().get(sid)
+  6238	    if isinstance(status,dict) and str(
+  6239	        status.get("type") or status.get("status") or ""
+  6240	    ).lower()=="busy":
+  6241	        return False,"max-step-continuation-session-still-active"
+  6242	    trusted_verify_visibility_evidence={}
+  6243	    trusted_visibility_proven=False
+  6244	    latest_verify_clean_tail_proven=False
+  6245	    if (
+  6246	        trusted_verify_visibility_candidate
+  6247	        or reverify_single_write_cadence_candidate
+  6248	    ):
+  6249	        trusted_verify_visibility_evidence=(
+  6250	            trusted_verify_reverify_visibility_evidence(
+  6251	                sid,did,canonical
+  6252	            )
+  6253	        )
+  6254	        if not trusted_verify_visibility_evidence:
+  6255	            return False,"max-step-continuation-limit"
+  6256	    if trusted_verify_visibility_candidate:
+  6257	        trusted_visibility_proven=bool(
+  6258	            int(trusted_verify_visibility_evidence.get(
+  6259	                "trusted_exact_verify_failures"
+  6260	            ) or 0)>=1
+  6261	            and int(trusted_verify_visibility_evidence.get(
+  6262	                "post_verify_exact_required_denials"
+  6263	            ) or 0)>=1
+  6264	            and trusted_verify_visibility_evidence.get(
+  6265	                "current_classifier_state"
+  6266	            )=="failed"
+  6267	            and trusted_verify_visibility_evidence.get(
+  6268	                "owned_mutation_seen"
+  6269	            ) is False
+  6270	            and trusted_verify_visibility_evidence.get(
+  6271	                "maximum_steps_reached"
+  6272	            ) is True
+  6273	        )
+  6274	        latest_verify_clean_tail_proven=bool(
+  6275	            int(trusted_verify_visibility_evidence.get(
+  6276	                "trusted_exact_verify_failures"
+  6277	            ) or 0)>=1
+  6278	            and int(trusted_verify_visibility_evidence.get(
+  6279	                "post_latest_verify_owned_edits"
+  6280	            ) or 0)==0
+  6281	            and trusted_verify_visibility_evidence.get(
+  6282	                "current_classifier_state"
+  6283	            )=="failed"
+  6284	            and trusted_verify_visibility_evidence.get(
+  6285	                "owned_mutation_seen"
+  6286	            ) is True
+  6287	            and trusted_verify_visibility_evidence.get(
+  6288	                "maximum_steps_reached"
+  6289	            ) is True
+  6290	        )
+  6291	        if not (
+  6292	            trusted_visibility_proven
+  6293	            or latest_verify_clean_tail_proven
+  6294	        ):
+  6295	            return (
+  6296	                False,
+  6297	                "max-step-continuation-trusted-verify-visibility-proof-mismatch",
+  6298	            )
+  6299	    if reverify_single_write_cadence_candidate:
+  6300	        if not (
+  6301	            int(trusted_verify_visibility_evidence.get(
+  6302	                "trusted_exact_verify_failures"
+  6303	            ) or 0)>=1
+  6304	            and int(trusted_verify_visibility_evidence.get(
+  6305	                "post_verify_owned_edits"
+  6306	            ) or 0)>=2
+  6307	            and trusted_verify_visibility_evidence.get(
+  6308	                "current_classifier_state"
+  6309	            )=="failed"
+  6310	            and trusted_verify_visibility_evidence.get(
+  6311	                "owned_mutation_seen"
+  6312	            ) is True
+  6313	            and trusted_verify_visibility_evidence.get(
+  6314	                "maximum_steps_reached"
+  6315	            ) is True
+  6316	            and reverify_single_write_cadence_fix_installed()
+  6317	        ):
+  6318	            return (
+  6319	                False,
+  6320	                "max-step-continuation-reverify-cadence-proof-mismatch",
+  6321	            )
+  6322	    terminal_summary=(max_step_terminal_summary_db(sid) or "").strip()
+  6323	    if not terminal_summary:
+  6324	        return False,"max-step-continuation-no-max-step-terminal"
+  6325	    if not durable_worker_execution(did,sid):
+  6326	        return False,"max-step-continuation-no-durable-owned-progress"
+  6327	    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+  6328	    if not changed or delta!="changed":
+  6329	        return False,"max-step-continuation-owned-state-not-changed"
+  6330	    project=Path(PROJECT)
+  6331	    if worker_sandbox_has_fatal_violation(project,did,sid):
+  6332	        return False,"max-step-continuation-fatal-sandbox-violation"
+  6333	    violations=ownership_violations(did,sid)
+  6334	    if violations:
+  6335	        return False,"max-step-continuation-ownership-violation:"+",".join(violations[:4])
+  6336	    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+  6337	    if not (
+  6338	        isinstance(verify,dict)
+  6339	        and int(verify.get("attempt") or 0)==count
+  6340	        and verify.get("session")==sid
+  6341	        and verify.get("executed") is True
+  6342	        and verify.get("result")==f"verify-failed-{verify_exit_code}"
+  6343	        and int(verify.get("exit_code") or -1)==verify_exit_code
+  6344	        and str(verify.get("command") or "")==canonical
+  6345	    ):
+  6346	        return False,"max-step-continuation-verify-evidence-mismatch"
+  6347	    if not diagnostic:
+  6348	        diagnostic=verify_evidence_failure_diagnostic(verify)
+  6349	
+  6350	    recovery_kind=(
+  6351	        "reverify-single-write-cadence"
+  6352	        if reverify_single_write_cadence_candidate
+  6353	        else (
+  6354	            "latest-verify-clean-tail"
+  6355	            if latest_verify_clean_tail_proven
+  6356	            else (
+  6357	                "trusted-verify-visibility"
+  6358	                if trusted_visibility_proven
+  6359	                else (
+  6360	                    "legacy-missing-handoff"
+  6361	                    if legacy_missing_handoff
+  6362	                    else "initial"
+  6363	                )
+  6364	            )
+  6365	        )
+  6366	    )
+  6367	    summary_tail=terminal_summary[-6500:]
+  6368	    progress_text=(
+  6369	        "SUPERVISOR_MAX_STEP_CONTINUATION: true\n"
+  6370	        f"DELIVERABLE: {did}\n"
+  6371	        f"ATTEMPT: {count}\n"
+  6372	        f"SOURCE_SESSION: {sid}\n"
+  6373	        f"RECOVERY_KIND: {recovery_kind}\n"
+  6374	        "AUTHORITATIVE_CONTRACT: context-packet-wins\n"
+  6375	        f"EXACT_VERIFY_RESULT: verify-failed-{verify_exit_code}\n"
+  6376	        + (
+  6377	            "SUPERVISOR_DIAGNOSTIC: "
+  6378	            + diagnostic.replace("\n"," ")
+  6379	            + "\n"
+  6380	            if diagnostic else ""
+  6381	        )
+  6382	        + "\nTerminal worker summary (continue from actual filesystem state):\n"
+  6383	        f"{summary_tail}\n"
+  6384	    )
+  6385	    progress_sha=hashlib.sha256(progress_text.encode("utf-8")).hexdigest()
+  6386	    marker_id=hashlib.sha256(
+  6387	        f"{IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL}\0"
+  6388	        f"{did}\0{count}\0{sid}\0{recovery_kind}".encode()
+  6389	    ).hexdigest()[:20]
+  6390	    placeholder=f"dispatch:max-step-continuation:{marker_id}:{did}"
+  6391	    now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+  6392	    clear_split=False
+  6393	
+  6394	    with dispatch_lock:
+  6395	        with attempt_lock():
+  6396	            data=load_attempts()
+  6397	            entry=(data.get("deliverables") or {}).get(did)
+  6398	            if not isinstance(entry,dict):
+  6399	                return False,"max-step-continuation-ledger-disappeared"
+  6400	            if (
+  6401	                int(entry.get("count") or 0)!=count
+  6402	                or (entry.get("sessions") or [])[-1:]!=[sid]
+  6403	            ):
+  6404	                return False,"max-step-continuation-ledger-changed"
+  6405	            history=entry.get("implementation_max_step_continuations") or []
+  6406	            if not isinstance(history,list):
+  6407	                return False,"max-step-continuation-history-invalid"
+  6408	            prior_now=[
+  6409	                row for row in history
+  6410	                if isinstance(row,dict)
+  6411	                and int(row.get("attempt") or 0)==count
+  6412	            ]
+  6413	            legacy_now=(
+  6414	                len(prior_now)==1
+  6415	                and not prior_now[0].get("handoff_progress_sha256")
+  6416	                and not progress_path.exists()
+  6417	            )
+  6418	            trusted_visibility_now=(
+  6419	                len(prior_now)==1
+  6420	                and bool(prior_now[0].get("handoff_progress_sha256"))
+  6421	                and progress_path.exists()
+  6422	            )
+  6423	            reverify_cadence_now=(
+  6424	                len(prior_now)==2
+  6425	                and prior_now[0].get("recovery_kind")=="initial"
+  6426	                and prior_now[1].get("recovery_kind")=="trusted-verify-visibility"
+  6427	                and bool(prior_now[1].get("handoff_progress_sha256"))
+  6428	                and progress_path.exists()
+  6429	            )
+  6430	            if recovery_kind=="initial":
+  6431	                if prior_now:
+  6432	                    return False,"max-step-continuation-limit"
+  6433	            elif recovery_kind=="legacy-missing-handoff":
+  6434	                if not legacy_now:
+  6435	                    return False,"max-step-continuation-legacy-handoff-proof-changed"
+  6436	            elif recovery_kind in {
+  6437	                "trusted-verify-visibility","latest-verify-clean-tail"
+  6438	            }:
+  6439	                if not trusted_visibility_now:
+  6440	                    return (
+  6441	                        False,
+  6442	                        "max-step-continuation-trusted-verify-visibility-proof-changed",
+  6443	                    )
+  6444	            elif recovery_kind=="reverify-single-write-cadence":
+  6445	                if not reverify_cadence_now:
+  6446	                    return (
+  6447	                        False,
+  6448	                        "max-step-continuation-reverify-cadence-proof-changed",
+  6449	                    )
+  6450	            else:
+  6451	                return False,"max-step-continuation-recovery-kind-invalid"
+  6452	
+  6453	            failures=[
+  6454	                row for row in (entry.get("failure_history") or [])
+  6455	                if isinstance(row,dict)
+  6456	                and int(row.get("attempt") or 0)==count
+  6457	            ]
+  6458	            operator_rows=[
+  6459	                row for row in (entry.get("operator_retry_attempts") or [])
+  6460	                if isinstance(row,dict)
+  6461	                and int(row.get("sequence") or 0)==count
+  6462	                and row.get("session")==sid
+  6463	            ]
+  6464	            if len(failures)!=1 or len(operator_rows)>1:
+  6465	                return False,"max-step-continuation-records-changed"
+  6466	            failure=failures[0]
+  6467	            operator_funded_now=(len(operator_rows)==1)
+  6468	            op=operator_rows[0] if operator_funded_now else None
+  6469	            failure_match_now=re.fullmatch(
+  6470	                r"verify-failed-([1-9]\d*)",
+  6471	                str(failure.get("reason") or ""),
+  6472	            )
+  6473	            if not (
+  6474	                failure.get("classification")=="genuine"
+  6475	                and failure_match_now
+  6476	                and int(failure_match_now.group(1))==verify_exit_code
+  6477	            ):
+  6478	                return False,"max-step-continuation-state-changed"
+  6479	            if operator_funded_now and not (
+  6480	                op.get("state")=="consumed"
+  6481	                and op.get("outcome")=="meaningful_execution"
+  6482	                and op.get("consumes_operator_grant") is True
+  6483	            ):
+  6484	                return False,"max-step-continuation-state-changed"
+  6485	
+  6486	            original_failure=dict(failure)
+  6487	            original_operator=dict(op) if operator_funded_now else None
+  6488	            entry["failure_history"]=[
+  6489	                row for row in (entry.get("failure_history") or [])
+  6490	                if row is not failure
+  6491	            ]
+  6492	            entry["sessions"][-1]=placeholder
+  6493	            if operator_funded_now:
+  6494	                op["session"]=placeholder
+  6495	                op["state"]="reserved"
+  6496	                op["consumes_operator_grant"]=False
+  6497	                op["rearmed_by"]=IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL
+  6498	                op["rearmed_at"]=now
+  6499	                for key in ("outcome","evidence","consumed_at","resolved_at"):
+  6500	                    op.pop(key,None)
+  6501	            continuation_row={
+  6502	                "protocol":IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  6503	                "recovery_kind":recovery_kind,
+  6504	                "attempt":count,
+  6505	                "session":sid,
+  6506	                "replacement":placeholder,
+  6507	                "original_failure_record":original_failure,
+  6508	                "original_operator_record":original_operator,
+  6509	                "completed_tool_turns":persisted_completed_tool_turns(sid),
+  6510	                "owned_state":"changed",
+  6511	                "verify_result":f"verify-failed-{verify_exit_code}",
+  6512	                "verify_exit_code":verify_exit_code,
+  6513	                "handoff_progress_path":str(
+  6514	                    progress_path.relative_to(Path(PROJECT))
+  6515	                ),
+  6516	                "handoff_progress_sha256":progress_sha,
+  6517	                "source":"supervisor-max-step-continuation",
+  6518	                "timestamp":now,
+  6519	            }
+  6520	            if diagnostic:
+  6521	                continuation_row["supervisor_diagnostic"]=diagnostic
+  6522	                continuation_row["supervisor_diagnostic_sha256"]=hashlib.sha256(
+  6523	                    diagnostic.encode("utf-8")
+  6524	                ).hexdigest()
+  6525	            if recovery_kind in {
+  6526	                "legacy-missing-handoff",
+  6527	                "trusted-verify-visibility",
+  6528	                "latest-verify-clean-tail",
+  6529	                "reverify-single-write-cadence",
+  6530	            }:
+  6531	                continuation_row["previous_continuation_session"]=str(
+  6532	                    prior[-1].get("session") or ""
+  6533	                )
+  6534	            if recovery_kind=="trusted-verify-visibility":
+  6535	                continuation_row[
+  6536	                    "trusted_verify_visibility_evidence"
+  6537	                ]={
+  6538	                    "trusted_exact_verify_failures":int(
+  6539	                        trusted_verify_visibility_evidence.get(
+  6540	                            "trusted_exact_verify_failures"
+  6541	                        ) or 0
+  6542	                    ),
+  6543	                    "post_verify_exact_required_denials":int(
+  6544	                        trusted_verify_visibility_evidence.get(
+  6545	                            "post_verify_exact_required_denials"
+  6546	                        ) or 0
+  6547	                    ),
+  6548	                    "post_verify_owned_edit_denials":int(
+  6549	                        trusted_verify_visibility_evidence.get(
+  6550	                            "post_verify_owned_edit_denials"
+  6551	                        ) or 0
+  6552	                    ),
+  6553	                    "current_classifier_state":str(
+  6554	                        trusted_verify_visibility_evidence.get(
+  6555	                            "current_classifier_state"
+  6556	                        ) or ""
+  6557	                    ),
+  6558	                }
+  6559	            if recovery_kind=="latest-verify-clean-tail":
+  6560	                continuation_row["latest_verify_clean_tail_evidence"]={
+  6561	                    "trusted_exact_verify_failures":int(
+  6562	                        trusted_verify_visibility_evidence.get(
+  6563	                            "trusted_exact_verify_failures"
+  6564	                        ) or 0
+  6565	                    ),
+  6566	                    "post_verify_owned_edits":int(
+  6567	                        trusted_verify_visibility_evidence.get(
+  6568	                            "post_verify_owned_edits"
+  6569	                        ) or 0
+  6570	                    ),
+  6571	                    "post_latest_verify_owned_edits":int(
+  6572	                        trusted_verify_visibility_evidence.get(
+  6573	                            "post_latest_verify_owned_edits"
+  6574	                        ) or 0
+  6575	                    ),
+  6576	                    "current_classifier_state":str(
+  6577	                        trusted_verify_visibility_evidence.get(
+  6578	                            "current_classifier_state"
+  6579	                        ) or ""
+  6580	                    ),
+  6581	                    "maximum_steps_reached":bool(
+  6582	                        trusted_verify_visibility_evidence.get(
+  6583	                            "maximum_steps_reached"
+  6584	                        )
+  6585	                    ),
+  6586	                }
+  6587	            if recovery_kind=="reverify-single-write-cadence":
+  6588	                continuation_row["reverify_single_write_cadence_evidence"]={
+  6589	                    "trusted_exact_verify_failures":int(
+  6590	                        trusted_verify_visibility_evidence.get(
+  6591	                            "trusted_exact_verify_failures"
+  6592	                        ) or 0
+  6593	                    ),
+  6594	                    "post_verify_owned_edits":int(
+  6595	                        trusted_verify_visibility_evidence.get(
+  6596	                            "post_verify_owned_edits"
+  6597	                        ) or 0
+  6598	                    ),
+  6599	                    "current_classifier_state":str(
+  6600	                        trusted_verify_visibility_evidence.get(
+  6601	                            "current_classifier_state"
+  6602	                        ) or ""
+  6603	                    ),
+  6604	                    "maximum_steps_reached":bool(
+  6605	                        trusted_verify_visibility_evidence.get(
+  6606	                            "maximum_steps_reached"
+  6607	                        )
+  6608	                    ),
+  6609	                }
+  6610	            entry.setdefault(
+  6611	                "implementation_max_step_continuations",[]
+  6612	            ).append(continuation_row)
+  6613	            entry["unmaterialized_dispatch_sequence"]=count
+  6614	            entry["unmaterialized_dispatch_replays"]=0
+  6615	            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+  6616	                "sequence":count,
+  6617	                "replaced":sid,
+  6618	                "replacement":placeholder,
+  6619	                "source":"supervisor-max-step-continuation",
+  6620	                "recovery_kind":recovery_kind,
+  6621	                "timestamp":now,
+  6622	            })
+  6623	            if entry.pop("split_required",None) is not None:
+  6624	                clear_split=True
+  6625	            projected=attempt_state(entry)
+  6626	            if not projected.get("valid"):
+  6627	                return False,"max-step-continuation-projected-ledger-invalid"
+  6628	            if not projected.get("unmaterialized_dispatch_reusable"):
+  6629	                return False,"max-step-continuation-not-reusable"
+  6630	            if int(projected.get("count") or 0)!=count:
+  6631	                return False,"max-step-continuation-count-changed"
+  6632	            atomic_write_text(progress_path,progress_text)
+  6633	            save_attempts(data)
+  6634	
+  6635	    if clear_split:
+  6636	        _clear_split_request_state_for_contract_repair(did)
+  6637	        splitter_lock_path(did).unlink(missing_ok=True)
+  6638	    log(
+  6639	        f"IMPLEMENTATION_MAX_STEP_CONTINUATION deliverable={did} "
+  6640	        f"attempt={count} session={sid} kind={recovery_kind} "
+  6641	        f"handoff_sha256={progress_sha} placeholder={placeholder}"
+  6642	    )
+  6643	    csv(
+  6644	        "IMPLEMENTATION_MAX_STEP_CONTINUATION",sid,"supervisor",
+  6645	        f"{did} attempt={count} kind={recovery_kind} "
+  6646	        f"handoff_sha256={progress_sha} placeholder={placeholder}",
+  6647	    )
+  6648	    return True,"rearmed-same-attempt"
+  6649	
+  6650	
+  6651	CONTEXT_DELIVERY_RECOVERY_PROTOCOL="v2-context-delivery-recovery-v1"
+  6652	
+  6653	
+  6654	def context_delivery_failure_evidence(sid,did,attempt):
+  6655	    """Return durable evidence for the compact-context/direct-write trap."""
+  6656	    result={
+  6657	        "context_reads":0,
+  6658	        "truncated_context_reads":0,
+  6659	        "context_verify_visible":False,
+  6660	        "progress_read_denials":0,
+  6661	        "write_required_denials":0,
+  6662	        "maximum_steps_reached":False,
+  6663	        "completed_tool_turns":0,
+  6664	        "progress_baseline":"",
+  6665	        "context_output_sha256":"",
+=== scripts/supervisor.py:680-850 ===
+   680	            parts=d.get("content") if isinstance(d,dict) else None
+   681	            if not isinstance(parts,list):
+   682	                continue
+   683	            texts=[
+   684	                p.get("text","") for p in parts
+   685	                if isinstance(p,dict)
+   686	                and p.get("type")=="text"
+   687	                and isinstance(p.get("text"),str)
+   688	            ]
+   689	            text="\n".join(x for x in texts if x).strip()
+   690	            if text:
+   691	                return text
+   692	    except Exception:
+   693	        pass
+   694	    return ""
+   695	
+   696	
+   697	MAX_STEP_TERMINAL_RE=re.compile(
+   698	    r"(?:maximum steps for this agent have been reached|max steps reached for this agent session)",
+   699	    re.IGNORECASE,
+   700	)
+   701	
+   702	
+   703	def max_step_terminal_summary_db(sid):
+   704	    """Return a max-step terminal summary even if text/compaction followed it.
+   705	
+   706	    OpenCode may append compaction summaries or continuation prose after either
+   707	    supported max-step terminal marker. Accept that history only when no later
+   708	    tool part exists after the marker; any later tool execution means the
+   709	    session was no longer terminal at that point.
+   710	    """
+   711	    latest=last_assistant_text_db(sid)
+   712	    marker_re=MAX_STEP_TERMINAL_RE
+   713	    if marker_re.search(latest or ""):
+   714	        return latest
+   715	
+   716	    if not v1_runtime_enabled():
+   717	        return ""
+   718	
+   719	    try:
+   720	        con=db_connect()
+   721	        rows=con.execute(
+   722	            "SELECT time_created,data FROM part "
+   723	            "WHERE session_id=? ORDER BY time_created,id",
+   724	            (sid,),
+   725	        ).fetchall()
+   726	        con.close()
+   727	    except Exception:
+   728	        return ""
+   729	
+   730	    marker_time=-1
+   731	    marker_text=""
+   732	    later_tool_time=-1
+   733	    for created,raw in rows:
+   734	        try:
+   735	            part=json.loads(raw) if raw else {}
+   736	        except Exception:
+   737	            continue
+   738	        if not isinstance(part,dict):
+   739	            continue
+   740	        when=int(created or 0)
+   741	        if part.get("type")=="text":
+   742	            text=str(part.get("text") or "")
+   743	            if marker_re.search(text):
+   744	                marker_time=when
+   745	                marker_text=text.strip()
+   746	                later_tool_time=-1
+   747	            continue
+   748	        if (
+   749	            marker_time>=0
+   750	            and when>marker_time
+   751	            and part.get("type")=="tool"
+   752	        ):
+   753	            later_tool_time=max(later_tool_time,when)
+   754	
+   755	    if marker_time<0 or later_tool_time>marker_time:
+   756	        return ""
+   757	
+   758	    if latest and latest.strip()!=marker_text:
+   759	        return marker_text+"\n\nLatest post-terminal summary:\n"+latest.strip()
+   760	    return marker_text
+   761	
+   762	
+   763	def parse_split_parent(text):
+   764	    m=re.search(
+   765	        r"(?m)^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?$|\r?\n)",
+   766	        str(text or ""),
+   767	    )
+   768	    return m.group(1) if m else ""
+   769	
+   770	
+   771	def parse_deliverable(text):
+   772	    if not text: return ""
+   773	    m=re.search(r"(?mi)^\s*DELIVERABLE\s*:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$",text)
+   774	    return m.group(1) if m else ""
+   775	
+   776	def implementation_prompt(did):
+   777	    return (
+   778	        f"DELIVERABLE: {did}\n"
+   779	        f"Read .opencode-v2/query/leaves/{did}-context.json exactly once for this session; "
+   780	        "it is the complete authoritative deliverable contract. Do not read "
+   781	        ".opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope. "
+   782	        "If parent_supervisor_execution_correction is non-empty, apply it to "
+   783	        "inherited parent execution details in parent_outcome_context/current_progress/"
+   784	        "split_scope. Then, if supervisor_execution_correction is non-empty, apply the "
+   785	        "child-specific correction; it wins only where the two execution corrections "
+   786	        "conflict. Neither correction may change ownership, Verify, dependencies, "
+   787	        "Done-when, or Acceptance.\n"
+   788	        f"Read .opencode-v2/work/{did}.progress.md if present.\n"
+   789	        "Inspect your owned project artifacts as they currently exist.\n"
+   790	        "Continue from actual filesystem state and execute the deliverable."
+   791	    )
+   792	
+   793	def early_write_completed_turn_limit(leaf):
+   794	    complexity=str(leaf.get("complexity") or "S").strip().upper() if isinstance(leaf,dict) else "S"
+   795	    return int(EARLY_WRITE_COMPLETED_TURNS_BY_COMPLEXITY.get(complexity,4))
+   796	
+   797	
+   798	def _ordinal_word(value):
+   799	    return {4:"FOURTH",6:"SIXTH"}.get(int(value),f"{int(value)}TH")
+   800	
+   801	
+   802	def _next_ordinal_word(value):
+   803	    return {4:"fifth",6:"seventh"}.get(int(value),f"{int(value)+1}th")
+   804	
+   805	
+   806	CONTRACT_CHALLENGE_RE=re.compile(
+   807	    r"(?m)^CONTRACT_CHALLENGE:\s*(.{20,800})\s*$"
+   808	)
+   809	
+   810	def parse_contract_challenge(text):
+   811	    matches=CONTRACT_CHALLENGE_RE.findall(str(text or ""))
+   812	    if len(matches)!=1:
+   813	        return ""
+   814	    reason=" ".join(str(matches[0]).split())
+   815	    return "" if validate_contract_challenge_reason(reason) else reason
+   816	
+   817	def verify_reporting_rule():
+   818	    return (
+   819	        "\n\nVERIFY REPORTING:\n"
+   820	        "Say exact Verify passed only if packet verify_command ran UNCHANGED and exited 0; "
+   821	        "label all other checks noncanonical. If failed exact Verify contradicts "
+   822	        "Done-when/Acceptance, STOP edits and return one line: "
+   823	        "CONTRACT_CHALLENGE: <20..800 char concrete contradiction>. "
+   824	        "Never use this for implementation bugs or missing work; it grants no retry."
+   825	    )
+   826	
+   827	
+   828	def plan_contract_reverify_pending(did,leaf=None):
+   829	    """True only for a supervisor-recorded stronger Verify awaiting recheck."""
+   830	    if not did:
+   831	        return False
+   832	    if leaf is None:
+   833	        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+   834	    if not isinstance(leaf,dict):
+   835	        return False
+   836	    command=str(leaf.get("verify_command") or "")
+   837	    if not command:
+   838	        return False
+   839	    try:
+   840	        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+   841	        rows=entry.get("plan_contract_revisions") or []
+   842	        digest=hashlib.sha256(command.encode()).hexdigest()
+   843	        matching_revisions=[
+   844	            row for row in rows
+   845	            if isinstance(row,dict)
+   846	            and row.get("source")=="supervisor-plan-contract-revision"
+   847	            and row.get("current_verify_sha256")==digest
+   848	        ]
+   849	        if not matching_revisions:
+   850	            return False
+=== scripts/supervisor.py:12970-13045 ===
+ 12970	        return "na","not-owned-artifact-implementation"
+ 12971	    attempt=attempt_sequence_for_session(sid,did)
+ 12972	    if not attempt:
+ 12973	        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+ 12974	        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+ 12975	
+ 12976	    progress_rel=f".opencode-v2/work/{did}.progress.md"
+ 12977	    reconcile_implementation_progress_read_marker(sid,did,attempt)
+ 12978	    progress_available=implementation_progress_read_available(did,attempt)
+ 12979	    if (
+ 12980	        progress_available
+ 12981	        and tool=="read"
+ 12982	        and _tool_targets_exact_project_path(tool,args,progress_rel)
+ 12983	    ):
+ 12984	        write_implementation_progress_read_marker(
+ 12985	            did,attempt,sid,"current-tool-preexecution"
+ 12986	        )
+ 12987	        turns=persisted_completed_tool_turns(sid)
+ 12988	        return "implementation-progress-read-once",(
+ 12989	            f"implementation_direct_write completed_tool_turns={turns} "
+ 12990	            f"allowed_once=read {progress_rel} next_tool=bounded-state-read-or-write"
+ 12991	        )
+ 12992	
+ 12993	    turns=persisted_completed_tool_turns(sid)
+ 12994	    deadline=early_write_completed_turn_limit(leaf)
+ 12995	    if turns < deadline and tool=="read":
+ 12996	        for target_rel in implementation_prewrite_read_targets(leaf):
+ 12997	            if (
+ 12998	                _tool_targets_exact_project_path(tool,args,target_rel)
+ 12999	                and not persisted_exact_project_read_seen(sid,target_rel)
+ 13000	            ):
+ 13001	                return "implementation-bounded-read-once",(
+ 13002	                    f"implementation_direct_write completed_tool_turns={turns} "
+ 13003	                    f"allowed_once=read {target_rel} next_tool=bounded-state-read-or-write"
+ 13004	                )
+ 13005	
+ 13006	    if turns < 1:
+ 13007	        return "allow",f"implementation_direct_write completed_tool_turns={turns} required=1"
+ 13008	    if ready_info(did):
+ 13009	        return "satisfied","implementation leaf-ready"
+ 13010	
+ 13011	    exact_failures=plan_contract_session_exact_verify_failure_count(sid,leaf)
+ 13012	    if exact_failures>=2:
+ 13013	        return "implementation-contract-challenge-required",(
+ 13014	            f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} "
+ 13015	            f"exact_verify_failures={exact_failures} "
+ 13016	            "next_action=return-single-line-CONTRACT_CHALLENGE "
+ 13017	            "reason_must=name-verify_command-and-contract-authority-and-assert-conflict-or-cannot-pass "
+ 13018	            "no_more_tools=true"
+ 13019	        )
+ 13020	
+ 13021	    changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
+ 13022	
+ 13023	    continuation_reverify=implementation_max_step_continuation_session_pending(
+ 13024	        sid,did,attempt
+ 13025	    )
+ 13026	    reverify=plan_contract_reverify_pending(did,leaf) or continuation_reverify
+ 13027	    if reverify:
+ 13028	        exact_state=plan_contract_session_exact_verify_state(sid,leaf)
+ 13029	        current_session_mutated=session_owned_mutation_seen(sid,did)
+ 13030	        if exact_state=="passed":
+ 13031	            return "implementation-return-required",(
+ 13032	                f"PLAN_CONTRACT_EXACT_VERIFY_PASSED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+ 13033	                "next_action=return-without-tools do_not_mutate=true"
+ 13034	            )
+ 13035	        if current_session_mutated:
+ 13036	            if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
+ 13037	                return "implementation-exact-verify",(
+ 13038	                    f"PLAN_CONTRACT_POST_WRITE_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+ 13039	                    "command=current-canonical-verify"
+ 13040	                )
+ 13041	            # Reverify/continuation repair is intentionally one owned mutation
+ 13042	            # per failed-Verify cycle. Forcing feedback before another write
+ 13043	            # prevents a short continuation from spending its remaining turns
+ 13044	            # on speculative edit batches without observing the first repair.
+ 13045	            return "implementation-exact-verify-required",(
+=== scripts/test_state_machine_invariants.py:1640-1910 ===
+  1640	                    self.did
+  1641	                ),
+  1642	                (True,"rearmed-same-attempt"),
+  1643	            )
+  1644	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1645	            "deliverables"
+  1646	        ][self.did]
+  1647	        recovery=entry["implementation_max_step_continuations"][-1]
+  1648	        self.assertIn(
+  1649	            "stdlib-only imports: stdout=non-stdlib: ./pkg/a.py:pkg",
+  1650	            recovery["supervisor_diagnostic"],
+  1651	        )
+  1652	        progress=(self.work/f"{self.did}.progress.md").read_text()
+  1653	        self.assertIn(
+  1654	            "SUPERVISOR_DIAGNOSTIC: stdlib-only imports: "
+  1655	            "stdout=non-stdlib: ./pkg/a.py:pkg",
+  1656	            progress,
+  1657	        )
+  1658	
+  1659	    def test_allows_second_continuation_only_for_trusted_verify_visibility_bug(self):
+  1660	        data=json.loads((self.work/"attempts.json").read_text())
+  1661	        progress=self.work/f"{self.did}.progress.md"
+  1662	        progress.write_text("first continuation handoff\n")
+  1663	        data["deliverables"][self.did][
+  1664	            "implementation_max_step_continuations"
+  1665	        ]=[{
+  1666	            "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1667	            "recovery_kind":"initial",
+  1668	            "attempt":3,
+  1669	            "session":"prior-session",
+  1670	            "replacement":"dispatch:max-step-continuation:prior:D001",
+  1671	            "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+  1672	            "handoff_progress_sha256":hashlib.sha256(
+  1673	                progress.read_bytes()
+  1674	            ).hexdigest(),
+  1675	        }]
+  1676	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1677	        proof={
+  1678	            "agent":"implementer",
+  1679	            "trusted_exact_verify_failures":1,
+  1680	            "post_verify_exact_required_denials":2,
+  1681	            "post_verify_owned_edit_denials":1,
+  1682	            "current_classifier_state":"failed",
+  1683	            "owned_mutation_seen":False,
+  1684	            "maximum_steps_reached":True,
+  1685	        }
+  1686	        patches=self.recovery_patches()
+  1687	        with (
+  1688	            patches[0],patches[1],patches[2],patches[3],
+  1689	            patches[4],patches[5],patches[6],
+  1690	            mock.patch.object(
+  1691	                supervisor,"trusted_verify_reverify_visibility_evidence",
+  1692	                return_value=proof,
+  1693	            ),
+  1694	        ):
+  1695	            self.assertEqual(
+  1696	                supervisor.recover_implementation_max_step_continuation(
+  1697	                    self.did
+  1698	                ),
+  1699	                (True,"rearmed-same-attempt"),
+  1700	            )
+  1701	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1702	            "deliverables"
+  1703	        ][self.did]
+  1704	        self.assertEqual(entry["count"],3)
+  1705	        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+  1706	        latest=entry["implementation_max_step_continuations"][-1]
+  1707	        self.assertEqual(latest["recovery_kind"],"trusted-verify-visibility")
+  1708	        self.assertEqual(latest["previous_continuation_session"],"prior-session")
+  1709	        self.assertEqual(
+  1710	            latest["trusted_verify_visibility_evidence"][
+  1711	                "trusted_exact_verify_failures"
+  1712	            ],
+  1713	            1,
+  1714	        )
+  1715	        self.assertEqual(
+  1716	            latest["trusted_verify_visibility_evidence"][
+  1717	                "post_verify_exact_required_denials"
+  1718	            ],
+  1719	            2,
+  1720	        )
+  1721	        self.assertTrue(
+  1722	            control_state.attempt_state(entry)["unmaterialized_dispatch_reusable"]
+  1723	        )
+  1724	
+  1725	    def test_allows_second_continuation_when_latest_verify_has_clean_tail(self):
+  1726	        data=json.loads((self.work/"attempts.json").read_text())
+  1727	        progress=self.work/f"{self.did}.progress.md"
+  1728	        progress.write_text("first continuation handoff\n")
+  1729	        data["deliverables"][self.did][
+  1730	            "implementation_max_step_continuations"
+  1731	        ]=[{
+  1732	            "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1733	            "recovery_kind":"initial",
+  1734	            "attempt":3,
+  1735	            "session":"prior-session",
+  1736	            "replacement":"dispatch:max-step-continuation:prior:D001",
+  1737	            "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+  1738	            "handoff_progress_sha256":hashlib.sha256(
+  1739	                progress.read_bytes()
+  1740	            ).hexdigest(),
+  1741	        }]
+  1742	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1743	        proof={
+  1744	            "agent":"implementer",
+  1745	            "trusted_exact_verify_failures":2,
+  1746	            "post_verify_exact_required_denials":0,
+  1747	            "post_verify_owned_edit_denials":0,
+  1748	            "post_verify_owned_edits":1,
+  1749	            "post_latest_verify_owned_edits":0,
+  1750	            "current_classifier_state":"failed",
+  1751	            "owned_mutation_seen":True,
+  1752	            "maximum_steps_reached":True,
+  1753	        }
+  1754	        patches=self.recovery_patches()
+  1755	        with (
+  1756	            patches[0],patches[1],patches[2],patches[3],
+  1757	            patches[4],patches[5],patches[6],
+  1758	            mock.patch.object(
+  1759	                supervisor,"trusted_verify_reverify_visibility_evidence",
+  1760	                return_value=proof,
+  1761	            ),
+  1762	        ):
+  1763	            self.assertEqual(
+  1764	                supervisor.recover_implementation_max_step_continuation(
+  1765	                    self.did
+  1766	                ),
+  1767	                (True,"rearmed-same-attempt"),
+  1768	            )
+  1769	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1770	            "deliverables"
+  1771	        ][self.did]
+  1772	        self.assertEqual(entry["count"],3)
+  1773	        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+  1774	        latest=entry["implementation_max_step_continuations"][-1]
+  1775	        self.assertEqual(latest["recovery_kind"],"latest-verify-clean-tail")
+  1776	        self.assertEqual(latest["previous_continuation_session"],"prior-session")
+  1777	        evidence=latest["latest_verify_clean_tail_evidence"]
+  1778	        self.assertEqual(evidence["trusted_exact_verify_failures"],2)
+  1779	        self.assertEqual(evidence["post_verify_owned_edits"],1)
+  1780	        self.assertEqual(evidence["post_latest_verify_owned_edits"],0)
+  1781	        self.assertTrue(
+  1782	            control_state.attempt_state(entry)["unmaterialized_dispatch_reusable"]
+  1783	        )
+  1784	
+  1785	    def test_allows_third_continuation_only_for_reverify_single_write_cadence_bug(self):
+  1786	        data=json.loads((self.work/"attempts.json").read_text())
+  1787	        progress=self.work/f"{self.did}.progress.md"
+  1788	        progress.write_text("second continuation handoff\n")
+  1789	        data["deliverables"][self.did][
+  1790	            "implementation_max_step_continuations"
+  1791	        ]=[
+  1792	            {
+  1793	                "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1794	                "recovery_kind":"initial",
+  1795	                "attempt":3,
+  1796	                "session":"initial-session",
+  1797	                "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+  1798	                "handoff_progress_sha256":"first",
+  1799	            },
+  1800	            {
+  1801	                "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1802	                "recovery_kind":"trusted-verify-visibility",
+  1803	                "attempt":3,
+  1804	                "session":"visibility-session",
+  1805	                "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+  1806	                "handoff_progress_sha256":hashlib.sha256(
+  1807	                    progress.read_bytes()
+  1808	                ).hexdigest(),
+  1809	            },
+  1810	        ]
+  1811	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1812	        proof={
+  1813	            "agent":"implementer",
+  1814	            "trusted_exact_verify_failures":1,
+  1815	            "post_verify_exact_required_denials":0,
+  1816	            "post_verify_owned_edit_denials":0,
+  1817	            "post_verify_owned_edits":2,
+  1818	            "current_classifier_state":"failed",
+  1819	            "owned_mutation_seen":True,
+  1820	            "maximum_steps_reached":True,
+  1821	        }
+  1822	        patches=self.recovery_patches()
+  1823	        with (
+  1824	            patches[0],patches[1],patches[2],patches[3],
+  1825	            patches[4],patches[5],patches[6],
+  1826	            mock.patch.object(
+  1827	                supervisor,"trusted_verify_reverify_visibility_evidence",
+  1828	                return_value=proof,
+  1829	            ),
+  1830	        ):
+  1831	            self.assertEqual(
+  1832	                supervisor.recover_implementation_max_step_continuation(
+  1833	                    self.did
+  1834	                ),
+  1835	                (True,"rearmed-same-attempt"),
+  1836	            )
+  1837	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1838	            "deliverables"
+  1839	        ][self.did]
+  1840	        self.assertEqual(entry["count"],3)
+  1841	        history=entry["implementation_max_step_continuations"]
+  1842	        self.assertEqual(len(history),3)
+  1843	        latest=history[-1]
+  1844	        self.assertEqual(
+  1845	            latest["recovery_kind"],"reverify-single-write-cadence"
+  1846	        )
+  1847	        self.assertEqual(
+  1848	            latest["previous_continuation_session"],"visibility-session"
+  1849	        )
+  1850	        self.assertEqual(
+  1851	            latest["reverify_single_write_cadence_evidence"][
+  1852	                "post_verify_owned_edits"
+  1853	            ],
+  1854	            2,
+  1855	        )
+  1856	        self.assertTrue(
+  1857	            control_state.attempt_state(entry)["unmaterialized_dispatch_reusable"]
+  1858	        )
+  1859	
+  1860	    def test_refuses_second_continuation_for_same_attempt(self):
+  1861	        data=json.loads((self.work/"attempts.json").read_text())
+  1862	        progress=self.work/f"{self.did}.progress.md"
+  1863	        progress.write_text("modern handoff\n")
+  1864	        data["deliverables"][self.did][
+  1865	            "implementation_max_step_continuations"
+  1866	        ]=[{
+  1867	            "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1868	            "attempt":3,"session":"prior",
+  1869	            "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+  1870	            "handoff_progress_sha256":hashlib.sha256(progress.read_bytes()).hexdigest(),
+  1871	        }]
+  1872	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1873	        self.assertEqual(
+  1874	            supervisor.recover_implementation_max_step_continuation(self.did),
+  1875	            (False,"max-step-continuation-limit"),
+  1876	        )
+  1877	
+  1878	    def test_legacy_missing_handoff_allows_one_compatibility_continuation(self):
+  1879	        data=json.loads((self.work/"attempts.json").read_text())
+  1880	        data["deliverables"][self.did][
+  1881	            "implementation_max_step_continuations"
+  1882	        ]=[{
+  1883	            "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1884	            "attempt":3,"session":"legacy-prior",
+  1885	        }]
+  1886	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1887	        patches=self.recovery_patches()
+  1888	        with patches[0],patches[1],patches[2],patches[3],patches[4],patches[5],patches[6]:
+  1889	            self.assertEqual(
+  1890	                supervisor.recover_implementation_max_step_continuation(
+  1891	                    self.did
+  1892	                ),
+  1893	                (True,"rearmed-same-attempt"),
+  1894	            )
+  1895	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1896	            "deliverables"
+  1897	        ][self.did]
+  1898	        self.assertEqual(entry["count"],3)
+  1899	        history=entry["implementation_max_step_continuations"]
+  1900	        self.assertEqual(len(history),2)
+  1901	        latest=history[-1]
+  1902	        self.assertEqual(latest["recovery_kind"],"legacy-missing-handoff")
+  1903	        self.assertEqual(latest["previous_continuation_session"],"legacy-prior")
+  1904	        progress=self.work/f"{self.did}.progress.md"
+  1905	        self.assertTrue(progress.is_file())
+  1906	        self.assertIn("RECOVERY_KIND: legacy-missing-handoff",progress.read_text())
+  1907	        state=control_state.attempt_state(entry)
+  1908	        self.assertTrue(state["valid"])
+  1909	        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+  1910	        self.assertEqual(state["operator_grants_reserved"],1)
+=== scripts/test_state_machine_invariants.py:4090-4165 ===
+  4090	        self.assertTrue(supervisor._tool_is_exact_leaf_verify(
+  4091	            path_leaf,"bash",{"command":"'.opencode-v2/bin/run-checks'"},self.sid
+  4092	        ))
+  4093	        self.assertFalse(supervisor._tool_is_exact_leaf_verify(
+  4094	            path_leaf,"bash",
+  4095	            {"command":".opencode-v2/bin/run-checks && true"},
+  4096	            self.sid,
+  4097	        ))
+  4098	
+  4099	    def test_exact_verify_failure_counter_counts_only_completed_nonzero_exact_runs(self):
+  4100	        rows=[
+  4101	            {"command":self.verify,"status":"completed","exit_code":1},
+  4102	            {"command":"echo other","status":"completed","exit_code":1},
+  4103	            {"command":self.verify,"status":"completed","exit_code":2},
+  4104	            {"command":self.verify,"status":"completed","exit_code":0},
+  4105	            {"command":self.verify,"status":"running","exit_code":1},
+  4106	        ]
+  4107	        with mock.patch.object(
+  4108	            supervisor,"_session_agent_db",return_value="implementer"
+  4109	        ), mock.patch.object(
+  4110	            supervisor,"persisted_model_bash_commands",return_value=rows
+  4111	        ):
+  4112	            self.assertEqual(
+  4113	                supervisor.plan_contract_session_exact_verify_failure_count(
+  4114	                    self.sid,self.leaf
+  4115	                ),
+  4116	                2,
+  4117	            )
+  4118	
+  4119	    def test_two_failed_exact_verifies_force_contract_challenge_before_more_tools(self):
+  4120	        rows=[
+  4121	            {"command":self.verify,"status":"completed","exit_code":1},
+  4122	            {"command":self.verify,"status":"completed","exit_code":1},
+  4123	        ]
+  4124	        with mock.patch.object(
+  4125	            supervisor,"_session_agent_db",return_value="implementer"
+  4126	        ), mock.patch.object(
+  4127	            supervisor,"first_user_text_db",return_value="DELIVERABLE: D001\n"
+  4128	        ), mock.patch.object(
+  4129	            supervisor,"persisted_completed_tool_turns",return_value=8
+  4130	        ), mock.patch.object(
+  4131	            supervisor,"attempt_sequence_for_session",return_value=2
+  4132	        ), mock.patch.object(
+  4133	            supervisor,"persisted_model_bash_commands",return_value=rows
+  4134	        ):
+  4135	            state,detail=supervisor.implementation_direct_write_gate_state(
+  4136	                self.sid,"edit",{
+  4137	                    "filePath":str(self.project/"owned.txt"),
+  4138	                    "oldString":"ok\n","newString":"different\n",
+  4139	                }
+  4140	            )
+  4141	        self.assertEqual(
+  4142	            state,"implementation-contract-challenge-required"
+  4143	        )
+  4144	        self.assertIn("CONTRACT_CHALLENGE_REQUIRED",detail)
+  4145	        self.assertIn("exact_verify_failures=2",detail)
+  4146	        self.assertIn("reason_must=name-verify_command-and-contract-authority",detail)
+  4147	        self.assertIn("no_more_tools=true",detail)
+  4148	
+  4149	    def test_failed_reverify_allows_only_explicit_authoritative_source_reads(self):
+  4150	        (self.project/"package.json").write_text("{}\n")
+  4151	        (self.project/"src").mkdir()
+  4152	        (self.project/"src/dep.js").write_text("export const x=1;\n")
+  4153	        context=self.ctrl/"query/leaves/D001-context.json"
+  4154	        context.parent.mkdir(parents=True)
+  4155	        context.write_text(json.dumps({
+  4156	            "supervisor_execution_correction":{
+  4157	                "authoritative_sources":[
+  4158	                    "package.json","src/dep.js","https://example.invalid/x",
+  4159	                    "../escape","/absolute",".opencode-v2/secret",
+  4160	                ]
+  4161	            },
+  4162	            "parent_supervisor_execution_correction":{},
+  4163	        }))
+  4164	        self.assertEqual(
+  4165	            supervisor.implementation_repair_authoritative_read_targets(self.did),
+
+
+======================================================================
+FINISHED: 2026-09-28T17:31:45Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
