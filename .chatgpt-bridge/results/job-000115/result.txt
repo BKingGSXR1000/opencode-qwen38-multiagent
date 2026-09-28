@@ -1,0 +1,35 @@
+======================================================================
+JOB: job-000115
+JOB_COMMIT: b88e3f4a20b28c73d48d95d72434f7d79f87d514
+STARTED: 2026-09-28T13:35:57Z
+======================================================================
+
+=== ROUTE SYMBOLS ===
+4:from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+161:// @downloadURL  http://127.0.0.1:8767/bridge.user.js
+162:// @updateURL    http://127.0.0.1:8767/bridge.user.js
+165:// @grant        GM_xmlhttpRequest
+175:  const ENDPOINT = "http://127.0.0.1:{port}/job";
+178:  const BRIDGE_VERSION = "2.10";
+226:    el.textContent="AI-Beast bridge v"+BRIDGE_VERSION+": "+text;
+236:    GM_xmlhttpRequest({{
+238:      url:ENDPOINT,
+942:  new MutationObserver(()=>scan()).observe(document.body,{{subtree:true,childList:true,characterData:true}});
+943:  setInterval(scan,2000);
+947:class Handler(BaseHTTPRequestHandler):
+980:    def do_GET(self):
+989:        if path=="/bridge.user.js":
+993:    def do_POST(self):
+1030:    ThreadingHTTPServer(addr,Handler).serve_forever()
+
+=== HTTP HANDLER REGION ===
+980:    def do_GET(self):
+993:    def do_POST(self):
+
+
+======================================================================
+FINISHED: 2026-09-28T13:35:57Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
