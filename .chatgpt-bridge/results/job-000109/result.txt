@@ -1,0 +1,378 @@
+======================================================================
+JOB: job-000109
+JOB_COMMIT: e7e701c4a99cf9684b79778cf2a43191e2177410
+STARTED: 2026-09-28T12:10:58Z
+======================================================================
+
+=== BEFORE D011-B2 ===
+{
+  "count": 4,
+  "sessions": [
+    "ses_f187fef58ffejfjcLBna6xsAZ6",
+    "ses_f187dde44ffeeKIyQVBto5sKAs",
+    "ses_f187b1285ffeTBXffeLeYJ5pvz",
+    "ses_f1868cee2ffefF4JpYtrzpFnYJ"
+  ],
+  "failure_history": [
+    {
+      "attempt": 1,
+      "classification": "infrastructure",
+      "original_classification": "genuine",
+      "original_reason": "verify-failed-1",
+      "reason": "max-step-short-marker-unrecognized-after-owned-post-verify-repair",
+      "reclassified_at": "2026-09-28T10:30:16Z",
+      "reclassified_by": "late-infrastructure-abort-reconciliation-v1",
+      "session": "ses_f187fef58ffejfjcLBna6xsAZ6",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:14:18Z"
+    },
+    {
+      "attempt": 2,
+      "classification": "genuine",
+      "reason": "verify-failed-1",
+      "session": "ses_f187dde44ffeeKIyQVBto5sKAs",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:17:21Z"
+    },
+    {
+      "attempt": 3,
+      "classification": "genuine",
+      "reason": "verify-failed-1",
+      "session": "ses_f187b1285ffeTBXffeLeYJ5pvz",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:20:14Z"
+    },
+    {
+      "attempt": 4,
+      "classification": "genuine",
+      "reason": "verify-failed-1",
+      "session": "ses_f1868cee2ffefF4JpYtrzpFnYJ",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:39:56Z"
+    }
+  ],
+  "implementation_max_step_continuations": [
+    {
+      "attempt": 4,
+      "completed_tool_turns": 7,
+      "handoff_progress_path": ".opencode-v2/work/D011-B2.progress.md",
+      "handoff_progress_sha256": "aa1371543a55e84e0a2c48c2462da7498e3b37f09756c999848d95fe2a8ea69b",
+      "original_failure_record": {
+        "attempt": 4,
+        "classification": "genuine",
+        "reason": "verify-failed-1",
+        "session": "ses_f187870f1ffeyJOa2JEQVo2msD",
+        "source": "supervisor",
+        "timestamp": "2026-09-28T10:22:38Z"
+      },
+      "original_operator_record": null,
+      "owned_state": "changed",
+      "protocol": "v2-implementation-max-step-continuation-v1",
+      "recovery_kind": "initial",
+      "replacement": "dispatch:max-step-continuation:12705e998396e68f34d1:D011-B2",
+      "session": "ses_f187870f1ffeyJOa2JEQVo2msD",
+      "source": "supervisor-max-step-continuation",
+      "supervisor_diagnostic": "Exact Verify .opencode-v2/bin/run-checks: 4/5 checks pass; readme-required-strings exits 1 while package-files-exist, stdlib-only-imports, cli-behavior, and full-unittest-suite pass. Repair only .opencode-v2/TEST_CHECKS.json.",
+      "supervisor_diagnostic_sha256": "6b2c18a91180d3e69f3b4a3a9e50b9ad30149087014b9bbcaef8c4677d620875",
+      "timestamp": "2026-09-28T10:30:17Z",
+      "verify_exit_code": 1,
+      "verify_result": "verify-failed-1"
+    },
+    {
+      "attempt": 4,
+      "completed_tool_turns": 6,
+      "handoff_progress_path": ".opencode-v2/work/D011-B2.progress.md",
+      "handoff_progress_sha256": "6b5718dcdd0952affb038f5431b4659f720a98c3df5310a8c56a72a33c509131",
+      "latest_verify_clean_tail_evidence": {
+        "current_classifier_state": "failed",
+        "maximum_steps_reached": true,
+        "post_latest_verify_owned_edits": 0,
+        "post_verify_owned_edits": 1,
+        "trusted_exact_verify_failures": 2
+      },
+      "original_failure_record": {
+        "attempt": 4,
+        "classification": "genuine",
+        "reason": "verify-failed-1",
+        "session": "ses_f186f0389ffeiH5y0xjEJs3A5C",
+        "source": "supervisor",
+        "timestamp": "2026-09-28T10:32:47Z"
+      },
+      "original_operator_record": null,
+      "owned_state": "changed",
+      "previous_continuation_session": "ses_f187870f1ffeyJOa2JEQVo2msD",
+      "protocol": "v2-implementation-max-step-continuation-v1",
+      "recovery_kind": "latest-verify-clean-tail",
+      "replacement": "dispatch:max-step-continuation:7eb00375051acf13fd3e:D011-B2",
+      "session": "ses_f186f0389ffeiH5y0xjEJs3A5C",
+      "source": "supervisor-max-step-continuation",
+      "supervisor_diagnostic": "readme-required-strings fails because standard library is missing; all other canonical checks pass. Repair only TEST_CHECKS.json.",
+      "supervisor_diagnostic_sha256": "a08c338d486f5a359558a7aec75a916ada1a454a4a2cf21511b0d918c8b3e887",
+      "timestamp": "2026-09-28T10:37:03Z",
+      "verify_exit_code": 1,
+      "verify_result": "verify-failed-1"
+    }
+  ]
+}
+
+=== AUDITED RECOVERY ===
+(False, 'max-step-continuation-limit')
+
+=== AFTER RECOVERY QUERY ===
+{"allowed_attempts":4,"attempt_ledger_valid":true,"attempt_limit_reached":true,"attempts":4,"automatic_attempts_consumed":3,"automatic_limit":3,"complete":false,"contract_deps_missing":[],"deliverable":"D011-B2","eligible":false,"ineligibility_reasons":["attempt_limit_reached"],"infrastructure_grants_remaining":0,"launch_deps_missing":[],"operator_grants_remaining":0,"operator_infrastructure_blocked":0,"protocol":"v2-materialized-control-query-v1","role":"test-builder","running":false,"split_children":[],"split_generation":0,"split_required":false,"split_state":"","total_dispatches":4,"unmaterialized_dispatch_reusable":false,"verification_pending":false,"verify_deps_missing":[]}
+
+=== AFTER RECOVERY LEDGER SUMMARY ===
+{
+  "count": 4,
+  "sessions": [
+    "ses_f187fef58ffejfjcLBna6xsAZ6",
+    "ses_f187dde44ffeeKIyQVBto5sKAs",
+    "ses_f187b1285ffeTBXffeLeYJ5pvz",
+    "ses_f1868cee2ffefF4JpYtrzpFnYJ"
+  ],
+  "failure_history": [
+    {
+      "attempt": 1,
+      "classification": "infrastructure",
+      "original_classification": "genuine",
+      "original_reason": "verify-failed-1",
+      "reason": "max-step-short-marker-unrecognized-after-owned-post-verify-repair",
+      "reclassified_at": "2026-09-28T10:30:16Z",
+      "reclassified_by": "late-infrastructure-abort-reconciliation-v1",
+      "session": "ses_f187fef58ffejfjcLBna6xsAZ6",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:14:18Z"
+    },
+    {
+      "attempt": 2,
+      "classification": "genuine",
+      "reason": "verify-failed-1",
+      "session": "ses_f187dde44ffeeKIyQVBto5sKAs",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:17:21Z"
+    },
+    {
+      "attempt": 3,
+      "classification": "genuine",
+      "reason": "verify-failed-1",
+      "session": "ses_f187b1285ffeTBXffeLeYJ5pvz",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:20:14Z"
+    },
+    {
+      "attempt": 4,
+      "classification": "genuine",
+      "reason": "verify-failed-1",
+      "session": "ses_f1868cee2ffefF4JpYtrzpFnYJ",
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:39:56Z"
+    }
+  ],
+  "implementation_max_step_continuations": [
+    {
+      "attempt": 4,
+      "completed_tool_turns": 7,
+      "handoff_progress_path": ".opencode-v2/work/D011-B2.progress.md",
+      "handoff_progress_sha256": "aa1371543a55e84e0a2c48c2462da7498e3b37f09756c999848d95fe2a8ea69b",
+      "original_failure_record": {
+        "attempt": 4,
+        "classification": "genuine",
+        "reason": "verify-failed-1",
+        "session": "ses_f187870f1ffeyJOa2JEQVo2msD",
+        "source": "supervisor",
+        "timestamp": "2026-09-28T10:22:38Z"
+      },
+      "original_operator_record": null,
+      "owned_state": "changed",
+      "protocol": "v2-implementation-max-step-continuation-v1",
+      "recovery_kind": "initial",
+      "replacement": "dispatch:max-step-continuation:12705e998396e68f34d1:D011-B2",
+      "session": "ses_f187870f1ffeyJOa2JEQVo2msD",
+      "source": "supervisor-max-step-continuation",
+      "supervisor_diagnostic": "Exact Verify .opencode-v2/bin/run-checks: 4/5 checks pass; readme-required-strings exits 1 while package-files-exist, stdlib-only-imports, cli-behavior, and full-unittest-suite pass. Repair only .opencode-v2/TEST_CHECKS.json.",
+      "supervisor_diagnostic_sha256": "6b2c18a91180d3e69f3b4a3a9e50b9ad30149087014b9bbcaef8c4677d620875",
+      "timestamp": "2026-09-28T10:30:17Z",
+      "verify_exit_code": 1,
+      "verify_result": "verify-failed-1"
+    },
+    {
+      "attempt": 4,
+      "completed_tool_turns": 6,
+      "handoff_progress_path": ".opencode-v2/work/D011-B2.progress.md",
+      "handoff_progress_sha256": "6b5718dcdd0952affb038f5431b4659f720a98c3df5310a8c56a72a33c509131",
+      "latest_verify_clean_tail_evidence": {
+        "current_classifier_state": "failed",
+        "maximum_steps_reached": true,
+        "post_latest_verify_owned_edits": 0,
+        "post_verify_owned_edits": 1,
+        "trusted_exact_verify_failures": 2
+      },
+      "original_failure_record": {
+        "attempt": 4,
+        "classification": "genuine",
+        "reason": "verify-failed-1",
+        "session": "ses_f186f0389ffeiH5y0xjEJs3A5C",
+        "source": "supervisor",
+        "timestamp": "2026-09-28T10:32:47Z"
+      },
+      "original_operator_record": null,
+      "owned_state": "changed",
+      "previous_continuation_session": "ses_f187870f1ffeyJOa2JEQVo2msD",
+      "protocol": "v2-implementation-max-step-continuation-v1",
+      "recovery_kind": "latest-verify-clean-tail",
+      "replacement": "dispatch:max-step-continuation:7eb00375051acf13fd3e:D011-B2",
+      "session": "ses_f186f0389ffeiH5y0xjEJs3A5C",
+      "source": "supervisor-max-step-continuation",
+      "supervisor_diagnostic": "readme-required-strings fails because standard library is missing; all other canonical checks pass. Repair only TEST_CHECKS.json.",
+      "supervisor_diagnostic_sha256": "a08c338d486f5a359558a7aec75a916ada1a454a4a2cf21511b0d918c8b3e887",
+      "timestamp": "2026-09-28T10:37:03Z",
+      "verify_exit_code": 1,
+      "verify_result": "verify-failed-1"
+    }
+  ],
+  "unmaterialized_dispatch_history": [
+    {
+      "recovery_kind": "initial",
+      "replaced": "ses_f187870f1ffeyJOa2JEQVo2msD",
+      "replacement": "dispatch:max-step-continuation:12705e998396e68f34d1:D011-B2",
+      "sequence": 4,
+      "source": "supervisor-max-step-continuation",
+      "timestamp": "2026-09-28T10:30:17Z"
+    },
+    {
+      "replaced": "dispatch:max-step-continuation:12705e998396e68f34d1:D011-B2",
+      "replacement": "dispatch:prt_0e790fad5001fP9QMCw0ZSnqfa:D011-B2",
+      "sequence": 4,
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:30:33Z"
+    },
+    {
+      "recovery_kind": "latest-verify-clean-tail",
+      "replaced": "ses_f186f0389ffeiH5y0xjEJs3A5C",
+      "replacement": "dispatch:max-step-continuation:7eb00375051acf13fd3e:D011-B2",
+      "sequence": 4,
+      "source": "supervisor-max-step-continuation",
+      "timestamp": "2026-09-28T10:37:03Z"
+    },
+    {
+      "replaced": "dispatch:max-step-continuation:7eb00375051acf13fd3e:D011-B2",
+      "replacement": "dispatch:prt_0e7972f6a001XvalGVvwSBfgcV:D011-B2",
+      "sequence": 4,
+      "source": "supervisor",
+      "timestamp": "2026-09-28T10:37:20Z"
+    }
+  ]
+}
+
+=== RESUME CONTROLLER IF REARMED ===
+rearmed=no
+
+=== DRIVER TAIL ===
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "probe-builder", "deliverable": "D007-B1", "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "probe-builder", "deliverable": "D007-B1", "kind": "launch"}, "event": "replay-observed"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"action": {"agent": "task-splitter", "deliverable": "D009", "generation": 1, "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "task-splitter", "deliverable": "D009", "generation": 1, "kind": "launch"}, "event": "replay-observed"}
+{"action": {"agent": "implementation-planner", "kind": "launch", "mode": "continue"}, "event": "dispatched"}
+{"action": {"agent": "task-splitter", "deliverable": "D009", "generation": 1, "kind": "launch"}, "event": "replay-observed"}
+ERROR: action-mismatch controller=[{"agent": "task-splitter", "deliverable": "D009", "generation": 1, "kind": "launch"}] supervisor=[{"agent": "task-splitter", "claim": 2, "deliverable": "D009", "generation": 1, "kind": "launch"}]
+{"action": {"agent": "task-splitter", "claim": 2, "deliverable": "D009", "generation": 1, "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D007-B2", "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "probe-builder", "deliverable": "D009-A", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D009-B", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "task-splitter", "claim": 1, "deliverable": "D011", "generation": 1, "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"deliverable": "D011", "kind": "blocked", "reason": "attempt_limit_reached"}], "event": "no-dispatch"}
+{"action": {"agent": "task-splitter", "claim": 2, "deliverable": "D011", "generation": 1, "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "task-splitter", "claim": 2, "deliverable": "D011", "generation": 1, "kind": "launch"}, "event": "replay-observed"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-A", "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-A", "kind": "launch"}, "event": "replay-observed"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-A", "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-A", "kind": "launch"}, "event": "replay-observed"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-A", "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-A", "kind": "launch"}, "event": "replay-observed"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B", "kind": "launch"}, "event": "dispatched"}
+ERROR: AMBIGUOUS_EXECUTION replay forbidden: execution_id=aa8750bf496cb61237f8ffcb8b2909996af6361c6a0e17f5026ed0cd7e0b1d79 state_version=50d5565d48a0c239 deliverable=D011-B no preclaim/child evidence observed
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "task-splitter", "claim": 1, "deliverable": "D011-B", "generation": 1, "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"deliverable": "D011-B", "kind": "blocked", "reason": "attempt_limit_reached"}], "event": "no-dispatch"}
+{"action": {"agent": "task-splitter", "claim": 2, "deliverable": "D011-B", "generation": 1, "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"action": {"agent": "probe-builder", "deliverable": "D011-B1", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B2", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B2", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B2", "kind": "launch"}, "event": "dispatched"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B2", "kind": "launch"}, "event": "replay-observed"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"action": {"agent": "test-builder", "deliverable": "D011-B2", "kind": "launch"}, "event": "dispatched"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"kind": "wait"}], "event": "no-dispatch"}
+{"actions": [{"kind": "rescan"}], "event": "no-dispatch"}
+{"actions": [{"deliverable": "D011-B2", "kind": "blocked", "reason": "attempt_ledger_invalid"}], "event": "no-dispatch"}
+
+
+======================================================================
+FINISHED: 2026-09-28T12:10:58Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
