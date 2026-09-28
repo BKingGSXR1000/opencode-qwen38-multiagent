@@ -1,0 +1,30 @@
+======================================================================
+JOB: job-000104
+JOB_COMMIT: 81a3445a647ec1c2893f470d18ccd31b38a1d9e7
+STARTED: 2026-09-28T11:43:09Z
+======================================================================
+
+=== PRE-RECOVERY CONTROLLER ===
+usage: control-guard.py [-h] [--project PROJECT] [--finalize-acceptance]
+                        [--finalize-plan] [--check-acceptance] [--check-plan]
+                        [--finalize-all] [--selftest]
+control-guard.py: error: unrecognized arguments: status
+
+=== PRE-RECOVERY D011-B2 LEDGER/PROGRESS ===
+--- control-state.json MISSING ---
+--- attempt-ledger.json MISSING ---
+--- D011-B2.progress.md MISSING ---
+--- D011-B2.ready MISSING ---
+
+=== AUDITED SAME-ATTEMPT MAX-STEP RECOVERY ===
+Traceback (most recent call last):
+  File "<stdin>", line 4, in <module>
+ImportError: cannot import name 'Supervisor' from 'supervisor' (/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831/scripts/supervisor.py)
+
+
+======================================================================
+FINISHED: 2026-09-28T11:43:10Z
+RETURN_CODE: 1
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
