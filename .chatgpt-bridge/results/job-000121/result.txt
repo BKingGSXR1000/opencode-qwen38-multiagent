@@ -1,0 +1,42 @@
+======================================================================
+JOB: job-000121
+JOB_COMMIT: 92b4c90b298276ada0ceee193febca11a5020b44
+STARTED: 2026-09-28T16:23:16Z
+======================================================================
+
+=== FIREFOX / USERSCRIPT MANAGER ===
+bking      10777    2776  7 Sep24 ?        07:00:57 /snap/firefox/8863/usr/lib/firefox/firefox
+bking      10863    2420  0 Sep24 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/crashhelper 10777 9 /tmp/ 11 20260904071051
+bking      10958   10777  0 Sep24 ?        00:00:01 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -ipcHandle 0 -signalPipe 1 -initialChannelId {1187bf4e-428e-4a12-bd50-9ead324a4171} -parentPid 10777 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 1 forkserver
+bking      10962   10958  0 Sep24 ?        00:01:19 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -parentBuildID 20260904071051 -prefsHandle 0:38989 -prefMapHandle 1:296075 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {c1ee1b74-f3f2-442e-9877-81823810a0d5} -parentPid 10777 -crashHelperPid 10863 -crashHelper 5 -crashReporter 6 -appDir /snap/firefox/8863/usr/lib/firefox/browser 2 socket
+bking      10979   10958  0 Sep24 ?        00:02:19 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:39114 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {a408f254-89aa-4288-9668-54ede7e26f0e} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 3 tab
+bking      10988   10958  0 Sep24 ?        00:26:19 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -parentBuildID 20260904071051 -prefsHandle 0:39114 -prefMapHandle 1:296075 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {0d8c479c-e596-466c-a1f9-f95a287057f9} -parentPid 10777 -crashHelperPid 10863 -crashHelper 5 -crashReporter 6 -appDir /snap/firefox/8863/usr/lib/firefox/browser 4 rdd
+bking      11275   10958  0 Sep24 ?        00:04:16 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:39251 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {e53df27a-4745-4a63-ac7e-b8d9bf8d7c1a} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 7 tab
+bking      11628   10958  0 Sep24 ?        00:00:55 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -parentBuildID 20260904071051 -sandboxingKind 0 -prefsHandle 0:56903 -prefMapHandle 1:296075 -sandboxReporter 2 -chrootClient 3 -ipcHandle 4 -initialChannelId {49f0bafe-4509-442a-9f2a-cc7248686db9} -parentPid 10777 -crashHelperPid 10863 -crashHelper 5 -crashReporter 6 -appDir /snap/firefox/8863/usr/lib/firefox/browser 8 utility
+bking    1422131   10958  0 Sep25 ?        00:05:41 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51895 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {c39d5018-30eb-4832-ba4f-2cd1ff99aa0f} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 528 tab
+bking    1490904   10958  0 13:11 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52262 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {3f501119-cfb0-4311-914a-56ad1feb4a69} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 1112 tab
+bking    1491804   10958  0 13:12 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52262 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {d198c127-01cc-433c-bb85-609fbdc44235} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 1113 tab
+bking    1689879   10958  0 15:27 ?        00:00:00 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:52261 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {37f18f16-e127-4695-8362-d807f0ddfe36} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 1114 tab
+bking    2616728  107724  0 Sep26 pts/2    00:00:00 /bin/bash -l -c set -e echo '=== FIND BRIDGE SOURCE ===' grep -RIl --exclude-dir=.cache --exclude-dir=node_modules --exclude-dir=.git   'delivery recovery cap reached\|AI-Beast bridge v2.6'   /home/bking 2>/dev/null | head -n 80  echo '=== RUNNING BROWSER/HELPERS ===' pgrep -af 'chrome|chromium|firefox|tamper|violent|userscript|bridge' | head -n 120 || true 
+bking    3464080   10958  5 Sep27 ?        02:11:18 /snap/firefox/8863/usr/lib/firefox/firefox -contentproc -isForBrowser -prefsHandle 0:51896 -prefMapHandle 1:296075 -jsInitHandle 2:160936 -parentBuildID 20260904071051 -sandboxReporter 3 -chrootClient 4 -ipcHandle 5 -initialChannelId {bfb9f9de-7f38-423b-859b-dcf3edf4c5c7} -parentPid 10777 -crashHelperPid 10863 -crashHelper 6 -crashReporter 7 -greomni /snap/firefox/8863/usr/lib/firefox/omni.ja -appomni /snap/firefox/8863/usr/lib/firefox/browser/omni.ja -appDir /snap/firefox/8863/usr/lib/firefox/browser 540 tab
+
+=== FIREFOX PROFILES ===
+
+=== USERSCRIPT MANAGER EXTENSIONS ===
+
+=== FIND BRIDGE STRINGS IN FIREFOX PROFILE ===
+
+=== LOCAL SERVED VERSION ===
+// @version      2.10
+  const WAKE_NEXT_ENDPOINT = "http://127.0.0.1:8767/wake-next";
+  const BRIDGE_VERSION = "2.11";
+    el.textContent="AI-Beast bridge v"+BRIDGE_VERSION+": "+text;
+      const reply=await bridgeRequest("GET",WAKE_NEXT_ENDPOINT);
+
+
+======================================================================
+FINISHED: 2026-09-28T16:23:16Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
