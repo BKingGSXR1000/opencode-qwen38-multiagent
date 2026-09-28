@@ -1,0 +1,278 @@
+======================================================================
+JOB: job-000126
+JOB_COMMIT: 39babd4ebd9fcf06a782e85c6ce5020ca909827a
+STARTED: 2026-09-28T17:23:52Z
+======================================================================
+
+=== WOKEN MARKERS 113-125 ===
+job-000113 marked
+job-000114 marked
+job-000115 marked
+job-000116 marked
+job-000117 marked
+job-000118 marked
+job-000119 marked
+job-000120 marked
+job-000121 marked
+job-000122 marked
+job-000123 marked
+job-000124 MISSING
+job-000125 MISSING
+
+=== RUNNER WAKE SYMBOLS ===
+19:WOKEN = STATE / "woken"
+120:def woken_path(job_id):
+121:    return WOKEN / job_id
+442:def wake(job_id, result_commit, cfg):
+443:    wp = woken_path(job_id)
+448:        f"CONTINUE {job_id} "
+451:        f"result_commit={result_commit}"
+455:        [cfg["wakeup_script"], msg],
+462:        atomic_write(wp, result_commit + "\n")
+466:        f"wake failed for {job_id} rc={p.returncode}\n"
+472:    """Publish every completed local spool, but never wake from this phase.
+475:    older ChatGPT wake attempt failed.
+486:            result_commit = push_spool(job_id, cfg)
+493:            f"[{now()}] confirmed GitHub result {job_id} commit={result_commit}",
+498:def wake_one_pending_result(cfg):
+499:    """Attempt at most one undelivered wake per cycle.
+502:    stale wake retries from starving the queue.
+512:        if woken_path(job_id).exists():
+516:            result_commit = push_spool(job_id, cfg)
+522:            f"[{now()}] wake attempt {job_id} commit={result_commit}",
+526:        wake(job_id, result_commit, cfg)
+528:        # Only one wake attempt per poll cycle.
+556:    # First make every completed result durable on GitHub. Do not wake here:
+587:    # attempted per cycle, so a bad desktop/wake state cannot block execution.
+588:    wake_one_pending_result(cfg)
+594:    WOKEN.mkdir(parents=True, exist_ok=True)
+
+=== RECENT RUNNER LOG ===
+Sep 28 19:11:51 AI-Beast python3[1477688]: [2026-09-28T17:11:51Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:11:51 AI-Beast python3[1477688]: [2026-09-28T17:11:51Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:11:51 AI-Beast python3[1477688]: [2026-09-28T17:11:51Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:11:52 AI-Beast python3[1477688]: [2026-09-28T17:11:52Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:11:52 AI-Beast python3[1477688]: [2026-09-28T17:11:52Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:11:53 AI-Beast python3[1477688]: [2026-09-28T17:11:53Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:11:53 AI-Beast python3[1477688]: [2026-09-28T17:11:53Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:11:54 AI-Beast python3[1477688]: [2026-09-28T17:11:54Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:12:14 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:12:14 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:12:14 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:12:14 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:12:14 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a']' timed out after 19.999996689963154 seconds
+Sep 28 19:12:43 AI-Beast python3[1477688]: [2026-09-28T17:12:43Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:12:44 AI-Beast python3[1477688]: [2026-09-28T17:12:44Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:12:44 AI-Beast python3[1477688]: [2026-09-28T17:12:44Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:12:45 AI-Beast python3[1477688]: [2026-09-28T17:12:45Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:12:45 AI-Beast python3[1477688]: [2026-09-28T17:12:45Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:12:46 AI-Beast python3[1477688]: [2026-09-28T17:12:46Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:12:46 AI-Beast python3[1477688]: [2026-09-28T17:12:46Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:12:47 AI-Beast python3[1477688]: [2026-09-28T17:12:47Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:12:47 AI-Beast python3[1477688]: [2026-09-28T17:12:47Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:12:48 AI-Beast python3[1477688]: [2026-09-28T17:12:48Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:12:49 AI-Beast python3[1477688]: [2026-09-28T17:12:49Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:13:09 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:13:09 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:13:09 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:13:09 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:13:09 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a']' timed out after 19.99999611201929 seconds
+Sep 28 19:13:37 AI-Beast python3[1477688]: [2026-09-28T17:13:37Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:13:37 AI-Beast python3[1477688]: [2026-09-28T17:13:37Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:13:38 AI-Beast python3[1477688]: [2026-09-28T17:13:38Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:13:38 AI-Beast python3[1477688]: [2026-09-28T17:13:38Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:13:39 AI-Beast python3[1477688]: [2026-09-28T17:13:39Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:13:39 AI-Beast python3[1477688]: [2026-09-28T17:13:39Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:13:40 AI-Beast python3[1477688]: [2026-09-28T17:13:40Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:13:40 AI-Beast python3[1477688]: [2026-09-28T17:13:40Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:13:41 AI-Beast python3[1477688]: [2026-09-28T17:13:41Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:13:41 AI-Beast python3[1477688]: [2026-09-28T17:13:41Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:13:42 AI-Beast python3[1477688]: [2026-09-28T17:13:42Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:14:02 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:14:02 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:14:02 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:14:02 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:14:02 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a']' timed out after 19.999996479949914 seconds
+Sep 28 19:14:31 AI-Beast python3[1477688]: [2026-09-28T17:14:31Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:14:32 AI-Beast python3[1477688]: [2026-09-28T17:14:32Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:14:32 AI-Beast python3[1477688]: [2026-09-28T17:14:32Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:14:32 AI-Beast python3[1477688]: [2026-09-28T17:14:32Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:14:33 AI-Beast python3[1477688]: [2026-09-28T17:14:33Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:14:33 AI-Beast python3[1477688]: [2026-09-28T17:14:33Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:14:34 AI-Beast python3[1477688]: [2026-09-28T17:14:34Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:14:34 AI-Beast python3[1477688]: [2026-09-28T17:14:34Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:14:35 AI-Beast python3[1477688]: [2026-09-28T17:14:35Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:14:35 AI-Beast python3[1477688]: [2026-09-28T17:14:35Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:14:36 AI-Beast python3[1477688]: [2026-09-28T17:14:36Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:14:56 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:14:56 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:14:56 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:14:56 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:14:56 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a']' timed out after 19.999996037979145 seconds
+Sep 28 19:15:25 AI-Beast python3[1477688]: [2026-09-28T17:15:25Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:15:25 AI-Beast python3[1477688]: [2026-09-28T17:15:25Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:15:26 AI-Beast python3[1477688]: [2026-09-28T17:15:26Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:15:26 AI-Beast python3[1477688]: [2026-09-28T17:15:26Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:15:27 AI-Beast python3[1477688]: [2026-09-28T17:15:27Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:15:27 AI-Beast python3[1477688]: [2026-09-28T17:15:27Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:15:28 AI-Beast python3[1477688]: [2026-09-28T17:15:28Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:15:28 AI-Beast python3[1477688]: [2026-09-28T17:15:28Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:15:29 AI-Beast python3[1477688]: [2026-09-28T17:15:29Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:15:29 AI-Beast python3[1477688]: [2026-09-28T17:15:29Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:15:30 AI-Beast python3[1477688]: [2026-09-28T17:15:30Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:15:50 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:15:50 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:15:50 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:15:50 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:15:50 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a']' timed out after 19.999996790953446 seconds
+Sep 28 19:16:39 AI-Beast python3[1477688]: [2026-09-28T17:16:39Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:16:40 AI-Beast python3[1477688]: [2026-09-28T17:16:40Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:16:40 AI-Beast python3[1477688]: [2026-09-28T17:16:40Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:16:41 AI-Beast python3[1477688]: [2026-09-28T17:16:41Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:16:41 AI-Beast python3[1477688]: [2026-09-28T17:16:41Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:16:42 AI-Beast python3[1477688]: [2026-09-28T17:16:42Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:16:42 AI-Beast python3[1477688]: [2026-09-28T17:16:42Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:16:43 AI-Beast python3[1477688]: [2026-09-28T17:16:43Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:16:43 AI-Beast python3[1477688]: [2026-09-28T17:16:43Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:16:44 AI-Beast python3[1477688]: [2026-09-28T17:16:44Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:16:44 AI-Beast python3[1477688]: [2026-09-28T17:16:44Z] executing job-000123
+Sep 28 19:17:05 AI-Beast python3[1477688]: [2026-09-28T17:17:05Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:17:06 AI-Beast python3[1477688]: [2026-09-28T17:17:06Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:17:06 AI-Beast python3[1477688]: [2026-09-28T17:17:06Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:17:07 AI-Beast python3[1477688]: [2026-09-28T17:17:07Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:17:07 AI-Beast python3[1477688]: [2026-09-28T17:17:07Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:17:08 AI-Beast python3[1477688]: [2026-09-28T17:17:08Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:17:08 AI-Beast python3[1477688]: [2026-09-28T17:17:08Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:17:09 AI-Beast python3[1477688]: [2026-09-28T17:17:09Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:17:09 AI-Beast python3[1477688]: [2026-09-28T17:17:09Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:17:10 AI-Beast python3[1477688]: [2026-09-28T17:17:10Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:17:13 AI-Beast python3[1477688]: [2026-09-28T17:17:13Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:17:13 AI-Beast python3[1477688]: [2026-09-28T17:17:13Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:17:33 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:17:33 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:17:33 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:17:33 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:17:33 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a']' timed out after 19.999996420985553 seconds
+Sep 28 19:18:23 AI-Beast python3[1477688]: [2026-09-28T17:18:23Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:18:23 AI-Beast python3[1477688]: [2026-09-28T17:18:23Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:18:24 AI-Beast python3[1477688]: [2026-09-28T17:18:24Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:18:24 AI-Beast python3[1477688]: [2026-09-28T17:18:24Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:18:24 AI-Beast python3[1477688]: [2026-09-28T17:18:24Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:18:25 AI-Beast python3[1477688]: [2026-09-28T17:18:25Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:18:25 AI-Beast python3[1477688]: [2026-09-28T17:18:25Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:18:26 AI-Beast python3[1477688]: [2026-09-28T17:18:26Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:18:26 AI-Beast python3[1477688]: [2026-09-28T17:18:26Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:18:27 AI-Beast python3[1477688]: [2026-09-28T17:18:27Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:18:27 AI-Beast python3[1477688]: [2026-09-28T17:18:27Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:18:28 AI-Beast python3[1477688]: [2026-09-28T17:18:28Z] executing job-000124
+Sep 28 19:18:48 AI-Beast python3[1477688]: [2026-09-28T17:18:48Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:18:49 AI-Beast python3[1477688]: [2026-09-28T17:18:49Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:18:49 AI-Beast python3[1477688]: [2026-09-28T17:18:49Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:18:49 AI-Beast python3[1477688]: [2026-09-28T17:18:49Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:18:50 AI-Beast python3[1477688]: [2026-09-28T17:18:50Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:18:50 AI-Beast python3[1477688]: [2026-09-28T17:18:50Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:18:51 AI-Beast python3[1477688]: [2026-09-28T17:18:51Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:18:51 AI-Beast python3[1477688]: [2026-09-28T17:18:51Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:19:11 AI-Beast python3[1477688]: [2026-09-28T17:19:11Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:19:12 AI-Beast python3[1477688]: [2026-09-28T17:19:12Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:19:12 AI-Beast python3[1477688]: [2026-09-28T17:19:12Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:19:20 AI-Beast python3[1477688]: [2026-09-28T17:19:20Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:19:20 AI-Beast python3[1477688]: [2026-09-28T17:19:20Z] wake attempt job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:19:21 AI-Beast python3[1908705]: QUEUED_AND_ACKED: CONTINUE job-000120 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:19:50 AI-Beast python3[1477688]: [2026-09-28T17:19:50Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:19:51 AI-Beast python3[1477688]: [2026-09-28T17:19:51Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:19:51 AI-Beast python3[1477688]: [2026-09-28T17:19:51Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:19:52 AI-Beast python3[1477688]: [2026-09-28T17:19:52Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:19:52 AI-Beast python3[1477688]: [2026-09-28T17:19:52Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:19:53 AI-Beast python3[1477688]: [2026-09-28T17:19:53Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:19:53 AI-Beast python3[1477688]: [2026-09-28T17:19:53Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:20:13 AI-Beast python3[1477688]: [2026-09-28T17:20:13Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:20:14 AI-Beast python3[1477688]: [2026-09-28T17:20:14Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:20:14 AI-Beast python3[1477688]: [2026-09-28T17:20:14Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:20:15 AI-Beast python3[1477688]: [2026-09-28T17:20:15Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:20:15 AI-Beast python3[1477688]: [2026-09-28T17:20:15Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:20:16 AI-Beast python3[1477688]: [2026-09-28T17:20:16Z] wake attempt job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:20:36 AI-Beast python3[1477688]:     wake_one_pending_result(cfg)
+Sep 28 19:20:36 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 526, in wake_one_pending_result
+Sep 28 19:20:36 AI-Beast python3[1477688]:     wake(job_id, result_commit, cfg)
+Sep 28 19:20:36 AI-Beast python3[1477688]:   File "/home/bking/AI/github-chatgpt-runner/runner.py", line 454, in wake
+Sep 28 19:20:36 AI-Beast python3[1477688]: subprocess.TimeoutExpired: Command '['/home/bking/AI/chatgpt-wakeup.sh', 'CONTINUE job-000121 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=f52b387a63d9e93c99068ec4538fb546b397ee9c']' timed out after 19.999994896003045 seconds
+Sep 28 19:21:05 AI-Beast python3[1477688]: [2026-09-28T17:21:05Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:21:06 AI-Beast python3[1477688]: [2026-09-28T17:21:06Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:21:06 AI-Beast python3[1477688]: [2026-09-28T17:21:06Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:21:07 AI-Beast python3[1477688]: [2026-09-28T17:21:07Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:21:07 AI-Beast python3[1477688]: [2026-09-28T17:21:07Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:21:08 AI-Beast python3[1477688]: [2026-09-28T17:21:08Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:21:08 AI-Beast python3[1477688]: [2026-09-28T17:21:08Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:21:09 AI-Beast python3[1477688]: [2026-09-28T17:21:09Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:21:09 AI-Beast python3[1477688]: [2026-09-28T17:21:09Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:21:09 AI-Beast python3[1477688]: [2026-09-28T17:21:09Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:21:10 AI-Beast python3[1477688]: [2026-09-28T17:21:10Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:21:10 AI-Beast python3[1477688]: [2026-09-28T17:21:10Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:21:11 AI-Beast python3[1477688]: [2026-09-28T17:21:11Z] executing job-000125
+Sep 28 19:21:31 AI-Beast python3[1477688]: [2026-09-28T17:21:31Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:21:32 AI-Beast python3[1477688]: [2026-09-28T17:21:32Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:21:32 AI-Beast python3[1477688]: [2026-09-28T17:21:32Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:21:33 AI-Beast python3[1477688]: [2026-09-28T17:21:33Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:21:33 AI-Beast python3[1477688]: [2026-09-28T17:21:33Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:21:34 AI-Beast python3[1477688]: [2026-09-28T17:21:34Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:21:34 AI-Beast python3[1477688]: [2026-09-28T17:21:34Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:21:35 AI-Beast python3[1477688]: [2026-09-28T17:21:35Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:21:35 AI-Beast python3[1477688]: [2026-09-28T17:21:35Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:21:35 AI-Beast python3[1477688]: [2026-09-28T17:21:35Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:21:36 AI-Beast python3[1477688]: [2026-09-28T17:21:36Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:21:37 AI-Beast python3[1477688]: [2026-09-28T17:21:37Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:21:39 AI-Beast python3[1477688]: [2026-09-28T17:21:39Z] confirmed GitHub result job-000125 commit=ec2a18fa07e9f30e1fc4840eaa12009b9c900409
+Sep 28 19:21:39 AI-Beast python3[1477688]: [2026-09-28T17:21:39Z] wake attempt job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:21:40 AI-Beast python3[1911847]: QUEUED_AND_ACKED: CONTINUE job-000121 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:22:08 AI-Beast python3[1477688]: [2026-09-28T17:22:08Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:22:09 AI-Beast python3[1477688]: [2026-09-28T17:22:09Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:22:09 AI-Beast python3[1477688]: [2026-09-28T17:22:09Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:22:10 AI-Beast python3[1477688]: [2026-09-28T17:22:10Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:22:10 AI-Beast python3[1477688]: [2026-09-28T17:22:10Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:22:11 AI-Beast python3[1477688]: [2026-09-28T17:22:11Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:22:11 AI-Beast python3[1477688]: [2026-09-28T17:22:11Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:22:12 AI-Beast python3[1477688]: [2026-09-28T17:22:12Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:22:12 AI-Beast python3[1477688]: [2026-09-28T17:22:12Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:22:12 AI-Beast python3[1477688]: [2026-09-28T17:22:12Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:22:13 AI-Beast python3[1477688]: [2026-09-28T17:22:13Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:22:13 AI-Beast python3[1477688]: [2026-09-28T17:22:13Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:22:14 AI-Beast python3[1477688]: [2026-09-28T17:22:14Z] confirmed GitHub result job-000125 commit=ec2a18fa07e9f30e1fc4840eaa12009b9c900409
+Sep 28 19:22:15 AI-Beast python3[1477688]: [2026-09-28T17:22:15Z] wake attempt job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:22:16 AI-Beast python3[1912677]: QUEUED_AND_ACKED: CONTINUE job-000122 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:22:44 AI-Beast python3[1477688]: [2026-09-28T17:22:44Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:22:45 AI-Beast python3[1477688]: [2026-09-28T17:22:45Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:22:45 AI-Beast python3[1477688]: [2026-09-28T17:22:45Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:22:46 AI-Beast python3[1477688]: [2026-09-28T17:22:46Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:22:46 AI-Beast python3[1477688]: [2026-09-28T17:22:46Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:22:47 AI-Beast python3[1477688]: [2026-09-28T17:22:47Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:22:47 AI-Beast python3[1477688]: [2026-09-28T17:22:47Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:22:48 AI-Beast python3[1477688]: [2026-09-28T17:22:48Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:22:48 AI-Beast python3[1477688]: [2026-09-28T17:22:48Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:22:48 AI-Beast python3[1477688]: [2026-09-28T17:22:48Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:22:49 AI-Beast python3[1477688]: [2026-09-28T17:22:49Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:22:49 AI-Beast python3[1477688]: [2026-09-28T17:22:49Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:22:50 AI-Beast python3[1477688]: [2026-09-28T17:22:50Z] confirmed GitHub result job-000125 commit=ec2a18fa07e9f30e1fc4840eaa12009b9c900409
+Sep 28 19:22:51 AI-Beast python3[1477688]: [2026-09-28T17:22:51Z] wake attempt job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:22:57 AI-Beast python3[1913478]: QUEUED_AND_ACKED: CONTINUE job-000123 repo=BKingGSXR1000/opencode-qwen38-multiagent branch=chatgpt-automation result_commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:23:45 AI-Beast python3[1477688]: [2026-09-28T17:23:45Z] confirmed GitHub result job-000113 commit=bbdfb0febbf71a863cb24196416e244dae115936
+Sep 28 19:23:46 AI-Beast python3[1477688]: [2026-09-28T17:23:46Z] confirmed GitHub result job-000114 commit=b0155095904e2a14d60780e0dd73edaf165a3231
+Sep 28 19:23:46 AI-Beast python3[1477688]: [2026-09-28T17:23:46Z] confirmed GitHub result job-000115 commit=8d6708bd52f2e347dc3ba959af94e1a54e2f7ab5
+Sep 28 19:23:47 AI-Beast python3[1477688]: [2026-09-28T17:23:47Z] confirmed GitHub result job-000116 commit=a8c02244f84937c86243d5e4d7b61c1c910a6472
+Sep 28 19:23:47 AI-Beast python3[1477688]: [2026-09-28T17:23:47Z] confirmed GitHub result job-000117 commit=9d5d524afac00fa8cc73ba76e9e737c321baf686
+Sep 28 19:23:48 AI-Beast python3[1477688]: [2026-09-28T17:23:48Z] confirmed GitHub result job-000118 commit=0b49bfe92b4bdb6d3ee5bf6d14fdd89baf370106
+Sep 28 19:23:48 AI-Beast python3[1477688]: [2026-09-28T17:23:48Z] confirmed GitHub result job-000119 commit=5fe0d7677d0fbfb61ae8921571e530a292a37fbc
+Sep 28 19:23:49 AI-Beast python3[1477688]: [2026-09-28T17:23:49Z] confirmed GitHub result job-000120 commit=42a139757eca91a11e4f8a00cdd91c759b05e99a
+Sep 28 19:23:49 AI-Beast python3[1477688]: [2026-09-28T17:23:49Z] confirmed GitHub result job-000121 commit=f52b387a63d9e93c99068ec4538fb546b397ee9c
+Sep 28 19:23:50 AI-Beast python3[1477688]: [2026-09-28T17:23:50Z] confirmed GitHub result job-000122 commit=75ff6144a692fe393d3564dc6c486857ac4cf73f
+Sep 28 19:23:50 AI-Beast python3[1477688]: [2026-09-28T17:23:50Z] confirmed GitHub result job-000123 commit=57ab35a265324371b2bdd6d70f13604c90d13961
+Sep 28 19:23:51 AI-Beast python3[1477688]: [2026-09-28T17:23:51Z] confirmed GitHub result job-000124 commit=430ec1a42dc137174c5c9923789834f145a56519
+Sep 28 19:23:51 AI-Beast python3[1477688]: [2026-09-28T17:23:51Z] confirmed GitHub result job-000125 commit=ec2a18fa07e9f30e1fc4840eaa12009b9c900409
+
+
+======================================================================
+FINISHED: 2026-09-28T17:23:52Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
