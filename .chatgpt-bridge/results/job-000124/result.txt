@@ -1,0 +1,23 @@
+======================================================================
+JOB: job-000124
+JOB_COMMIT: 0205dad0146ed959f37b30d7de13b31aa06bed61
+STARTED: 2026-09-28T17:18:28Z
+======================================================================
+
+JOB_000124_QUEUE_WAKE_TEST
+=== SERVED VERSION ===
+// @version      2.11
+  const WAKE_NEXT_ENDPOINT = "http://127.0.0.1:8767/wake-next";
+  const BRIDGE_VERSION = "2.11";
+    el.textContent="AI-Beast bridge v"+BRIDGE_VERSION+": "+text;
+      const reply=await bridgeRequest("GET",WAKE_NEXT_ENDPOINT);
+=== INGRESS ===
+active
+
+
+======================================================================
+FINISHED: 2026-09-28T17:18:28Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
