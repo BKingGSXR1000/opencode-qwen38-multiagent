@@ -1,0 +1,801 @@
+======================================================================
+JOB: job-000112
+JOB_COMMIT: 57efc01cf457dd335eae23973f917492bf946549
+STARTED: 2026-09-28T12:17:26Z
+======================================================================
+
+=== RUNNER WOKEN PATH ===
+    if not (sd / "COMPLETE").exists():
+        raise RuntimeError(f"cannot upload incomplete spool {job_id}")
+
+    if rd.exists():
+        shutil.rmtree(rd)
+
+    rd.mkdir(parents=True)
+
+    for name in ("result.txt","metadata.json","exit-code.txt","COMPLETE"):
+        shutil.copy2(sd / name, rd / name)
+
+def remote_result_exists(job_id):
+    return result_dir(job_id).is_dir() and (result_dir(job_id) / "COMPLETE").is_file()
+
+def push_spool(job_id, cfg):
+    branch = cfg["automation_branch"]
+
+    # Always start from current remote branch. This makes each retry independent
+    # of previous failed git state.
+    sync_branch(cfg)
+
+    if remote_result_exists(job_id):
+        commit = git(
+            "log","-1","--format=%H","--",
+            str(result_dir(job_id).relative_to(WORK))
+        ).stdout.strip()
+        return commit
+
+    copy_spool_to_worktree(job_id)
+
+    rel = str(result_dir(job_id).relative_to(WORK))
+    git("add","--",rel)
+
+    staged = git("diff","--cached","--quiet",check=False)
+    if staged.returncode == 0:
+        raise RuntimeError(f"no staged result for {job_id}")
+
+    rc = int((spool_dir(job_id) / "exit-code.txt").read_text().strip())
+
+    git("commit","-m",f"[chatgpt-runner] result {job_id} rc={rc}",timeout=60)
+
+    # Never force-push. If another commit landed, retry from a fresh remote
+    # checkout on the next cycle.
+    push = git("push","origin",f"HEAD:{branch}",check=False,timeout=90)
+    if push.returncode != 0:
+        raise RuntimeError(
+            f"push failed for {job_id}; local spool retained\n"
+            f"stdout:\n{push.stdout or ''}\nstderr:\n{push.stderr or ''}"
+        )
+
+    return git("rev-parse","HEAD").stdout.strip()
+
+def wake(job_id, result_commit, cfg):
+    wp = woken_path(job_id)
+    if wp.exists():
+        return True
+
+    msg = (
+        f"CONTINUE {job_id} "
+        f"repo={cfg.get('repo_full_name') or 'unknown'} "
+        f"branch={cfg['automation_branch']} "
+        f"result_commit={result_commit}"
+    )
+
+    p = run(
+        [cfg["wakeup_script"], msg],
+        check=False,
+        timeout=20,
+        capture=False,
+    )
+
+    if p.returncode == 0:
+        atomic_write(wp, result_commit + "\n")
+        return True
+
+    sys.stderr.write(
+        f"wake failed for {job_id} rc={p.returncode}\n"
+        f"{p.stdout or ''}{p.stderr or ''}\n"
+    )
+    return False
+
+def upload_pending_spools(cfg):
+    """Publish every completed local spool, but never wake from this phase.
+
+    Result publication must not block fresh queued execution merely because an
+    older ChatGPT wake attempt failed.
+    """
+    SPOOL.mkdir(parents=True, exist_ok=True)
+
+    for sd in sorted(SPOOL.iterdir()):
+        if not sd.is_dir() or not (sd / "COMPLETE").exists():
+            continue
+
+        job_id = sd.name
+
+        try:
+            result_commit = push_spool(job_id, cfg)
+        except Exception:
+            # GitHub/network/merge problems are retryable. Spool remains intact.
+            traceback.print_exc()
+            continue
+
+        print(
+            f"[{now()}] confirmed GitHub result {job_id} commit={result_commit}",
+            flush=True
+        )
+
+
+def wake_one_pending_result(cfg):
+    """Attempt at most one undelivered wake per cycle.
+
+    Fresh job execution happens before this function is called. This prevents
+    stale wake retries from starving the queue.
+    """
+    SPOOL.mkdir(parents=True, exist_ok=True)
+
+    for sd in sorted(SPOOL.iterdir()):
+        if not sd.is_dir() or not (sd / "COMPLETE").exists():
+            continue
+
+        job_id = sd.name
+
+        if woken_path(job_id).exists():
+            continue
+
+        try:
+            result_commit = push_spool(job_id, cfg)
+        except Exception:
+            traceback.print_exc()
+            continue
+
+        print(
+            f"[{now()}] wake attempt {job_id} commit={result_commit}",
+            flush=True
+        )
+
+        wake(job_id, result_commit, cfg)
+
+        # Only one wake attempt per poll cycle.
+        return
+
+def next_unclaimed_job(cfg):
+    sync_branch(cfg)
+
+    for jdir in job_dirs():
+        job_id = jdir.name
+
+        # A GitHub result means the job is terminal.
+        if remote_result_exists(job_id):
+            continue
+
+        # A local spool/claim means it has already run or was interrupted.
+        if spool_dir(job_id).exists() or claim_path(job_id).exists():
+            continue
+
+        manifest = validate_job(jdir, cfg)
+
+19:WOKEN = STATE / "woken"
+120:def woken_path(job_id):
+121:    return WOKEN / job_id
+442:def wake(job_id, result_commit, cfg):
+526:        wake(job_id, result_commit, cfg)
+594:    WOKEN.mkdir(parents=True, exist_ok=True)
+
+=== RECOVERY EVIDENCE LOGIC 6240-6345 ===
+    ).lower()=="busy":
+        return False,"max-step-continuation-session-still-active"
+    trusted_verify_visibility_evidence={}
+    trusted_visibility_proven=False
+    latest_verify_clean_tail_proven=False
+    if (
+        trusted_verify_visibility_candidate
+        or reverify_single_write_cadence_candidate
+    ):
+        trusted_verify_visibility_evidence=(
+            trusted_verify_reverify_visibility_evidence(
+                sid,did,canonical
+            )
+        )
+        if not trusted_verify_visibility_evidence:
+            return False,"max-step-continuation-limit"
+    if trusted_verify_visibility_candidate:
+        trusted_visibility_proven=bool(
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_verify_exact_required_denials"
+            ) or 0)>=1
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is False
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+        )
+        latest_verify_clean_tail_proven=bool(
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_latest_verify_owned_edits"
+            ) or 0)==0
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is True
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+        )
+        if not (
+            trusted_visibility_proven
+            or latest_verify_clean_tail_proven
+        ):
+            return (
+                False,
+                "max-step-continuation-trusted-verify-visibility-proof-mismatch",
+            )
+    if reverify_single_write_cadence_candidate:
+        if not (
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_verify_owned_edits"
+            ) or 0)>=2
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is True
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+            and reverify_single_write_cadence_fix_installed()
+        ):
+            return (
+                False,
+                "max-step-continuation-reverify-cadence-proof-mismatch",
+            )
+    terminal_summary=(max_step_terminal_summary_db(sid) or "").strip()
+    if not terminal_summary:
+        return False,"max-step-continuation-no-max-step-terminal"
+    if not durable_worker_execution(did,sid):
+        return False,"max-step-continuation-no-durable-owned-progress"
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if not changed or delta!="changed":
+        return False,"max-step-continuation-owned-state-not-changed"
+    project=Path(PROJECT)
+    if worker_sandbox_has_fatal_violation(project,did,sid):
+        return False,"max-step-continuation-fatal-sandbox-violation"
+    violations=ownership_violations(did,sid)
+    if violations:
+        return False,"max-step-continuation-ownership-violation:"+",".join(violations[:4])
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")==f"verify-failed-{verify_exit_code}"
+        and int(verify.get("exit_code") or -1)==verify_exit_code
+        and str(verify.get("command") or "")==canonical
+    ):
+
+=== RECOVERY RECORD LOGIC 6380-6638 ===
+            if diagnostic else ""
+        )
+        + "\nTerminal worker summary (continue from actual filesystem state):\n"
+        f"{summary_tail}\n"
+    )
+    progress_sha=hashlib.sha256(progress_text.encode("utf-8")).hexdigest()
+    marker_id=hashlib.sha256(
+        f"{IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL}\0"
+        f"{did}\0{count}\0{sid}\0{recovery_kind}".encode()
+    ).hexdigest()[:20]
+    placeholder=f"dispatch:max-step-continuation:{marker_id}:{did}"
+    now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    clear_split=False
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"max-step-continuation-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"max-step-continuation-ledger-changed"
+            history=entry.get("implementation_max_step_continuations") or []
+            if not isinstance(history,list):
+                return False,"max-step-continuation-history-invalid"
+            prior_now=[
+                row for row in history
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            legacy_now=(
+                len(prior_now)==1
+                and not prior_now[0].get("handoff_progress_sha256")
+                and not progress_path.exists()
+            )
+            trusted_visibility_now=(
+                len(prior_now)==1
+                and bool(prior_now[0].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            reverify_cadence_now=(
+                len(prior_now)==2
+                and prior_now[0].get("recovery_kind")=="initial"
+                and prior_now[1].get("recovery_kind")=="trusted-verify-visibility"
+                and bool(prior_now[1].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            if recovery_kind=="initial":
+                if prior_now:
+                    return False,"max-step-continuation-limit"
+            elif recovery_kind=="legacy-missing-handoff":
+                if not legacy_now:
+                    return False,"max-step-continuation-legacy-handoff-proof-changed"
+            elif recovery_kind in {
+                "trusted-verify-visibility","latest-verify-clean-tail"
+            }:
+                if not trusted_visibility_now:
+                    return (
+                        False,
+                        "max-step-continuation-trusted-verify-visibility-proof-changed",
+                    )
+            elif recovery_kind=="reverify-single-write-cadence":
+                if not reverify_cadence_now:
+                    return (
+                        False,
+                        "max-step-continuation-reverify-cadence-proof-changed",
+                    )
+            else:
+                return False,"max-step-continuation-recovery-kind-invalid"
+
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            operator_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1 or len(operator_rows)>1:
+                return False,"max-step-continuation-records-changed"
+            failure=failures[0]
+            operator_funded_now=(len(operator_rows)==1)
+            op=operator_rows[0] if operator_funded_now else None
+            failure_match_now=re.fullmatch(
+                r"verify-failed-([1-9]\d*)",
+                str(failure.get("reason") or ""),
+            )
+            if not (
+                failure.get("classification")=="genuine"
+                and failure_match_now
+                and int(failure_match_now.group(1))==verify_exit_code
+            ):
+                return False,"max-step-continuation-state-changed"
+            if operator_funded_now and not (
+                op.get("state")=="consumed"
+                and op.get("outcome")=="meaningful_execution"
+                and op.get("consumes_operator_grant") is True
+            ):
+                return False,"max-step-continuation-state-changed"
+
+            original_failure=dict(failure)
+            original_operator=dict(op) if operator_funded_now else None
+            entry["failure_history"]=[
+                row for row in (entry.get("failure_history") or [])
+                if row is not failure
+            ]
+            entry["sessions"][-1]=placeholder
+            if operator_funded_now:
+                op["session"]=placeholder
+                op["state"]="reserved"
+                op["consumes_operator_grant"]=False
+                op["rearmed_by"]=IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL
+                op["rearmed_at"]=now
+                for key in ("outcome","evidence","consumed_at","resolved_at"):
+                    op.pop(key,None)
+            continuation_row={
+                "protocol":IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+                "recovery_kind":recovery_kind,
+                "attempt":count,
+                "session":sid,
+                "replacement":placeholder,
+                "original_failure_record":original_failure,
+                "original_operator_record":original_operator,
+                "completed_tool_turns":persisted_completed_tool_turns(sid),
+                "owned_state":"changed",
+                "verify_result":f"verify-failed-{verify_exit_code}",
+                "verify_exit_code":verify_exit_code,
+                "handoff_progress_path":str(
+                    progress_path.relative_to(Path(PROJECT))
+                ),
+                "handoff_progress_sha256":progress_sha,
+                "source":"supervisor-max-step-continuation",
+                "timestamp":now,
+            }
+            if diagnostic:
+                continuation_row["supervisor_diagnostic"]=diagnostic
+                continuation_row["supervisor_diagnostic_sha256"]=hashlib.sha256(
+                    diagnostic.encode("utf-8")
+                ).hexdigest()
+            if recovery_kind in {
+                "legacy-missing-handoff",
+                "trusted-verify-visibility",
+                "latest-verify-clean-tail",
+                "reverify-single-write-cadence",
+            }:
+                continuation_row["previous_continuation_session"]=str(
+                    prior[-1].get("session") or ""
+                )
+            if recovery_kind=="trusted-verify-visibility":
+                continuation_row[
+                    "trusted_verify_visibility_evidence"
+                ]={
+                    "trusted_exact_verify_failures":int(
+                        trusted_verify_visibility_evidence.get(
+                            "trusted_exact_verify_failures"
+                        ) or 0
+                    ),
+                    "post_verify_exact_required_denials":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_exact_required_denials"
+                        ) or 0
+                    ),
+                    "post_verify_owned_edit_denials":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_owned_edit_denials"
+                        ) or 0
+                    ),
+                    "current_classifier_state":str(
+                        trusted_verify_visibility_evidence.get(
+                            "current_classifier_state"
+                        ) or ""
+                    ),
+                }
+            if recovery_kind=="latest-verify-clean-tail":
+                continuation_row["latest_verify_clean_tail_evidence"]={
+                    "trusted_exact_verify_failures":int(
+                        trusted_verify_visibility_evidence.get(
+                            "trusted_exact_verify_failures"
+                        ) or 0
+                    ),
+                    "post_verify_owned_edits":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_owned_edits"
+                        ) or 0
+                    ),
+                    "post_latest_verify_owned_edits":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_latest_verify_owned_edits"
+                        ) or 0
+                    ),
+                    "current_classifier_state":str(
+                        trusted_verify_visibility_evidence.get(
+                            "current_classifier_state"
+                        ) or ""
+                    ),
+                    "maximum_steps_reached":bool(
+                        trusted_verify_visibility_evidence.get(
+                            "maximum_steps_reached"
+                        )
+                    ),
+                }
+            if recovery_kind=="reverify-single-write-cadence":
+                continuation_row["reverify_single_write_cadence_evidence"]={
+                    "trusted_exact_verify_failures":int(
+                        trusted_verify_visibility_evidence.get(
+                            "trusted_exact_verify_failures"
+                        ) or 0
+                    ),
+                    "post_verify_owned_edits":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_owned_edits"
+                        ) or 0
+                    ),
+                    "current_classifier_state":str(
+                        trusted_verify_visibility_evidence.get(
+                            "current_classifier_state"
+                        ) or ""
+                    ),
+                    "maximum_steps_reached":bool(
+                        trusted_verify_visibility_evidence.get(
+                            "maximum_steps_reached"
+                        )
+                    ),
+                }
+            entry.setdefault(
+                "implementation_max_step_continuations",[]
+            ).append(continuation_row)
+            entry["unmaterialized_dispatch_sequence"]=count
+            entry["unmaterialized_dispatch_replays"]=0
+            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+                "sequence":count,
+                "replaced":sid,
+                "replacement":placeholder,
+                "source":"supervisor-max-step-continuation",
+                "recovery_kind":recovery_kind,
+                "timestamp":now,
+            })
+            if entry.pop("split_required",None) is not None:
+                clear_split=True
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"max-step-continuation-projected-ledger-invalid"
+            if not projected.get("unmaterialized_dispatch_reusable"):
+                return False,"max-step-continuation-not-reusable"
+            if int(projected.get("count") or 0)!=count:
+                return False,"max-step-continuation-count-changed"
+            atomic_write_text(progress_path,progress_text)
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    log(
+
+=== CONTRACT CHALLENGE GUARD 12970-13075 ===
+        return "na","not-owned-artifact-implementation"
+    attempt=attempt_sequence_for_session(sid,did)
+    if not attempt:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+
+    progress_rel=f".opencode-v2/work/{did}.progress.md"
+    reconcile_implementation_progress_read_marker(sid,did,attempt)
+    progress_available=implementation_progress_read_available(did,attempt)
+    if (
+        progress_available
+        and tool=="read"
+        and _tool_targets_exact_project_path(tool,args,progress_rel)
+    ):
+        write_implementation_progress_read_marker(
+            did,attempt,sid,"current-tool-preexecution"
+        )
+        turns=persisted_completed_tool_turns(sid)
+        return "implementation-progress-read-once",(
+            f"implementation_direct_write completed_tool_turns={turns} "
+            f"allowed_once=read {progress_rel} next_tool=bounded-state-read-or-write"
+        )
+
+    turns=persisted_completed_tool_turns(sid)
+    deadline=early_write_completed_turn_limit(leaf)
+    if turns < deadline and tool=="read":
+        for target_rel in implementation_prewrite_read_targets(leaf):
+            if (
+                _tool_targets_exact_project_path(tool,args,target_rel)
+                and not persisted_exact_project_read_seen(sid,target_rel)
+            ):
+                return "implementation-bounded-read-once",(
+                    f"implementation_direct_write completed_tool_turns={turns} "
+                    f"allowed_once=read {target_rel} next_tool=bounded-state-read-or-write"
+                )
+
+    if turns < 1:
+        return "allow",f"implementation_direct_write completed_tool_turns={turns} required=1"
+    if ready_info(did):
+        return "satisfied","implementation leaf-ready"
+
+    exact_failures=plan_contract_session_exact_verify_failure_count(sid,leaf)
+    if exact_failures>=2:
+        return "implementation-contract-challenge-required",(
+            f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} "
+            f"exact_verify_failures={exact_failures} "
+            "next_action=return-single-line-CONTRACT_CHALLENGE "
+            "reason_must=name-verify_command-and-contract-authority-and-assert-conflict-or-cannot-pass "
+            "no_more_tools=true"
+        )
+
+    changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
+
+    continuation_reverify=implementation_max_step_continuation_session_pending(
+        sid,did,attempt
+    )
+    reverify=plan_contract_reverify_pending(did,leaf) or continuation_reverify
+    if reverify:
+        exact_state=plan_contract_session_exact_verify_state(sid,leaf)
+        current_session_mutated=session_owned_mutation_seen(sid,did)
+        if exact_state=="passed":
+            return "implementation-return-required",(
+                f"PLAN_CONTRACT_EXACT_VERIFY_PASSED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                "next_action=return-without-tools do_not_mutate=true"
+            )
+        if current_session_mutated:
+            if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
+                return "implementation-exact-verify",(
+                    f"PLAN_CONTRACT_POST_WRITE_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                    "command=current-canonical-verify"
+                )
+            # Reverify/continuation repair is intentionally one owned mutation
+            # per failed-Verify cycle. Forcing feedback before another write
+            # prevents a short continuation from spending its remaining turns
+            # on speculative edit batches without observing the first repair.
+            return "implementation-exact-verify-required",(
+                f"PLAN_CONTRACT_POST_WRITE_VERIFY_REQUIRED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                "next_tool=exact-packet-verify one_repair_per_verify_cycle=true "
+                "no_dependency_reread=true"
+            )
+        if exact_state=="not-attempted":
+            if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
+                return "implementation-exact-verify",(
+                    f"PLAN_CONTRACT_EXACT_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                    "command=current-canonical-verify"
+                )
+            return "implementation-exact-verify-required",(
+                f"PLAN_CONTRACT_EXACT_VERIFY_REQUIRED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                "next_tool=exact-packet-verify do_not_mutate=true"
+            )
+        # The exact revised Verify already failed in this session. Before
+        # the first owned repair in this session, allow only the explicitly
+        # authorized local correction sources, each at most once.
+        if tool=="read":
+            for target_rel in implementation_repair_authoritative_read_targets(did):
+                if (
+                    _tool_targets_exact_project_path(tool,args,target_rel)
+                    and not persisted_exact_project_read_seen(sid,target_rel)
+                ):
+                    return "implementation-authoritative-read-once",(
+                        f"PLAN_CONTRACT_REPAIR_SOURCE_READ deliverable={did} "
+                        f"allowed_once=read {target_rel} next_tool=repair-source-read-or-owned-write"
+                    )
+        if _current_tool_directly_mutates_owned_artifact(did,tool,args):
+            return "implementation-write-only",(
+                f"PLAN_CONTRACT_OWNED_REPAIR deliverable={did} "
+
+=== CONTRACT CHALLENGE TEST 4090-4175 ===
+        self.assertTrue(supervisor._tool_is_exact_leaf_verify(
+            path_leaf,"bash",{"command":"'.opencode-v2/bin/run-checks'"},self.sid
+        ))
+        self.assertFalse(supervisor._tool_is_exact_leaf_verify(
+            path_leaf,"bash",
+            {"command":".opencode-v2/bin/run-checks && true"},
+            self.sid,
+        ))
+
+    def test_exact_verify_failure_counter_counts_only_completed_nonzero_exact_runs(self):
+        rows=[
+            {"command":self.verify,"status":"completed","exit_code":1},
+            {"command":"echo other","status":"completed","exit_code":1},
+            {"command":self.verify,"status":"completed","exit_code":2},
+            {"command":self.verify,"status":"completed","exit_code":0},
+            {"command":self.verify,"status":"running","exit_code":1},
+        ]
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer"
+        ), mock.patch.object(
+            supervisor,"persisted_model_bash_commands",return_value=rows
+        ):
+            self.assertEqual(
+                supervisor.plan_contract_session_exact_verify_failure_count(
+                    self.sid,self.leaf
+                ),
+                2,
+            )
+
+    def test_two_failed_exact_verifies_force_contract_challenge_before_more_tools(self):
+        rows=[
+            {"command":self.verify,"status":"completed","exit_code":1},
+            {"command":self.verify,"status":"completed","exit_code":1},
+        ]
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value="DELIVERABLE: D001\n"
+        ), mock.patch.object(
+            supervisor,"persisted_completed_tool_turns",return_value=8
+        ), mock.patch.object(
+            supervisor,"attempt_sequence_for_session",return_value=2
+        ), mock.patch.object(
+            supervisor,"persisted_model_bash_commands",return_value=rows
+        ):
+            state,detail=supervisor.implementation_direct_write_gate_state(
+                self.sid,"edit",{
+                    "filePath":str(self.project/"owned.txt"),
+                    "oldString":"ok\n","newString":"different\n",
+                }
+            )
+        self.assertEqual(
+            state,"implementation-contract-challenge-required"
+        )
+        self.assertIn("CONTRACT_CHALLENGE_REQUIRED",detail)
+        self.assertIn("exact_verify_failures=2",detail)
+        self.assertIn("reason_must=name-verify_command-and-contract-authority",detail)
+        self.assertIn("no_more_tools=true",detail)
+
+    def test_failed_reverify_allows_only_explicit_authoritative_source_reads(self):
+        (self.project/"package.json").write_text("{}\n")
+        (self.project/"src").mkdir()
+        (self.project/"src/dep.js").write_text("export const x=1;\n")
+        context=self.ctrl/"query/leaves/D001-context.json"
+        context.parent.mkdir(parents=True)
+        context.write_text(json.dumps({
+            "supervisor_execution_correction":{
+                "authoritative_sources":[
+                    "package.json","src/dep.js","https://example.invalid/x",
+                    "../escape","/absolute",".opencode-v2/secret",
+                ]
+            },
+            "parent_supervisor_execution_correction":{},
+        }))
+        self.assertEqual(
+            supervisor.implementation_repair_authoritative_read_targets(self.did),
+            ["package.json","src/dep.js"],
+        )
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value="DELIVERABLE: D001\n"
+        ), mock.patch.object(
+            supervisor,"persisted_completed_tool_turns",return_value=4
+        ), mock.patch.object(
+            supervisor,"attempt_sequence_for_session",return_value=2
+
+=== MAX STEP DB HELPER ===
+            parts=d.get("content") if isinstance(d,dict) else None
+            if not isinstance(parts,list):
+                continue
+            texts=[
+                p.get("text","") for p in parts
+                if isinstance(p,dict)
+                and p.get("type")=="text"
+                and isinstance(p.get("text"),str)
+            ]
+            text="\n".join(x for x in texts if x).strip()
+            if text:
+                return text
+    except Exception:
+        pass
+    return ""
+
+
+MAX_STEP_TERMINAL_RE=re.compile(
+    r"(?:maximum steps for this agent have been reached|max steps reached for this agent session)",
+    re.IGNORECASE,
+)
+
+
+def max_step_terminal_summary_db(sid):
+    """Return a max-step terminal summary even if text/compaction followed it.
+
+    OpenCode may append compaction summaries or continuation prose after either
+    supported max-step terminal marker. Accept that history only when no later
+    tool part exists after the marker; any later tool execution means the
+    session was no longer terminal at that point.
+    """
+    latest=last_assistant_text_db(sid)
+    marker_re=MAX_STEP_TERMINAL_RE
+    if marker_re.search(latest or ""):
+        return latest
+
+    if not v1_runtime_enabled():
+        return ""
+
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT time_created,data FROM part "
+            "WHERE session_id=? ORDER BY time_created,id",
+            (sid,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return ""
+
+    marker_time=-1
+    marker_text=""
+    later_tool_time=-1
+    for created,raw in rows:
+        try:
+            part=json.loads(raw) if raw else {}
+
+
+======================================================================
+FINISHED: 2026-09-28T12:17:26Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
