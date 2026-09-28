@@ -1,0 +1,286 @@
+======================================================================
+JOB: job-000117
+JOB_COMMIT: 258622bfa190db8cbd1f0b8a7193516e3ce787c4
+STARTED: 2026-09-28T14:08:02Z
+======================================================================
+
+=== USERSCRIPT DOM / RECOVERY 600-870 ===
+    const selectors=[
+      'button[data-testid="send-button"]',
+      'button[aria-label="Send prompt"]',
+      'button[aria-label="Send message"]',
+      'button[aria-label="Send"]',
+      'button[aria-label*="send" i]'
+    ];
+    for (const selector of selectors) {{
+      const button=document.querySelector(selector);
+      if (button && !button.disabled && button.getAttribute("aria-disabled")!=="true") {{
+        return button;
+      }}
+    }}
+    return null;
+  }}
+
+  function sleep(ms) {{
+    return new Promise(resolve => setTimeout(resolve,ms));
+  }}
+
+  async function sendAutoContinue() {{
+    const composer=composerNode();
+    if (!composer) return {{ok:false,reason:"composer not found"}};
+    if (composerText(composer)) return {{ok:false,reason:"composer not empty"}};
+
+    setComposerText(composer,AUTO_CONTINUE_TEXT);
+
+    for (let attempt=0;attempt<20;attempt++) {{
+      await sleep(100);
+      const send=findSendButton();
+      if (send) {{
+        send.click();
+        return {{ok:true,reason:""}};
+      }}
+    }}
+
+    setComposerText(composer,"");
+    return {{ok:false,reason:"send button unavailable"}};
+  }}
+
+  function recoveryResponseObserved(state) {{
+    if (!state) return false;
+    const assistantAdvanced=
+      assistantTurnCount()>Number(state.submittedAssistantCount || 0);
+    const totalTurnsAdvanced=
+      conversationTurns().length>=Number(state.submittedTurnCount || 0)+2;
+    return assistantAdvanced || totalTurnsAdvanced;
+  }}
+
+  function recoveryResponseTimedOut(state) {{
+    return Boolean(
+      state &&
+      state.awaitingCompletion &&
+      !isGenerating() &&
+      !recoveryResponseObserved(state) &&
+      Date.now()-Number(state.lastSubmitAt || 0)>=RECOVERY_RESPONSE_TIMEOUT_MS
+    );
+  }}
+
+  function clearRecoveryTimer() {{
+    if (recoveryTimer!==null) {{
+      clearTimeout(recoveryTimer);
+      recoveryTimer=null;
+    }}
+    recoveryDeadline=0;
+    recoveryFingerprint="";
+  }}
+
+  function scheduleRecovery(errorNode,delayMs=RECOVERY_DELAY_MS) {{
+    const fingerprint=timeoutFingerprint(errorNode);
+    if (recoveryTimer!==null && recoveryFingerprint===fingerprint) return;
+
+    clearRecoveryTimer();
+    recoveryFingerprint=fingerprint;
+    recoveryDeadline=Date.now()+delayMs;
+    recoveryTimer=setTimeout(
+      () => attemptRecovery(fingerprint),
+      delayMs
+    );
+  }}
+
+  async function attemptRecovery(expectedFingerprint) {{
+    recoveryTimer=null;
+    recoveryDeadline=0;
+
+    if (!window.location.pathname.startsWith(PROJECT_PATH)) return;
+
+    const errorNode=findTimeoutError();
+    if (!errorNode) {{
+      recoveryFingerprint="";
+      return;
+    }}
+
+    const currentFingerprint=timeoutFingerprint(errorNode);
+    if (currentFingerprint!==expectedFingerprint) {{
+      recoveryFingerprint="";
+      scheduleRecovery(errorNode);
+      return;
+    }}
+
+    if (isGenerating()) {{
+      recoveryFingerprint="";
+      scheduleRecovery(errorNode,5000);
+      return;
+    }}
+
+    const state=loadRecoveryState();
+    if (state.lastFingerprint===currentFingerprint && state.awaitingCompletion) {{
+      if (!recoveryResponseTimedOut(state)) {{
+        recoveryFingerprint="";
+        return;
+      }}
+      state.awaitingCompletion=false;
+      state.lastFingerprint="";
+      saveRecoveryState(state);
+      status("delivery recovery response timeout; retrying",false);
+    }}
+
+    if (state.streak>=RECOVERY_MAX_STREAK) {{
+      recoveryFingerprint="";
+      status(
+        "delivery recovery stopped after "+RECOVERY_MAX_STREAK+" attempts",
+        false
+      );
+      return;
+    }}
+
+    const cooldownRemaining=
+      RECOVERY_COOLDOWN_MS-(Date.now()-Number(state.lastSubmitAt || 0));
+    if (cooldownRemaining>0) {{
+      recoveryFingerprint="";
+      scheduleRecovery(errorNode,Math.max(1000,cooldownRemaining));
+      return;
+    }}
+
+    const composer=composerNode();
+    if (!composer) {{
+      recoveryFingerprint="";
+      status("delivery recovery waiting: composer not found",false);
+      scheduleRecovery(errorNode,5000);
+      return;
+    }}
+    if (composerText(composer)) {{
+      recoveryFingerprint="";
+      status("delivery recovery paused: composer contains a draft",false);
+      scheduleRecovery(errorNode,5000);
+      return;
+    }}
+
+    const submittedAssistantCount=assistantTurnCount();
+    const submittedTurnCount=conversationTurns().length;
+    const sent=await sendAutoContinue();
+    if (!sent.ok) {{
+      recoveryFingerprint="";
+      status("delivery recovery waiting: "+sent.reason,false);
+      scheduleRecovery(errorNode,5000);
+      return;
+    }}
+
+    state.streak=Number(state.streak || 0)+1;
+    state.lastFingerprint=currentFingerprint;
+    state.lastSubmitAt=Date.now();
+    state.submittedAssistantCount=submittedAssistantCount;
+    state.submittedTurnCount=submittedTurnCount;
+    state.awaitingCompletion=true;
+    saveRecoveryState(state);
+    recoveryFingerprint="";
+
+    status(
+      "auto-continue sent ("+state.streak+"/"+RECOVERY_MAX_STREAK+")"
+    );
+  }}
+
+  function maybeResetRecoveryAfterSuccess(errorNode) {{
+    const state=loadRecoveryState();
+
+    // A recovery attempt has succeeded once ChatGPT has accepted the injected
+    // Continue and a new assistant response/turn is visible. Do NOT wait for
+    // that potentially long response to finish cleanly: if it later encounters
+    // another stream error, that is a new recovery incident and must start with
+    // a fresh retry budget.
+    if (
+      !state.awaitingCompletion ||
+      !recoveryResponseObserved(state)
+    ) {{
+      if (completionTimer!==null) {{
+        clearTimeout(completionTimer);
+        completionTimer=null;
+      }}
+      return;
+    }}
+
+    if (completionTimer!==null) return;
+
+    completionTimer=setTimeout(() => {{
+      completionTimer=null;
+      const latest=loadRecoveryState();
+      if (
+        latest.awaitingCompletion &&
+        recoveryResponseObserved(latest)
+      ) {{
+        latest.streak=0;
+        latest.lastFingerprint="";
+        latest.awaitingCompletion=false;
+        saveRecoveryState(latest);
+        status(
+          isGenerating()
+            ? "active; recovered response started"
+            : "active; delivery recovery armed"
+        );
+      }}
+    }},1500);
+  }}
+
+  function timeoutRecoveryStatus() {{
+    const errorNode=findTimeoutError();
+    maybeResetRecoveryAfterSuccess(errorNode);
+    const state=loadRecoveryState();
+
+    // Track the submitted Continue independently of the old error node. ChatGPT
+    // may replace/remove that DOM or insert a user turn immediately, changing
+    // the old fingerprint while the recovery response is still outstanding.
+    if (state.awaitingCompletion) {{
+      if (recoveryResponseObserved(state)) {{
+        return "recovered response observed; resetting";
+      }}
+      if (recoveryResponseTimedOut(state)) {{
+        state.awaitingCompletion=false;
+        state.lastFingerprint="";
+        saveRecoveryState(state);
+        if (errorNode) scheduleRecovery(errorNode,1000);
+        return errorNode
+          ? "recovery response timed out; retrying"
+          : "recovery response timed out; waiting for recoverable error";
+      }}
+      return "auto-continue sent; waiting for recovery response";
+    }}
+
+    if (!errorNode) {{
+      clearRecoveryTimer();
+      return "";
+    }}
+
+    const fingerprint=timeoutFingerprint(errorNode);
+
+    if (state.streak>=RECOVERY_MAX_STREAK) {{
+      clearRecoveryTimer();
+      return "delivery recovery cap reached; manual Continue required";
+    }}
+
+    if (isGenerating()) {{
+      clearRecoveryTimer();
+      return "connection interrupted; waiting for ChatGPT";
+    }}
+
+    scheduleRecovery(errorNode);
+
+    const seconds=Math.max(
+      0,
+      Math.ceil((recoveryDeadline-Date.now())/1000)
+    );
+    return "delivery error detected; auto-continue in "+seconds+"s";
+  }}
+
+  function scan() {{
+    if (!window.location.pathname.startsWith(PROJECT_PATH)) {{
+      status("inactive (wrong project)", false);
+      return;
+    }}
+
+    const candidates=[];
+
+
+======================================================================
+FINISHED: 2026-09-28T14:08:02Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
