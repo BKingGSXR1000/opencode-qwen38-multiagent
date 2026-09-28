@@ -1,0 +1,522 @@
+======================================================================
+JOB: job-000110
+JOB_COMMIT: 62bb5dcffadaeb333b96190ea4f2ea4faf695c93
+STARTED: 2026-09-28T12:13:14Z
+======================================================================
+
+=== RECOVERY FUNCTION FULL BRANCH ===
+def recover_implementation_max_step_continuation(did,diagnostic=""):
+    """Rearm a bounded same-attempt continuation stopped by the agent step cap.
+
+    This never adds a retry grant or increments the attempt. A normal attempt
+    gets at most one continuation. Additional same-attempt continuations are
+    permitted only for bounded compatibility defects proven from persisted
+    history: historical missing handoff, stale trusted-Verify classification,
+    or the old multi-edit-after-failed-Verify cadence.
+    """
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    diagnostic=str(diagnostic or "").strip()
+    if len(diagnostic)>1500 or "\x00" in diagnostic:
+        return False,"max-step-continuation-diagnostic-invalid"
+
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"max-step-continuation-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return False,"max-step-continuation-missing-verify"
+    progress_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"max-step-continuation-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"max-step-continuation-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1
+                or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"max-step-continuation-current-session-mismatch"
+            sid=sessions[-1]
+            history=entry.get("implementation_max_step_continuations") or []
+            if not isinstance(history,list):
+                return False,"max-step-continuation-history-invalid"
+            prior=[
+                row for row in history
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            legacy_missing_handoff=(
+                len(prior)==1
+                and not prior[0].get("handoff_progress_sha256")
+                and not progress_path.exists()
+            )
+            trusted_verify_visibility_candidate=(
+                len(prior)==1
+                and bool(prior[0].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            reverify_single_write_cadence_candidate=(
+                len(prior)==2
+                and prior[0].get("recovery_kind")=="initial"
+                and prior[1].get("recovery_kind")=="trusted-verify-visibility"
+                and bool(prior[1].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            if len(prior)>2:
+                return False,"max-step-continuation-limit"
+            if prior and not (
+                legacy_missing_handoff
+                or trusted_verify_visibility_candidate
+                or reverify_single_write_cadence_candidate
+            ):
+                return False,"max-step-continuation-limit"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            operator_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1 or len(operator_rows)>1:
+                return False,"max-step-continuation-records-mismatch"
+            failure=failures[0]
+            operator_funded=(len(operator_rows)==1)
+            op=operator_rows[0] if operator_funded else None
+            failure_match=re.fullmatch(
+                r"verify-failed-([1-9]\d*)",
+                str(failure.get("reason") or ""),
+            )
+            if not (
+                failure.get("classification")=="genuine"
+                and failure_match
+            ):
+                return False,"max-step-continuation-terminal-state-mismatch"
+            if operator_funded and not (
+                op.get("state")=="consumed"
+                and op.get("outcome")=="meaningful_execution"
+                and op.get("consumes_operator_grant") is True
+            ):
+                return False,"max-step-continuation-terminal-state-mismatch"
+            verify_exit_code=int(failure_match.group(1))
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(
+        status.get("type") or status.get("status") or ""
+    ).lower()=="busy":
+        return False,"max-step-continuation-session-still-active"
+    trusted_verify_visibility_evidence={}
+    trusted_visibility_proven=False
+    latest_verify_clean_tail_proven=False
+    if (
+        trusted_verify_visibility_candidate
+        or reverify_single_write_cadence_candidate
+    ):
+        trusted_verify_visibility_evidence=(
+            trusted_verify_reverify_visibility_evidence(
+                sid,did,canonical
+            )
+        )
+        if not trusted_verify_visibility_evidence:
+            return False,"max-step-continuation-limit"
+    if trusted_verify_visibility_candidate:
+        trusted_visibility_proven=bool(
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_verify_exact_required_denials"
+            ) or 0)>=1
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is False
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+        )
+        latest_verify_clean_tail_proven=bool(
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_latest_verify_owned_edits"
+            ) or 0)==0
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+
+=== CONTRACT CHALLENGE / MAX-STEP SYMBOLS ===
+26:    validate_verify_adequacy, validate_contract_challenge_reason,
+698:    r"(?:maximum steps for this agent have been reached|max steps reached for this agent session)",
+703:def max_step_terminal_summary_db(sid):
+704:    """Return a max-step terminal summary even if text/compaction followed it.
+707:    supported max-step terminal marker. Accept that history only when no later
+806:CONTRACT_CHALLENGE_RE=re.compile(
+807:    r"(?m)^CONTRACT_CHALLENGE:\s*(.{20,800})\s*$"
+810:def parse_contract_challenge(text):
+811:    matches=CONTRACT_CHALLENGE_RE.findall(str(text or ""))
+815:    return "" if validate_contract_challenge_reason(reason) else reason
+823:        "CONTRACT_CHALLENGE: <20..800 char concrete contradiction>. "
+4253:        "maximum_steps_reached":bool(
+4254:            re.search(r"maximum steps reached",last or "",re.IGNORECASE)
+4339:        "maximum_steps_reached":max_steps,
+4705:        and bool(legacy_evidence.get("maximum_steps_reached"))
+4712:        and bool(trusted_evidence.get("maximum_steps_reached"))
+4724:        if not legacy_evidence.get("maximum_steps_reached"):
+4725:            return False,"wrapper-history-recovery-no-max-step-terminal"
+4765:            "maximum_steps_reached"
+4775:            "maximum_steps_reached"
+5947:    "v2-implementation-max-step-continuation-v1"
+6109:        "maximum_steps_reached":bool(max_step_terminal_summary_db(sid)),
+6140:        return False,"max-step-continuation-diagnostic-invalid"
+6144:        return False,"max-step-continuation-requires-executable-leaf"
+6147:        return False,"max-step-continuation-missing-verify"
+6155:                return False,"max-step-continuation-missing-ledger-entry"
+6158:                return False,"max-step-continuation-invalid-ledger"
+6169:                return False,"max-step-continuation-current-session-mismatch"
+6173:                return False,"max-step-continuation-history-invalid"
+6197:                return False,"max-step-continuation-limit"
+6203:                return False,"max-step-continuation-limit"
+6216:                return False,"max-step-continuation-records-mismatch"
+6228:                return False,"max-step-continuation-terminal-state-mismatch"
+6234:                return False,"max-step-continuation-terminal-state-mismatch"
+6241:        return False,"max-step-continuation-session-still-active"
+6255:            return False,"max-step-continuation-limit"
+6271:                "maximum_steps_reached"
+6288:                "maximum_steps_reached"
+6297:                "max-step-continuation-trusted-verify-visibility-proof-mismatch",
+6314:                "maximum_steps_reached"
+6320:                "max-step-continuation-reverify-cadence-proof-mismatch",
+6322:    terminal_summary=(max_step_terminal_summary_db(sid) or "").strip()
+6324:        return False,"max-step-continuation-no-max-step-terminal"
+6326:        return False,"max-step-continuation-no-durable-owned-progress"
+6329:        return False,"max-step-continuation-owned-state-not-changed"
+6332:        return False,"max-step-continuation-fatal-sandbox-violation"
+6335:        return False,"max-step-continuation-ownership-violation:"+",".join(violations[:4])
+6346:        return False,"max-step-continuation-verify-evidence-mismatch"
+6390:    placeholder=f"dispatch:max-step-continuation:{marker_id}:{did}"
+6399:                return False,"max-step-continuation-ledger-disappeared"
+6404:                return False,"max-step-continuation-ledger-changed"
+6407:                return False,"max-step-continuation-history-invalid"
+6432:                    return False,"max-step-continuation-limit"
+6435:                    return False,"max-step-continuation-legacy-handoff-proof-changed"
+6442:                        "max-step-continuation-trusted-verify-visibility-proof-changed",
+6448:                        "max-step-continuation-reverify-cadence-proof-changed",
+6451:                return False,"max-step-continuation-recovery-kind-invalid"
+6465:                return False,"max-step-continuation-records-changed"
+6478:                return False,"max-step-continuation-state-changed"
+6484:                return False,"max-step-continuation-state-changed"
+6517:                "source":"supervisor-max-step-continuation",
+6581:                    "maximum_steps_reached":bool(
+6583:                            "maximum_steps_reached"
+6604:                    "maximum_steps_reached":bool(
+6606:                            "maximum_steps_reached"
+6619:                "source":"supervisor-max-step-continuation",
+6627:                return False,"max-step-continuation-projected-ledger-invalid"
+6629:                return False,"max-step-continuation-not-reusable"
+6631:                return False,"max-step-continuation-count-changed"
+6662:        "maximum_steps_reached":False,
+6738:    result["maximum_steps_reached"]=bool(
+6831:    if not evidence.get("maximum_steps_reached"):
+6832:        return False,"context-delivery-recovery-no-max-step-terminal"
+6856:        "maximum_steps_reached"
+10321:            f"completed_report_writes={len(writes)} no_more_tools=true "
+10362:    """Recover a terminal max-step validator from its one authoritative report."""
+10364:        return "","max-step-report-terminal-marker-missing"
+10366:        return "",f"max-step-report-write-count:{len(writes)}"
+10370:        return "","max-step-report-invalid:"+errors[0]
+10376:        return "","max-step-report-unreadable:"+type(exc).__name__
+10378:        return "","max-step-report-content-mismatch"
+10381:        return "","max-step-report-result-invalid"
+10392:        "recovery_kind":"max-step-after-valid-immutable-report",
+10408:    return result.lower(),"max-step-valid-report-recovered"
+10537:def request_leaf_contract_challenge_repair(did,sid,reason):
+10542:    reason_errors=validate_contract_challenge_reason(reason)
+10619:        f"LEAF_CONTRACT_CHALLENGE_REQUESTED deliverable={did} key={key} "
+10623:        "LEAF_CONTRACT_CHALLENGE_REQUESTED",sid,"supervisor",
+10629:def reconcile_invalid_leaf_contract_challenge_repair():
+10649:    errors=validate_contract_challenge_reason(reason)
+10691:        f"LEAF_CONTRACT_CHALLENGE_REJECTED_STALE deliverable={did or 'unknown'} "
+10695:        "LEAF_CONTRACT_CHALLENGE_REJECTED_STALE","", "supervisor",
+12220:    "EARLY_WRITE_IMPLEMENTATION_CONTRACT_CHALLENGE_REQUIRED",
+12782:    """Whether sid is the materialized same-attempt max-step continuation."""
+13014:            f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} "
+13016:            "next_action=return-single-line-CONTRACT_CHALLENGE "
+13018:            "no_more_tools=true"
+13032:                f"PLAN_CONTRACT_EXACT_VERIFY_PASSED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+13038:                    f"PLAN_CONTRACT_POST_WRITE_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+13046:                f"PLAN_CONTRACT_POST_WRITE_VERIFY_REQUIRED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+13053:                    f"PLAN_CONTRACT_EXACT_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+13057:                f"PLAN_CONTRACT_EXACT_VERIFY_REQUIRED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+17777:def handle_leaf_contract_challenge(sid,agent,did):
+17779:    reason=parse_contract_challenge(last_assistant_text_db(sid))
+17785:            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+17789:            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+17795:            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+17799:            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+17807:            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+17811:            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+17816:    requested,request_detail=request_leaf_contract_challenge_repair(
+17821:            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+17825:            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+17836:        f"LEAF_CONTRACT_CHALLENGE_ACCEPTED session={sid} deliverable={did} "
+17840:        "LEAF_CONTRACT_CHALLENGE_ACCEPTED",sid,agent,
+17864:    if handle_leaf_contract_challenge(sid,agent,did):
+18172:            reconcile_invalid_leaf_contract_challenge_repair()
+18406:        if detail in {"pass-ok","max-step-valid-report-recovered"}:
+
+=== THIRD-CONTINUATION TESTS ===
+                return_value=proof,
+            ),
+        ):
+            self.assertEqual(
+                supervisor.recover_implementation_max_step_continuation(
+                    self.did
+                ),
+                (True,"rearmed-same-attempt"),
+            )
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ][self.did]
+        self.assertEqual(entry["count"],3)
+        self.assertEqual(len(entry["implementation_max_step_continuations"]),2)
+        latest=entry["implementation_max_step_continuations"][-1]
+        self.assertEqual(latest["recovery_kind"],"latest-verify-clean-tail")
+        self.assertEqual(latest["previous_continuation_session"],"prior-session")
+        evidence=latest["latest_verify_clean_tail_evidence"]
+        self.assertEqual(evidence["trusted_exact_verify_failures"],2)
+        self.assertEqual(evidence["post_verify_owned_edits"],1)
+        self.assertEqual(evidence["post_latest_verify_owned_edits"],0)
+        self.assertTrue(
+            control_state.attempt_state(entry)["unmaterialized_dispatch_reusable"]
+        )
+
+    def test_allows_third_continuation_only_for_reverify_single_write_cadence_bug(self):
+        data=json.loads((self.work/"attempts.json").read_text())
+        progress=self.work/f"{self.did}.progress.md"
+        progress.write_text("second continuation handoff\n")
+        data["deliverables"][self.did][
+            "implementation_max_step_continuations"
+        ]=[
+            {
+                "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+                "recovery_kind":"initial",
+                "attempt":3,
+                "session":"initial-session",
+                "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+                "handoff_progress_sha256":"first",
+            },
+            {
+                "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+                "recovery_kind":"trusted-verify-visibility",
+                "attempt":3,
+                "session":"visibility-session",
+                "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+                "handoff_progress_sha256":hashlib.sha256(
+                    progress.read_bytes()
+                ).hexdigest(),
+            },
+        ]
+        (self.work/"attempts.json").write_text(json.dumps(data))
+        proof={
+            "agent":"implementer",
+            "trusted_exact_verify_failures":1,
+            "post_verify_exact_required_denials":0,
+            "post_verify_owned_edit_denials":0,
+            "post_verify_owned_edits":2,
+            "current_classifier_state":"failed",
+            "owned_mutation_seen":True,
+            "maximum_steps_reached":True,
+        }
+        patches=self.recovery_patches()
+        with (
+            patches[0],patches[1],patches[2],patches[3],
+            patches[4],patches[5],patches[6],
+            mock.patch.object(
+                supervisor,"trusted_verify_reverify_visibility_evidence",
+                return_value=proof,
+            ),
+        ):
+            self.assertEqual(
+                supervisor.recover_implementation_max_step_continuation(
+                    self.did
+                ),
+                (True,"rearmed-same-attempt"),
+            )
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ][self.did]
+        self.assertEqual(entry["count"],3)
+        history=entry["implementation_max_step_continuations"]
+        self.assertEqual(len(history),3)
+        latest=history[-1]
+        self.assertEqual(
+            latest["recovery_kind"],"reverify-single-write-cadence"
+        )
+        self.assertEqual(
+            latest["previous_continuation_session"],"visibility-session"
+        )
+        self.assertEqual(
+            latest["reverify_single_write_cadence_evidence"][
+                "post_verify_owned_edits"
+            ],
+            2,
+        )
+        self.assertTrue(
+            control_state.attempt_state(entry)["unmaterialized_dispatch_reusable"]
+        )
+
+    def test_refuses_second_continuation_for_same_attempt(self):
+        data=json.loads((self.work/"attempts.json").read_text())
+        progress=self.work/f"{self.did}.progress.md"
+        progress.write_text("modern handoff\n")
+        data["deliverables"][self.did][
+            "implementation_max_step_continuations"
+        ]=[{
+            "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+            "attempt":3,"session":"prior",
+            "handoff_progress_path":f".opencode-v2/work/{self.did}.progress.md",
+            "handoff_progress_sha256":hashlib.sha256(progress.read_bytes()).hexdigest(),
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(data))
+        self.assertEqual(
+            supervisor.recover_implementation_max_step_continuation(self.did),
+            (False,"max-step-continuation-limit"),
+        )
+
+    def test_legacy_missing_handoff_allows_one_compatibility_continuation(self):
+        data=json.loads((self.work/"attempts.json").read_text())
+        data["deliverables"][self.did][
+            "implementation_max_step_continuations"
+        ]=[{
+            "protocol":supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+            "attempt":3,"session":"legacy-prior",
+        }]
+        (self.work/"attempts.json").write_text(json.dumps(data))
+        patches=self.recovery_patches()
+        with patches[0],patches[1],patches[2],patches[3],patches[4],patches[5],patches[6]:
+            self.assertEqual(
+                supervisor.recover_implementation_max_step_continuation(
+                    self.did
+                ),
+                (True,"rearmed-same-attempt"),
+            )
+        entry=json.loads((self.work/"attempts.json").read_text())[
+            "deliverables"
+        ][self.did]
+        self.assertEqual(entry["count"],3)
+        history=entry["implementation_max_step_continuations"]
+        self.assertEqual(len(history),2)
+        latest=history[-1]
+        self.assertEqual(latest["recovery_kind"],"legacy-missing-handoff")
+        self.assertEqual(latest["previous_continuation_session"],"legacy-prior")
+        progress=self.work/f"{self.did}.progress.md"
+        self.assertTrue(progress.is_file())
+        self.assertIn("RECOVERY_KIND: legacy-missing-handoff",progress.read_text())
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"])
+        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+        self.assertEqual(state["operator_grants_reserved"],1)
+
+    def test_max_step_marker_survives_later_text_only_compaction_tail(self):
+        db_path=self.project/"parts.sqlite"
+        con=sqlite3.connect(db_path)
+        con.execute(
+            "create table part (id text, session_id text, time_created integer, data text)"
+        )
+        con.executemany(
+            "insert into part values (?,?,?,?)",
+            [
+                ("p1",self.sid,10,json.dumps({
+                    "type":"text",
+                    "text":"Maximum steps for this agent have been reached.\nrepair summary",
+                })),
+                ("p2",self.sid,20,json.dumps({
+                    "type":"compaction","auto":True,
+                })),
+                ("p3",self.sid,30,json.dumps({
+                    "type":"text","text":"post-compaction summary",
+                })),
+            ],
+        )
+        con.commit(); con.close()
+        with (
+            mock.patch.object(supervisor,"last_assistant_text_db",return_value="post-compaction summary"),
+
+=== PLAN-CONTRACT / CONTRACT-CHALLENGE TESTS ===
+659:    def test_leaf_contract_challenge_requires_a_changed_affected_leaf(self):
+672:                "source":"runtime-leaf-contract-challenge",
+700:        self.sid="ses-contract-challenge"
+740:            supervisor.parse_contract_challenge(
+741:                "CONTRACT_CHALLENGE: exact Verify requires a space but A003 requires empty."
+746:            supervisor.parse_contract_challenge("CONTRACT_CHALLENGE: too short"),
+750:            supervisor.parse_contract_challenge(
+751:                "CONTRACT_CHALLENGE: first sufficiently long contradiction here\n"
+752:                "CONTRACT_CHALLENGE: second sufficiently long contradiction here"
+757:            supervisor.parse_contract_challenge(
+758:                "CONTRACT_CHALLENGE: None confirmed - the exact Verify failure "
+767:            "CONTRACT_CHALLENGE: verify_command asserts pure-newline input "
+772:        parsed=supervisor.parse_contract_challenge(text)
+775:            leaf_contract.validate_contract_challenge_reason(parsed),[]
+780:            "CONTRACT_CHALLENGE: verify_command calls the imported module object "
+784:        parsed=supervisor.parse_contract_challenge(text)
+787:            leaf_contract.validate_contract_challenge_reason(parsed),[]
+796:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+808:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+815:        self.assertIn("contract-challenge-reason-invalid",detail)
+828:            "source":"runtime-leaf-contract-challenge",
+844:        challenge_path=self.work/f"{self.did}.contract-challenge.json"
+847:            "protocol":"v2-leaf-contract-challenge-v1",
+856:                supervisor.reconcile_invalid_leaf_contract_challenge_repair()
+867:                f"{self.did}.contract-challenge.rejected-*.json"
+879:            "source":"runtime-leaf-contract-challenge",
+885:        self.assertIn("runtime leaf contract challenge invalid",errors[0])
+888:        ok,detail=supervisor.request_leaf_contract_challenge_repair(
+894:        self.assertEqual(detail,"contract-challenge-repair")
+898:        self.assertEqual(repair["source"],"runtime-leaf-contract-challenge")
+903:        self.assertTrue((self.work/f"{self.did}.contract-challenge.json").exists())
+907:            "CONTRACT_CHALLENGE: exact Verify conflicts with authoritative "
+915:            supervisor,"request_leaf_contract_challenge_repair"
+918:                supervisor.handle_leaf_contract_challenge(
+926:            "CONTRACT_CHALLENGE: exact Verify conflicts with authoritative "
+939:            supervisor,"request_leaf_contract_challenge_repair",
+940:            return_value=(True,"contract-challenge-repair")
+947:                supervisor.handle_leaf_contract_challenge(
+4119:    def test_two_failed_exact_verifies_force_contract_challenge_before_more_tools(self):
+4142:            state,"implementation-contract-challenge-required"
+4144:        self.assertIn("CONTRACT_CHALLENGE_REQUIRED",detail)
+5835:    def write_runtime_repair(self, *, baseline=None, source="runtime-leaf-contract-challenge"):
+
+=== CURRENT D011-B2 LAST SESSION ===
+session ses_f1868cee2ffefF4JpYtrzpFnYJ
+history kinds ['initial', 'latest-verify-clean-tail']
+
+
+======================================================================
+FINISHED: 2026-09-28T12:13:14Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
