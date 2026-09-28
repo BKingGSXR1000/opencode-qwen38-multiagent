@@ -1,0 +1,33 @@
+{
+  "finished_at": "2026-09-28T12:07:26Z",
+  "hostname": "AI-Beast",
+  "id": "job-000108",
+  "infrastructure_reason": "",
+  "interrupted": false,
+  "job_commit": "33c1f310e6ebe7254c7ffa78ddba271610537972",
+  "manifest": {
+    "allow_sudo": false,
+    "id": "job-000108",
+    "protocol": "chatgpt-local-job-v1",
+    "ready": true,
+    "script": "run.sh",
+    "script_sha256": "741060d2e195e1248ef9b9dd2d2f50e75b32905a0770b8eb0bb808798dc969a6",
+    "source": "chatgpt-local-ingress-v1",
+    "timeout_seconds": 120
+  },
+  "protocol": "chatgpt-local-job-result-v2",
+  "returncode": 0,
+  "started_at": "2026-09-28T12:07:09Z",
+  "target_after": {
+    "branch": "a2-v11831-integration",
+    "head": "a3f24680f7ec104278089541e89dddb42a6dff08",
+    "status_porcelain": "M scripts/control-guard.py\n M scripts/control_query_views.py\n M scripts/control_state.py\n M scripts/deterministic_dispatch.py\n M scripts/drive-stage-a-run.py\n M scripts/leaf_contract.py\n M scripts/run-a2-v11831-server.sh\n M scripts/run-checks.py\n M scripts/stage_a_controller.py\n M scripts/supervisor.py\n M scripts/test_stage_a_stabilization.py\n M scripts/test_state_machine_invariants.py\n M scripts/worker_sandbox.py\n M xdg/config/opencode/agents/implementation-planner.md\n M xdg/config/opencode/agents/reference-researcher.md\n M xdg/config/opencode/plugins/v2-bounded-subagent.js\n?? scripts/control_policy.py\n?? scripts/runtime_contract.py"
+  },
+  "target_before": {
+    "branch": "a2-v11831-integration",
+    "head": "a3f24680f7ec104278089541e89dddb42a6dff08",
+    "status_porcelain": "M scripts/control-guard.py\n M scripts/control_query_views.py\n M scripts/control_state.py\n M scripts/deterministic_dispatch.py\n M scripts/drive-stage-a-run.py\n M scripts/leaf_contract.py\n M scripts/run-a2-v11831-server.sh\n M scripts/run-checks.py\n M scripts/stage_a_controller.py\n M scripts/supervisor.py\n M scripts/test_stage_a_stabilization.py\n M scripts/test_state_machine_invariants.py\n M scripts/worker_sandbox.py\n M xdg/config/opencode/agents/implementation-planner.md\n M xdg/config/opencode/agents/reference-researcher.md\n M xdg/config/opencode/plugins/v2-bounded-subagent.js\n?? scripts/control_policy.py\n?? scripts/runtime_contract.py"
+  },
+  "target_repo": "/home/bking/AI/opencode-qwen38-multiagent-v2-a2-v11831",
+  "timed_out": false
+}

@@ -1,0 +1,66 @@
+======================================================================
+JOB: job-000108
+JOB_COMMIT: 33c1f310e6ebe7254c7ffa78ddba271610537972
+STARTED: 2026-09-28T12:07:09Z
+======================================================================
+
+=== PATCHED MATCH LOGIC ===
+56-        MATCHES+=("$WIN")
+57-    fi
+58-done
+59-
+60:# xdotool can expose both the real Firefox browser window and a generic
+61-# auxiliary "Firefox" window with the same active-tab URL. Prefer the normal
+62-# browser window without depending on the changing ChatGPT conversation title.
+63-if [[ ${#MATCHES[@]} -gt 1 ]]; then
+64-    REAL_MATCHES=()
+65-    for WIN in "${MATCHES[@]}"; do
+66-        TITLE="$(xdotool getwindowname "$WIN" 2>/dev/null || true)"
+67-        if [[ "$TITLE" == *"— Mozilla Firefox" ]]; then
+68-            REAL_MATCHES+=("$WIN")
+69-        fi
+70-    done
+71-    if [[ ${#REAL_MATCHES[@]} -eq 1 ]]; then
+72-        MATCHES=("${REAL_MATCHES[@]}")
+73-    fi
+74-fi
+75-
+76-if [[ ${#MATCHES[@]} -ne 1 ]]; then
+77-    echo "ERROR: expected exactly one Firefox window at target ChatGPT path, found ${#MATCHES[@]}"
+78-    for WIN in "${WINDOWS[@]}"; do
+79-        TITLE="$(xdotool getwindowname "$WIN" 2>/dev/null || true)"
+80-        printf '  window=%s title=%q\n' "$WIN" "$TITLE"
+81-    done
+82-    exit 1
+83-fi
+84-
+85-WIN="${MATCHES[0]}"
+86-
+87-printf '%s' "$MESSAGE" | xclip -selection clipboard
+88-
+89-xdotool windowactivate --sync "$WIN"
+90-sleep 0.35
+91-
+92-eval "$(
+93-    xdotool getwindowgeometry --shell "$WIN" |
+94-      grep -E '^(WIDTH|HEIGHT)='
+95-)"
+
+=== MARK OLD WAKE BACKLOG HANDLED ===
+job-000102 WOKEN
+job-000103 WOKEN
+job-000104 WOKEN
+job-000105 WOKEN
+job-000106 WOKEN
+job-000107 WOKEN
+
+=== DIRECT WAKE SCRIPT SELF-TEST ===
+SENT: WAKE_REPAIR_DIRECT_TEST
+
+
+======================================================================
+FINISHED: 2026-09-28T12:07:26Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
