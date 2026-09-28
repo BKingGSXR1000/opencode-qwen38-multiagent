@@ -1,0 +1,505 @@
+======================================================================
+JOB: job-000131
+JOB_COMMIT: 8392f7d161c7d2efcda595ac2c222d3193282f88
+STARTED: 2026-09-28T17:33:54Z
+======================================================================
+
+=== scripts/supervisor.py:690-835 ===
+   690	            if text:
+   691	                return text
+   692	    except Exception:
+   693	        pass
+   694	    return ""
+   695	
+   696	
+   697	MAX_STEP_TERMINAL_RE=re.compile(
+   698	    r"(?:maximum steps for this agent have been reached|max steps reached for this agent session)",
+   699	    re.IGNORECASE,
+   700	)
+   701	
+   702	
+   703	def max_step_terminal_summary_db(sid):
+   704	    """Return a max-step terminal summary even if text/compaction followed it.
+   705	
+   706	    OpenCode may append compaction summaries or continuation prose after either
+   707	    supported max-step terminal marker. Accept that history only when no later
+   708	    tool part exists after the marker; any later tool execution means the
+   709	    session was no longer terminal at that point.
+   710	    """
+   711	    latest=last_assistant_text_db(sid)
+   712	    marker_re=MAX_STEP_TERMINAL_RE
+   713	    if marker_re.search(latest or ""):
+   714	        return latest
+   715	
+   716	    if not v1_runtime_enabled():
+   717	        return ""
+   718	
+   719	    try:
+   720	        con=db_connect()
+   721	        rows=con.execute(
+   722	            "SELECT time_created,data FROM part "
+   723	            "WHERE session_id=? ORDER BY time_created,id",
+   724	            (sid,),
+   725	        ).fetchall()
+   726	        con.close()
+   727	    except Exception:
+   728	        return ""
+   729	
+   730	    marker_time=-1
+   731	    marker_text=""
+   732	    later_tool_time=-1
+   733	    for created,raw in rows:
+   734	        try:
+   735	            part=json.loads(raw) if raw else {}
+   736	        except Exception:
+   737	            continue
+   738	        if not isinstance(part,dict):
+   739	            continue
+   740	        when=int(created or 0)
+   741	        if part.get("type")=="text":
+   742	            text=str(part.get("text") or "")
+   743	            if marker_re.search(text):
+   744	                marker_time=when
+   745	                marker_text=text.strip()
+   746	                later_tool_time=-1
+   747	            continue
+   748	        if (
+   749	            marker_time>=0
+   750	            and when>marker_time
+   751	            and part.get("type")=="tool"
+   752	        ):
+   753	            later_tool_time=max(later_tool_time,when)
+   754	
+   755	    if marker_time<0 or later_tool_time>marker_time:
+   756	        return ""
+   757	
+   758	    if latest and latest.strip()!=marker_text:
+   759	        return marker_text+"\n\nLatest post-terminal summary:\n"+latest.strip()
+   760	    return marker_text
+   761	
+   762	
+   763	def parse_split_parent(text):
+   764	    m=re.search(
+   765	        r"(?m)^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?$|\r?\n)",
+   766	        str(text or ""),
+   767	    )
+   768	    return m.group(1) if m else ""
+   769	
+   770	
+   771	def parse_deliverable(text):
+   772	    if not text: return ""
+   773	    m=re.search(r"(?mi)^\s*DELIVERABLE\s*:\s*(D\d{3}(?:-[AB](?:[12])?)?)\s*$",text)
+   774	    return m.group(1) if m else ""
+   775	
+   776	def implementation_prompt(did):
+   777	    return (
+   778	        f"DELIVERABLE: {did}\n"
+   779	        f"Read .opencode-v2/query/leaves/{did}-context.json exactly once for this session; "
+   780	        "it is the complete authoritative deliverable contract. Do not read "
+   781	        ".opencode-v2/IMPLEMENTATION_PLAN.md or a separate split scope. "
+   782	        "If parent_supervisor_execution_correction is non-empty, apply it to "
+   783	        "inherited parent execution details in parent_outcome_context/current_progress/"
+   784	        "split_scope. Then, if supervisor_execution_correction is non-empty, apply the "
+   785	        "child-specific correction; it wins only where the two execution corrections "
+   786	        "conflict. Neither correction may change ownership, Verify, dependencies, "
+   787	        "Done-when, or Acceptance.\n"
+   788	        f"Read .opencode-v2/work/{did}.progress.md if present.\n"
+   789	        "Inspect your owned project artifacts as they currently exist.\n"
+   790	        "Continue from actual filesystem state and execute the deliverable."
+   791	    )
+   792	
+   793	def early_write_completed_turn_limit(leaf):
+   794	    complexity=str(leaf.get("complexity") or "S").strip().upper() if isinstance(leaf,dict) else "S"
+   795	    return int(EARLY_WRITE_COMPLETED_TURNS_BY_COMPLEXITY.get(complexity,4))
+   796	
+   797	
+   798	def _ordinal_word(value):
+   799	    return {4:"FOURTH",6:"SIXTH"}.get(int(value),f"{int(value)}TH")
+   800	
+   801	
+   802	def _next_ordinal_word(value):
+   803	    return {4:"fifth",6:"seventh"}.get(int(value),f"{int(value)+1}th")
+   804	
+   805	
+   806	CONTRACT_CHALLENGE_RE=re.compile(
+   807	    r"(?m)^CONTRACT_CHALLENGE:\s*(.{20,800})\s*$"
+   808	)
+   809	
+   810	def parse_contract_challenge(text):
+   811	    matches=CONTRACT_CHALLENGE_RE.findall(str(text or ""))
+   812	    if len(matches)!=1:
+   813	        return ""
+   814	    reason=" ".join(str(matches[0]).split())
+   815	    return "" if validate_contract_challenge_reason(reason) else reason
+   816	
+   817	def verify_reporting_rule():
+   818	    return (
+   819	        "\n\nVERIFY REPORTING:\n"
+   820	        "Say exact Verify passed only if packet verify_command ran UNCHANGED and exited 0; "
+   821	        "label all other checks noncanonical. If failed exact Verify contradicts "
+   822	        "Done-when/Acceptance, STOP edits and return one line: "
+   823	        "CONTRACT_CHALLENGE: <20..800 char concrete contradiction>. "
+   824	        "Never use this for implementation bugs or missing work; it grants no retry."
+   825	    )
+   826	
+   827	
+   828	def plan_contract_reverify_pending(did,leaf=None):
+   829	    """True only for a supervisor-recorded stronger Verify awaiting recheck."""
+   830	    if not did:
+   831	        return False
+   832	    if leaf is None:
+   833	        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+   834	    if not isinstance(leaf,dict):
+   835	        return False
+=== scripts/supervisor.py:6550-6655 ===
+  6550	                            "post_verify_owned_edit_denials"
+  6551	                        ) or 0
+  6552	                    ),
+  6553	                    "current_classifier_state":str(
+  6554	                        trusted_verify_visibility_evidence.get(
+  6555	                            "current_classifier_state"
+  6556	                        ) or ""
+  6557	                    ),
+  6558	                }
+  6559	            if recovery_kind=="latest-verify-clean-tail":
+  6560	                continuation_row["latest_verify_clean_tail_evidence"]={
+  6561	                    "trusted_exact_verify_failures":int(
+  6562	                        trusted_verify_visibility_evidence.get(
+  6563	                            "trusted_exact_verify_failures"
+  6564	                        ) or 0
+  6565	                    ),
+  6566	                    "post_verify_owned_edits":int(
+  6567	                        trusted_verify_visibility_evidence.get(
+  6568	                            "post_verify_owned_edits"
+  6569	                        ) or 0
+  6570	                    ),
+  6571	                    "post_latest_verify_owned_edits":int(
+  6572	                        trusted_verify_visibility_evidence.get(
+  6573	                            "post_latest_verify_owned_edits"
+  6574	                        ) or 0
+  6575	                    ),
+  6576	                    "current_classifier_state":str(
+  6577	                        trusted_verify_visibility_evidence.get(
+  6578	                            "current_classifier_state"
+  6579	                        ) or ""
+  6580	                    ),
+  6581	                    "maximum_steps_reached":bool(
+  6582	                        trusted_verify_visibility_evidence.get(
+  6583	                            "maximum_steps_reached"
+  6584	                        )
+  6585	                    ),
+  6586	                }
+  6587	            if recovery_kind=="reverify-single-write-cadence":
+  6588	                continuation_row["reverify_single_write_cadence_evidence"]={
+  6589	                    "trusted_exact_verify_failures":int(
+  6590	                        trusted_verify_visibility_evidence.get(
+  6591	                            "trusted_exact_verify_failures"
+  6592	                        ) or 0
+  6593	                    ),
+  6594	                    "post_verify_owned_edits":int(
+  6595	                        trusted_verify_visibility_evidence.get(
+  6596	                            "post_verify_owned_edits"
+  6597	                        ) or 0
+  6598	                    ),
+  6599	                    "current_classifier_state":str(
+  6600	                        trusted_verify_visibility_evidence.get(
+  6601	                            "current_classifier_state"
+  6602	                        ) or ""
+  6603	                    ),
+  6604	                    "maximum_steps_reached":bool(
+  6605	                        trusted_verify_visibility_evidence.get(
+  6606	                            "maximum_steps_reached"
+  6607	                        )
+  6608	                    ),
+  6609	                }
+  6610	            entry.setdefault(
+  6611	                "implementation_max_step_continuations",[]
+  6612	            ).append(continuation_row)
+  6613	            entry["unmaterialized_dispatch_sequence"]=count
+  6614	            entry["unmaterialized_dispatch_replays"]=0
+  6615	            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+  6616	                "sequence":count,
+  6617	                "replaced":sid,
+  6618	                "replacement":placeholder,
+  6619	                "source":"supervisor-max-step-continuation",
+  6620	                "recovery_kind":recovery_kind,
+  6621	                "timestamp":now,
+  6622	            })
+  6623	            if entry.pop("split_required",None) is not None:
+  6624	                clear_split=True
+  6625	            projected=attempt_state(entry)
+  6626	            if not projected.get("valid"):
+  6627	                return False,"max-step-continuation-projected-ledger-invalid"
+  6628	            if not projected.get("unmaterialized_dispatch_reusable"):
+  6629	                return False,"max-step-continuation-not-reusable"
+  6630	            if int(projected.get("count") or 0)!=count:
+  6631	                return False,"max-step-continuation-count-changed"
+  6632	            atomic_write_text(progress_path,progress_text)
+  6633	            save_attempts(data)
+  6634	
+  6635	    if clear_split:
+  6636	        _clear_split_request_state_for_contract_repair(did)
+  6637	        splitter_lock_path(did).unlink(missing_ok=True)
+  6638	    log(
+  6639	        f"IMPLEMENTATION_MAX_STEP_CONTINUATION deliverable={did} "
+  6640	        f"attempt={count} session={sid} kind={recovery_kind} "
+  6641	        f"handoff_sha256={progress_sha} placeholder={placeholder}"
+  6642	    )
+  6643	    csv(
+  6644	        "IMPLEMENTATION_MAX_STEP_CONTINUATION",sid,"supervisor",
+  6645	        f"{did} attempt={count} kind={recovery_kind} "
+  6646	        f"handoff_sha256={progress_sha} placeholder={placeholder}",
+  6647	    )
+  6648	    return True,"rearmed-same-attempt"
+  6649	
+  6650	
+  6651	CONTEXT_DELIVERY_RECOVERY_PROTOCOL="v2-context-delivery-recovery-v1"
+  6652	
+  6653	
+  6654	def context_delivery_failure_evidence(sid,did,attempt):
+  6655	    """Return durable evidence for the compact-context/direct-write trap."""
+=== scripts/test_state_machine_invariants.py:1430-1665 ===
+  1430	        (self.work/"attempts.json").write_text(json.dumps({
+  1431	            "owner":"supervisor",
+  1432	            "deliverables":{
+  1433	                self.did:{
+  1434	                    "automatic_limit":2,
+  1435	                    "count":3,
+  1436	                    "sessions":["s1","s2",self.sid],
+  1437	                    "failure_history":[
+  1438	                        {"attempt":1,"classification":"genuine","reason":"verify-failed-1"},
+  1439	                        {"attempt":2,"classification":"genuine","reason":"verify-failed-1"},
+  1440	                        {"attempt":3,"classification":"genuine","reason":"verify-failed-1",
+  1441	                         "session":self.sid,"source":"supervisor"},
+  1442	                    ],
+  1443	                    "operator_retry_grants":1,
+  1444	                    "operator_overrides":[{
+  1445	                        "grant":1,"source":"operator-cli",
+  1446	                        "timestamp":"2026-09-26T00:00:00Z","reason":"retry",
+  1447	                    }],
+  1448	                    "operator_retry_attempts":[{
+  1449	                        "sequence":3,"session":self.sid,
+  1450	                        "state":"consumed","outcome":"meaningful_execution",
+  1451	                        "consumes_operator_grant":True,
+  1452	                        "evidence":"completed-worker-tool-action",
+  1453	                        "source":"supervisor",
+  1454	                    }],
+  1455	                }
+  1456	            },
+  1457	        }))
+  1458	        (self.work/f"{self.did}.verify-evidence.json").write_text(json.dumps({
+  1459	            "owner":"supervisor",
+  1460	            "protocol":supervisor.VERIFY_EVIDENCE_PROTOCOL,
+  1461	            "deliverable":self.did,
+  1462	            "entries":[],
+  1463	            "latest":{
+  1464	                "attempt":3,"session":self.sid,"command":self.verify,
+  1465	                "executed":True,"exit_code":1,"result":"verify-failed-1",
+  1466	                "stdout":"","stderr":"","error":"",
+  1467	            },
+  1468	        }))
+  1469	
+  1470	    def tearDown(self):
+  1471	        supervisor.PROJECT=self.old_project
+  1472	        supervisor.LOG=self.old_log
+  1473	        self.tmp.cleanup()
+  1474	
+  1475	    def recovery_patches(self,last="Maximum steps for this agent have been reached."):
+  1476	        return (
+  1477	            mock.patch.object(supervisor,"v1_session_status_snapshot",return_value={}),
+  1478	            mock.patch.object(supervisor,"last_assistant_text_db",return_value=last),
+  1479	            mock.patch.object(supervisor,"durable_worker_execution",return_value=True),
+  1480	            mock.patch.object(
+  1481	                supervisor,"_owned_artifact_changed_since_execution_baseline",
+  1482	                return_value=(True,"changed")
+  1483	            ),
+  1484	            mock.patch.object(
+  1485	                supervisor,"worker_sandbox_has_fatal_violation",return_value=False
+  1486	            ),
+  1487	            mock.patch.object(supervisor,"ownership_violations",return_value=[]),
+  1488	            mock.patch.object(
+  1489	                supervisor,"persisted_completed_tool_turns",return_value=7
+  1490	            ),
+  1491	        )
+  1492	
+  1493	    def test_rearms_same_exhausted_attempt_without_new_grant(self):
+  1494	        patches=self.recovery_patches()
+  1495	        with patches[0],patches[1],patches[2],patches[3],patches[4],patches[5],patches[6]:
+  1496	            self.assertEqual(
+  1497	                supervisor.recover_implementation_max_step_continuation(
+  1498	                    self.did
+  1499	                ),
+  1500	                (True,"rearmed-same-attempt"),
+  1501	            )
+  1502	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1503	            "deliverables"
+  1504	        ][self.did]
+  1505	        self.assertEqual(entry["count"],3)
+  1506	        self.assertEqual(entry["operator_retry_grants"],1)
+  1507	        self.assertTrue(entry["sessions"][-1].startswith(
+  1508	            "dispatch:max-step-continuation:"
+  1509	        ))
+  1510	        self.assertFalse(any(
+  1511	            int(row.get("attempt") or 0)==3
+  1512	            for row in entry.get("failure_history",[])
+  1513	        ))
+  1514	        op=entry["operator_retry_attempts"][-1]
+  1515	        self.assertEqual(op["state"],"reserved")
+  1516	        self.assertFalse(op["consumes_operator_grant"])
+  1517	        self.assertEqual(
+  1518	            op["rearmed_by"],
+  1519	            supervisor.IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+  1520	        )
+  1521	        recovery=entry["implementation_max_step_continuations"][-1]
+  1522	        self.assertEqual(recovery["attempt"],3)
+  1523	        self.assertEqual(recovery["session"],self.sid)
+  1524	        self.assertEqual(recovery["recovery_kind"],"initial")
+  1525	        self.assertEqual(recovery["owned_state"],"changed")
+  1526	        self.assertEqual(recovery["verify_result"],"verify-failed-1")
+  1527	        progress=self.work/f"{self.did}.progress.md"
+  1528	        self.assertTrue(progress.is_file())
+  1529	        self.assertIn("Maximum steps for this agent have been reached.",progress.read_text())
+  1530	        self.assertEqual(
+  1531	            recovery["handoff_progress_sha256"],
+  1532	            hashlib.sha256(progress.read_bytes()).hexdigest(),
+  1533	        )
+  1534	        state=control_state.attempt_state(entry)
+  1535	        self.assertTrue(state["valid"])
+  1536	        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+  1537	        self.assertEqual(state["operator_grants_reserved"],1)
+  1538	
+  1539	    def test_rearms_nonoperator_attempt_without_operator_grant(self):
+  1540	        data=json.loads((self.work/"attempts.json").read_text())
+  1541	        entry=data["deliverables"][self.did]
+  1542	        entry.pop("operator_retry_grants",None)
+  1543	        entry.pop("operator_overrides",None)
+  1544	        entry.pop("operator_retry_attempts",None)
+  1545	        entry["plan_contract_revisions"]=[{
+  1546	            "attempt":1,
+  1547	            "source":"supervisor-plan-contract-revision",
+  1548	            "previous_verify_sha256":"a"*64,
+  1549	            "current_verify_sha256":"b"*64,
+  1550	        }]
+  1551	        entry["split_required"]={
+  1552	            "generation":1,
+  1553	            "reason":"genuine-failure-threshold",
+  1554	        }
+  1555	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1556	        patches=self.recovery_patches()
+  1557	        with patches[0],patches[1],patches[2],patches[3],patches[4],patches[5],patches[6]:
+  1558	            self.assertEqual(
+  1559	                supervisor.recover_implementation_max_step_continuation(
+  1560	                    self.did
+  1561	                ),
+  1562	                (True,"rearmed-same-attempt"),
+  1563	            )
+  1564	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1565	            "deliverables"
+  1566	        ][self.did]
+  1567	        self.assertEqual(entry["count"],3)
+  1568	        self.assertNotIn("split_required",entry)
+  1569	        self.assertNotIn("operator_retry_attempts",entry)
+  1570	        recovery=entry["implementation_max_step_continuations"][-1]
+  1571	        self.assertIsNone(recovery["original_operator_record"])
+  1572	        state=control_state.attempt_state(entry)
+  1573	        self.assertTrue(state["valid"])
+  1574	        self.assertTrue(state["unmaterialized_dispatch_reusable"])
+  1575	        self.assertEqual(state["operator_grants_reserved"],0)
+  1576	
+  1577	    def test_rearms_nonzero_verify_exit_two_with_matching_evidence(self):
+  1578	        data=json.loads((self.work/"attempts.json").read_text())
+  1579	        failure=data["deliverables"][self.did]["failure_history"][-1]
+  1580	        failure["reason"]="verify-failed-2"
+  1581	        (self.work/"attempts.json").write_text(json.dumps(data))
+  1582	        evidence=json.loads(
+  1583	            (self.work/f"{self.did}.verify-evidence.json").read_text()
+  1584	        )
+  1585	        evidence["latest"]["exit_code"]=2
+  1586	        evidence["latest"]["result"]="verify-failed-2"
+  1587	        (self.work/f"{self.did}.verify-evidence.json").write_text(
+  1588	            json.dumps(evidence)
+  1589	        )
+  1590	        diagnostic="canonical stderr: unparseable numeric epoch"
+  1591	        patches=self.recovery_patches()
+  1592	        with patches[0],patches[1],patches[2],patches[3],patches[4],patches[5],patches[6]:
+  1593	            self.assertEqual(
+  1594	                supervisor.recover_implementation_max_step_continuation(
+  1595	                    self.did,diagnostic=diagnostic
+  1596	                ),
+  1597	                (True,"rearmed-same-attempt"),
+  1598	            )
+  1599	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1600	            "deliverables"
+  1601	        ][self.did]
+  1602	        recovery=entry["implementation_max_step_continuations"][-1]
+  1603	        self.assertEqual(recovery["verify_result"],"verify-failed-2")
+  1604	        self.assertEqual(recovery["verify_exit_code"],2)
+  1605	        self.assertEqual(recovery["supervisor_diagnostic"],diagnostic)
+  1606	        self.assertEqual(
+  1607	            recovery["supervisor_diagnostic_sha256"],
+  1608	            hashlib.sha256(diagnostic.encode()).hexdigest(),
+  1609	        )
+  1610	        progress=(self.work/f"{self.did}.progress.md").read_text()
+  1611	        self.assertIn("EXACT_VERIFY_RESULT: verify-failed-2",progress)
+  1612	        self.assertIn("SUPERVISOR_DIAGNOSTIC: "+diagnostic,progress)
+  1613	
+  1614	    def test_auto_extracts_supervisor_verify_diagnostic_for_continuation(self):
+  1615	        evidence=json.loads(
+  1616	            (self.work/f"{self.did}.verify-evidence.json").read_text()
+  1617	        )
+  1618	        evidence["latest"]["stdout"]=json.dumps({
+  1619	            "protocol":"v2-test-report-v1",
+  1620	            "status":"fail",
+  1621	            "checks_run":1,
+  1622	            "checks_passed":0,
+  1623	            "checks":[{
+  1624	                "name":"stdlib-only imports",
+  1625	                "exit_code":1,
+  1626	                "timed_out":False,
+  1627	                "diagnostic":{
+  1628	                    "stdout":"non-stdlib: ./pkg/a.py:pkg",
+  1629	                    "stderr":"",
+  1630	                },
+  1631	            }],
+  1632	        })
+  1633	        (self.work/f"{self.did}.verify-evidence.json").write_text(
+  1634	            json.dumps(evidence)
+  1635	        )
+  1636	        patches=self.recovery_patches()
+  1637	        with patches[0],patches[1],patches[2],patches[3],patches[4],patches[5],patches[6]:
+  1638	            self.assertEqual(
+  1639	                supervisor.recover_implementation_max_step_continuation(
+  1640	                    self.did
+  1641	                ),
+  1642	                (True,"rearmed-same-attempt"),
+  1643	            )
+  1644	        entry=json.loads((self.work/"attempts.json").read_text())[
+  1645	            "deliverables"
+  1646	        ][self.did]
+  1647	        recovery=entry["implementation_max_step_continuations"][-1]
+  1648	        self.assertIn(
+  1649	            "stdlib-only imports: stdout=non-stdlib: ./pkg/a.py:pkg",
+  1650	            recovery["supervisor_diagnostic"],
+  1651	        )
+  1652	        progress=(self.work/f"{self.did}.progress.md").read_text()
+  1653	        self.assertIn(
+  1654	            "SUPERVISOR_DIAGNOSTIC: stdlib-only imports: "
+  1655	            "stdout=non-stdlib: ./pkg/a.py:pkg",
+  1656	            progress,
+  1657	        )
+  1658	
+  1659	    def test_allows_second_continuation_only_for_trusted_verify_visibility_bug(self):
+  1660	        data=json.loads((self.work/"attempts.json").read_text())
+  1661	        progress=self.work/f"{self.did}.progress.md"
+  1662	        progress.write_text("first continuation handoff\n")
+  1663	        data["deliverables"][self.did][
+  1664	            "implementation_max_step_continuations"
+  1665	        ]=[{
+
+
+======================================================================
+FINISHED: 2026-09-28T17:33:54Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
