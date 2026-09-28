@@ -1,0 +1,315 @@
+======================================================================
+JOB: job-000116
+JOB_COMMIT: b6f22e60f40d5db84864a6f73894d9166fbaa86f
+STARTED: 2026-09-28T13:38:28Z
+======================================================================
+
+=== USERSCRIPT CORE 165-285 ===
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// @run-at       document-idle
+// ==/UserScript==
+
+(() => {{
+  "use strict";
+
+  const TOKEN = {token};
+  const PROJECT_PATH = {chat_path};
+  const ENDPOINT = "http://127.0.0.1:{port}/job";
+  const BEGIN = "<<<AI_BEAST_AUTOMATION_JOB_V1_BEGIN>>>";
+  const END = "<<<AI_BEAST_AUTOMATION_JOB_V1_END>>>";
+  const BRIDGE_VERSION = "2.10";
+
+  const TIMEOUT_TEXT = "Message delivery timed out. Please try again.";
+  const INPUT_STREAM_ERROR_TEXT = "Error in input stream";
+  const STREAM_RECOVERY_TIMEOUT_TEXT = "ChatGPT stream recovery polling timed out";
+  const NETWORK_ERROR_TEXT = "A network error occurred. Please check your connection and try again.";
+  const RECOVERABLE_ERROR_TEXTS = [
+    TIMEOUT_TEXT,
+    INPUT_STREAM_ERROR_TEXT,
+    STREAM_RECOVERY_TIMEOUT_TEXT,
+    NETWORK_ERROR_TEXT
+  ];
+
+  function isRecoverableErrorText(text) {{
+    const normalized=String(text || "").toLowerCase();
+    return RECOVERABLE_ERROR_TEXTS.some(
+      errorText => normalized.includes(errorText.toLowerCase())
+    );
+  }}
+  const AUTO_CONTINUE_TEXT =
+    "Continue after delivery error. First inspect the current AI-Beast state and resume " +
+    "from where the previous turn actually stopped. Do not repeat completed work.";
+  const RECOVERY_DELAY_MS = 15000;
+  const RECOVERY_COOLDOWN_MS = 30000;
+  const RECOVERY_MAX_STREAK = 10;
+  const RECOVERY_RESPONSE_TIMEOUT_MS = 45000;
+  function recoveryStateKey() {{
+    return "ai-beast-timeout-recovery:" + window.location.pathname;
+  }}
+
+  let recoveryTimer = null;
+  let recoveryDeadline = 0;
+  let recoveryFingerprint = "";
+  let completionTimer = null;
+
+  function status(text, good=true) {{
+    let el=document.getElementById("ai-beast-bridge-status");
+    if (!el) {{
+      el=document.createElement("div");
+      el.id="ai-beast-bridge-status";
+      Object.assign(el.style,{{
+        position:"fixed",right:"12px",bottom:"12px",zIndex:"2147483647",
+        padding:"6px 9px",borderRadius:"6px",font:"12px sans-serif",
+        background:"rgba(20,20,20,.88)",color:"white",
+        boxShadow:"0 1px 5px rgba(0,0,0,.35)"
+      }});
+      document.documentElement.appendChild(el);
+    }}
+    el.textContent="AI-Beast bridge v"+BRIDGE_VERSION+": "+text;
+    el.style.opacity=good ? "0.72" : "1";
+  }}
+
+  function submit(payload) {{
+    const key="ai-beast-job-sent:"+payload.id+":"+payload.sha256;
+    if (localStorage.getItem(key)==="done") return;
+
+    status("sending "+payload.id);
+
+    GM_xmlhttpRequest({{
+      method:"POST",
+      url:ENDPOINT,
+      headers:{{
+        "Content-Type":"application/json",
+        "X-AI-Beast-Bridge":TOKEN
+      }},
+      data:JSON.stringify(payload),
+      timeout:15000,
+      onload:(r)=>{{
+        if (r.status>=200 && r.status<300) {{
+          localStorage.setItem(key,"done");
+          status("queued "+payload.id);
+        }} else {{
+          status("HTTP "+r.status+" for "+payload.id,false);
+        }}
+      }},
+      onerror:()=>status("connection error",false),
+      ontimeout:()=>status("timeout",false),
+    }});
+  }}
+
+  let lastParseError="";
+
+  function parseJobs(node) {{
+    const text=node.innerText || node.textContent || "";
+    let pos=0;
+    let found=0;
+
+    while (true) {{
+      const a=text.indexOf(BEGIN,pos);
+      if (a<0) break;
+
+      const b=text.indexOf(END,a+BEGIN.length);
+      if (b<0) break;
+
+      let raw=text.slice(a+BEGIN.length,b).trim();
+      pos=b+END.length;
+
+      // Strip characters/UI wrappers which are irrelevant to the JSON itself.
+      raw=raw.replace(/[\u200B-\u200D\uFEFF]/g,"").trim();
+      raw=raw
+        .replace(/^```(?:json)?\\s*/i,"")
+        .replace(/\\s*```$/,"")
+        .trim();
+
+      // Keep only the JSON object if surrounding rendered text leaked in.
+      const first=raw.indexOf("{{");
+      const last=raw.lastIndexOf("}}");
+      if (first>=0 && last>first) {{
+
+=== USERSCRIPT SEND/SCAN 860-955 ===
+    );
+    return "delivery error detected; auto-continue in "+seconds+"s";
+  }}
+
+  function scan() {{
+    if (!window.location.pathname.startsWith(PROJECT_PATH)) {{
+      status("inactive (wrong project)", false);
+      return;
+    }}
+
+    const candidates=[];
+    const seen=new Set();
+
+    function add(node) {{
+      if (node && !seen.has(node)) {{
+        seen.add(node);
+        candidates.push(node);
+      }}
+    }}
+
+    // Fast path for UIs exposing message-author-role directly.
+    for (const node of document.querySelectorAll(
+      '[data-message-author-role="assistant"]'
+    )) add(node);
+
+    // Current ChatGPT DOM (Sep 2026).
+    const currentAssistantNodes = document.querySelectorAll(
+      '[data-markdown-text-style="assistant-message"]'
+    );
+    for (const node of currentAssistantNodes) add(node);
+
+    // Secondary fallback for the current search-unit wrapper.
+    if (!currentAssistantNodes.length) {{
+      for (const node of document.querySelectorAll(
+        '[data-chatgpt-search-unit-key$=":assistant"]'
+      )) add(node);
+    }}
+
+    // Fallback for older conversation-turn DOM.
+    for (const turn of document.querySelectorAll(
+      '[data-testid^="conversation-turn-"]'
+    )) {{
+      if (turnOwner(turn)==="assistant") add(turn);
+    }}
+
+    lastParseError="";
+    let jobs=0;
+    let marked=0;
+
+    for (const node of candidates) {{
+      const text=node.innerText || node.textContent || "";
+      if (text.includes(BEGIN)) marked++;
+      jobs += parseJobs(node);
+    }}
+
+    const turns=document.querySelectorAll(
+      '[data-testid^="conversation-turn-"]'
+    ).length;
+
+    const recovery=timeoutRecoveryStatus();
+    if (recovery) {{
+      const good=
+        !recovery.includes("cap reached") &&
+        !recovery.includes("paused") &&
+        !recovery.includes("not found");
+      status(recovery,good);
+      return;
+    }}
+
+    status(
+      "active; assistant="+candidates.length+
+      " marked="+marked+
+      " jobs="+jobs+
+      " turns="+turns+
+      " recovery=armed"+
+      (lastParseError ? " err="+lastParseError.slice(0,90) : ""),
+      candidates.length>0 && !lastParseError
+    );
+  }}
+
+  status("active");
+  scan();
+  new MutationObserver(()=>scan()).observe(document.body,{{subtree:true,childList:true,characterData:true}});
+  setInterval(scan,2000);
+}})();
+'''
+
+class Handler(BaseHTTPRequestHandler):
+    server_version="AIBeastIngress/1.0"
+
+    def log_message(self,fmt,*args):
+        print(f"[ingress] {self.client_address[0]} {fmt % args}",flush=True)
+
+    def cors(self):
+        origin=self.headers.get("Origin","")
+        if origin in ALLOWED_ORIGINS:
+
+=== HTTP HANDLER 947-1025 ===
+class Handler(BaseHTTPRequestHandler):
+    server_version="AIBeastIngress/1.0"
+
+    def log_message(self,fmt,*args):
+        print(f"[ingress] {self.client_address[0]} {fmt % args}",flush=True)
+
+    def cors(self):
+        origin=self.headers.get("Origin","")
+        if origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin",origin)
+        self.send_header("Access-Control-Allow-Headers","Content-Type, X-AI-Beast-Bridge")
+        self.send_header("Access-Control-Allow-Methods","GET, POST, OPTIONS")
+        self.send_header("Cache-Control","no-store")
+
+    def reply(self,status,obj,ctype="application/json; charset=utf-8"):
+        if isinstance(obj,(dict,list)):
+            body=(json.dumps(obj,sort_keys=True)+"\n").encode()
+        elif isinstance(obj,str):
+            body=obj.encode()
+        else:
+            body=bytes(obj)
+        self.send_response(status)
+        self.cors()
+        self.send_header("Content-Type",ctype)
+        self.send_header("Content-Length",str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.cors()
+        self.end_headers()
+
+    def do_GET(self):
+        path=urlparse(self.path).path
+        if path=="/health":
+            return self.reply(200,{
+                "ok":True,
+                "service":"ai-beast-chatgpt-ingress",
+                "repo":CFG.get("repo_full_name",""),
+                "branch":CFG["automation_branch"],
+            })
+        if path=="/bridge.user.js":
+            return self.reply(200,user_script(),"text/javascript; charset=utf-8")
+        return self.reply(404,{"error":"not-found"})
+
+    def do_POST(self):
+        if urlparse(self.path).path!="/job":
+            return self.reply(404,{"error":"not-found"})
+
+        if self.headers.get("X-AI-Beast-Bridge","")!=CFG["token"]:
+            return self.reply(403,{"error":"bad-token"})
+
+        origin=self.headers.get("Origin","")
+        if origin and origin not in ALLOWED_ORIGINS:
+            return self.reply(403,{"error":"bad-origin"})
+
+        try:
+            n=int(self.headers.get("Content-Length","0"))
+        except ValueError:
+            return self.reply(400,{"error":"bad-length"})
+        if n<2 or n>1_200_000:
+            return self.reply(413,{"error":"body-size"})
+
+        try:
+            payload=json.loads(self.rfile.read(n))
+            with LOCK:
+                result=install_job(payload)
+            return self.reply(200,result)
+        except ValueError as exc:
+            return self.reply(400,{"error":str(exc)})
+        except Exception as exc:
+            traceback.print_exc()
+            return self.reply(500,{"error":repr(exc)})
+
+def main():
+    ensure_clone()
+    addr=("127.0.0.1",int(CFG["port"]))
+    print(
+
+
+======================================================================
+FINISHED: 2026-09-28T13:38:28Z
+RETURN_CODE: 0
+TIMED_OUT: false
+INTERRUPTED: false
+======================================================================
