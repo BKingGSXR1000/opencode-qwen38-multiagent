@@ -2593,6 +2593,28 @@ class InlinePythonVerifyProvenanceTests(unittest.TestCase):
         self.assertIn("D003",errors[0])
         self.assertIn("not a declared dependency",errors[0])
 
+    def test_nested_json_quotes_are_removed_by_shell(self):
+        bad="""python3 -c "assert stdout=='{"done":1}' + chr(10)" """.strip()
+        errors=self.guard["verify_inline_shell_quoting_errors"]("D003",bad)
+        self.assertEqual(len(errors),1,errors)
+        self.assertIn("semantics change",errors[0])
+
+    def test_properly_escaped_json_quoting_is_preserved(self):
+        good=r"""python3 -c "assert '{\"done\":1}' == '{\"done\":1}'" """
+        self.assertEqual(
+            self.guard["verify_inline_shell_quoting_errors"]("D003",good.strip()),[]
+        )
+        simple='python3 -c "print(123)"'
+        self.assertEqual(
+            self.guard["verify_inline_shell_quoting_errors"]("D003",simple),[]
+        )
+
+    def test_single_quoted_shell_code_is_unaffected(self):
+        single="python3 -c 'assert json_output==\"{done:1}\"'"
+        self.assertEqual(
+            self.guard["verify_inline_shell_quoting_errors"]("D003",single),[]
+        )
+
     def test_loader_is_not_a_modulespec(self):
         bad=(
             'python3 -c "import importlib.util as u; '

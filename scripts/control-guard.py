@@ -389,6 +389,53 @@ def verify_referenced_paths(command: str):
     return out
 
 
+def verify_inline_shell_quoting_errors(did: str, command: str):
+    """Reject a provable semantic change caused by nested shell quoting.
+
+    For python3 -c "assert x=='{"done":1}'", the shell strips the inner
+    double quotes and Python actually compares against {done:1}. When the
+    intended raw Python code and the shell-decoded code both parse, compare
+    their ASTs instead of treating a successful Python parse as sufficient.
+    Ambiguous shell syntax fails open to existing source/Verify guards.
+    """
+    try:
+        args=shlex.split(command or "",posix=True)
+    except ValueError:
+        return []
+    decoded=[
+        args[i+2]
+        for i in range(len(args)-2)
+        if re.fullmatch(
+            r"python(?:3(?:\.\d+)?)?",Path(args[i]).name.lower()
+        ) and args[i+1]=="-c"
+    ]
+    if len(decoded)!=1:
+        return []
+    match=re.search(
+        r'(?:^|\s)python(?:3(?:\.\d+)?)?\s+-c\s+"(?P<source>.*)"(?:\s|$)',
+        command or "", flags=re.S,
+    )
+    if not match:
+        return []
+    try:
+        original=ast.dump(ast.parse(match.group("source")),include_attributes=False)
+    except (SyntaxError,ValueError):
+        return []
+    try:
+        actual=ast.dump(ast.parse(decoded[0]),include_attributes=False)
+    except (SyntaxError,ValueError):
+        return [
+            f"{did}: Verify inline Python becomes syntactically invalid after "
+            "shell quote removal; escape nested quotes in python -c"
+        ]
+    if original!=actual:
+        return [
+            f"{did}: Verify inline Python semantics change after shell quote "
+            "removal; escape nested quotes or avoid shell-embedded JSON literals"
+        ]
+    return []
+
+
 def verify_inline_structural_errors(did: str, command: str):
     """Reject a provably invalid Python importlib Verify invocation."""
     try:
@@ -1184,6 +1231,11 @@ def validate_plan(project: Path, finalize=False):
             if isinstance(leaf,dict):
                 errors.extend(
                     verify_inline_structural_errors(
+                        did,str(leaf.get("verify_command") or "")
+                    )
+                )
+                errors.extend(
+                    verify_inline_shell_quoting_errors(
                         did,str(leaf.get("verify_command") or "")
                     )
                 )
