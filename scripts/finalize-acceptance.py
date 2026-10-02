@@ -53,6 +53,64 @@ def validate_test_report(root: Path):
         if unsafe: fail(f"TEST_REPORT check {i} unsafe command: {unsafe[0]}")
     return path,data
 
+
+def requires_browser_evidence(plan: str) -> bool:
+    """Require browser pixels only for positive visual/browser MUSTs.
+
+    The original whole-document keyword scan incorrectly treated an offline
+    CLI requirement ('no network/web calls') as a browser application, and
+    even counted optional SHOULDs or evidence-strategy prose. Browser evidence
+    is a mandatory *output* gate, not a keyword-triggered penalty for prohibiting
+    network access.
+    """
+    criteria=[]
+    in_must=False
+    current=None
+    def finish():
+        nonlocal current
+        if current is not None:
+            criteria.append(" ".join(current))
+        current=None
+    for line in str(plan or "").splitlines():
+        heading=re.match(r"^\s*#{1,5}\s+(.+?)\s*$",line)
+        if heading:
+            finish()
+            title=heading.group(1).strip().lower()
+            in_must=bool(re.match(r"^must(?:\s|$)",title))
+            continue
+        match=re.match(r"^\s*[-*]\s*\[\s*\]\s*A\d{3}:\s*(.*?)\s*$",line)
+        if match:
+            finish()
+            if in_must:
+                current=[match.group(1)]
+            continue
+        if current is None:
+            continue
+        if line.startswith(("  ","\t")) and line.strip() and not re.match(r"^\s*[-*]\s+",line):
+            current.append(line.strip())
+        else:
+            finish()
+    finish()
+    positive=re.compile(
+        r"\b(?:browser|canvas|webgl|three\.?js|html|css|dom|dashboard|"
+        r"ui|visual(?:ization)?|website|webpage|screenshot)\b"
+        r"|\bweb\s+(?:app|page|site|interface|ui|view)\b",
+        re.I,
+    )
+    for text in criteria:
+        # Explicitly prohibited output does not create an output requirement.
+        negative_token=r"(?:browser|html|css|ui|visual(?:ization)?|web(?:\s+app)?)"
+        text=re.sub(
+            r"\b(?:no|without|avoid|forbid(?:s|den)?)\s+"
+            +negative_token
+            +r"(?:\s*(?:,|/|\bor\b|\band\b)\s*"+negative_token+r")*"
+            +r"(?:\s+(?:calls|access|dependencies|output|view))?",
+            " ",text,flags=re.I,
+        )
+        if positive.search(text):
+            return True
+    return False
+
 def finalize(project: Path):
     root=project/".opencode-v2"; plan_p=root/"ACCEPTANCE.md"; report_p=root/"acceptance-report.json"; pass_p=root/"acceptance-pass.json"; evidence_p=root/"browser-evidence.json"
     pass_p.unlink(missing_ok=True)
@@ -95,7 +153,7 @@ def finalize(project: Path):
                     if actual!=0: bad.append(f"{cid}=gate-executable-exit-{actual}")
     if report.get("result")!="PASS": bad.append(f"report.result={report.get('result')!r}")
     test_p,_=validate_test_report(root)
-    browserish=bool(re.search(r"\b(browser|web|render|visual|canvas|ui|page|three\.?js|webgl|animation|button|control)\b",plan,re.I))
+    browserish=requires_browser_evidence(plan)
     browser_summary=None
     if browserish:
         if not evidence_p.exists(): bad.append("missing-browser-evidence")
