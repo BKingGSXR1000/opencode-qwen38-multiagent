@@ -57,6 +57,7 @@ from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
     visible_watchdog_decision, visible_progress_marker,
 )
+import adaptive_reasoning_watchdog as adaptive_reasoning
 
 ROOT=Path(os.environ.get("V2_ROOT", str(Path(__file__).resolve().parents[1])))
 DB=Path(os.environ.get("V2_OPENCODE_DB", str(ROOT/"xdg"/"data"/"opencode"/"opencode.db")))
@@ -67,6 +68,12 @@ START_MS=int(time.time()*1000)-5000; POLL=0.5
 START_CONTROL_POLICY_FINGERPRINT=control_policy_fingerprint()
 START_SUPERVISOR_RUNTIME_FINGERPRINT=supervisor_runtime_fingerprint()
 HARD_SECONDS=120; HARD_REASONING_CHARS=20000; HARD_TEXT_CHARS=12000
+# Default OFF preserves the proven Stage-A/Proof2 behavior. OBSERVE emits
+# deduplicated would-interrupt telemetry; ENFORCE requires explicit deployment.
+ADAPTIVE_REASONING_MODE=adaptive_reasoning.mode(
+    os.environ.get("V2_ADAPTIVE_REASONING_MODE","off")
+)
+adaptive_watch={}
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
 PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=2
@@ -15059,7 +15066,7 @@ def emit_watchdog_telemetry(sid,row,backend_snapshot,force=False):
     }
     WATCHDOG_TELEMETRY.parent.mkdir(parents=True,exist_ok=True)
     with open(WATCHDOG_TELEMETRY,"a",encoding="utf-8") as fh:
-        fh.write(json.dumps(payload,separators=(",",":"))+"\\n")
+        fh.write(json.dumps(payload,separators=(",",":"))+'\n')
 
 
 def attempts_path(): return Path(PROJECT)/".opencode-v2"/"work"/"attempts.json"
@@ -16337,6 +16344,66 @@ def planner_context_reason(agent,context_input,tool_running=False):
         f"ceiling={PLANNER_CONTEXT_INPUT_CEILING}"
     )
 
+def adaptive_reasoning_step(
+    sid,agent,did,key,shape,live,reasoning,*,
+    can_watch,tool_running,compaction_active,backend_snapshot,watch_state,
+    now_mono=None,
+):
+    """One supervisor tick; observe/enforce side effects are separately testable.
+
+    No action on an unknown/unfinished child before a visible assistant
+    message, on a running tool, or on an active compaction. The normal
+    supervisor watchdog remains authoritative even with this mode OFF.
+    """
+    if (
+        ADAPTIVE_REASONING_MODE=="off"
+        or not did or agent not in adaptive_reasoning.IMPLEMENTATION_ROLES
+    ):
+        return {}
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    state=adaptive_watch.setdefault(sid,{})
+    current=now_mono if now_mono is not None else time.monotonic()
+    action_key=(
+        shape.get("message_id") or "",
+        shape.get("last_tool_id") or "",
+        int((live or {}).get("tool_successes") or 0),
+    )
+    age,chars=adaptive_reasoning.action_clock(
+        state,action_key,current,reasoning,
+        observable=can_watch,tool_running=tool_running
+    )
+    verdict=adaptive_reasoning.decision(
+        agent=agent,leaf=leaf,action_age=age,reasoning_chars=chars,
+        loop_detected=bool((live or {}).get("reasoning_loop_detected")),
+        observable=can_watch,tool_running=tool_running,
+        compaction_active=compaction_active,backend=backend_snapshot,
+    )
+    candidate=verdict.get("reason") or ""
+    if (
+        verdict.get("abort")
+        and state.get("reported_reason")!=candidate
+        and watch_state.get("aborted_key")!=key
+    ):
+        detail=(
+            f"session={sid} deliverable={did} "
+            f"profile={verdict['profile']} "
+            f"reason={candidate} action_age={age:.1f}s "
+            f"reasoning_chars={chars}"
+        )
+        if ADAPTIVE_REASONING_MODE=="observe":
+            state["reported_reason"]=candidate
+            log("ADAPTIVE_REASONING_WOULD_INTERRUPT "+detail)
+            csv("ADAPTIVE_REASONING_WOULD_INTERRUPT",sid,agent,detail)
+        elif abort_session(sid,"runaway adaptive_reasoning "+detail,agent):
+            # Do not suppress the next tick after an HTTP interrupt failure.
+            state["reported_reason"]=candidate
+            watch_state["aborted_key"]=key
+            abort_count[sid]=abort_count.get(sid,0)+1
+            log("ADAPTIVE_REASONING_INTERRUPT "+detail)
+            csv("ADAPTIVE_REASONING_INTERRUPT",sid,agent,detail)
+    return verdict
+
+
 def watchdog_limits(agent):
     if agent=="implementation-planner":
         return 300,20000,20000
@@ -16351,6 +16418,7 @@ def reduce_live_event(state,event,now=None):
     progressed=False
     if kind=="session.next.reasoning.delta":
         state["reasoning"]=state.get("reasoning",0)+len(delta)
+        adaptive_reasoning.append_reasoning_tail(state,delta)
         progressed=bool(delta)
     elif kind=="session.next.text.delta":
         state["text"]=state.get("text",0)+len(delta)
@@ -16367,6 +16435,11 @@ def reduce_live_event(state,event,now=None):
     elif kind=="session.next.step.started":
         state.update(reasoning=0,text=0,tool_running=False)
         progressed=True
+    if kind in {
+        "session.next.tool.called","session.next.tool.success",
+        "session.next.tool.failed","session.next.step.started"
+    }:
+        adaptive_reasoning.clear_reasoning_tail(state)
     state["last_event"]=now
     if progressed:
         state["last_progress"]=now
@@ -16423,6 +16496,8 @@ def stop_inactive_event_watches(active):
     with lock:
         stale=[sid for sid in event_watch if sid not in active]
         states=[event_watch.pop(sid) for sid in stale]
+        for sid in set(adaptive_watch)-set(active):
+            adaptive_watch.pop(sid,None)
     for state in states:
         stop=state.get("stop")
         if stop: stop.set()
@@ -17885,6 +17960,13 @@ def api_poll_loop():
                         ):
                             abort_count[sid]=abort_count.get(sid,0)+1
 
+                adaptive_decision=adaptive_reasoning_step(
+                    sid,agent,did,key,shape,live,reasoning,
+                    can_watch=can_watch,tool_running=tool_running,
+                    compaction_active=planner_compaction_active,
+                    backend_snapshot=backend_snapshot,watch_state=st,
+                )
+
                 if fallback_reason and not (live or {}).get("fallback_aborted"):
                     if live is not None: live["fallback_aborted"]=True
                     abort_session(sid,f"runaway {fallback_reason}",agent)
@@ -17918,6 +18000,8 @@ def api_poll_loop():
                     ),
                     "invisible_no_progress_age":round(float((live or {}).get("fallback_elapsed") or 0),3),
                     "invisible_watchdog":fallback_state,
+                    "adaptive_reasoning_mode":ADAPTIVE_REASONING_MODE,
+                    "adaptive_reasoning":adaptive_decision,
                     "seen":now,
                     "directory":directory or PROJECT or "",
                     "status":statuses.get(sid),

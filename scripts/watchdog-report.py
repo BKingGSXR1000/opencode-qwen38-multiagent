@@ -12,15 +12,41 @@ DEFAULT_DB=ROOT/"xdg"/"data"/"opencode"/"opencode.db"
 
 
 def load_rows(path: Path):
-    rows=[]
+    """Parse proper JSONL and the older literal-backslash-n concatenated log.
+
+    JSONDecoder.raw_decode preserves escaped delimiter-looking text inside
+    JSON string fields. Blind split on the literal characters backslash+n
+    would corrupt real model/diagnostic values. A damaged row is skipped to
+    the next actual newline or legacy object separator.
+    """
     try:
-        for line in path.read_text(encoding="utf-8",errors="replace").splitlines():
-            try: item=json.loads(line)
-            except json.JSONDecodeError: continue
-            if isinstance(item,dict) and item.get("session"):
-                rows.append(item)
+        text=path.read_text(encoding="utf-8",errors="replace")
     except OSError:
-        pass
+        return []
+    decoder=json.JSONDecoder()
+    rows=[]
+    index=0
+    length=len(text)
+    while index<length:
+        if text.startswith("\\n",index):
+            index+=2
+        while index<length and text[index].isspace():
+            index+=1
+        if index>=length:
+            break
+        try:
+            item,end=decoder.raw_decode(text,index)
+        except json.JSONDecodeError:
+            newline=text.find("\n",index)
+            legacy=text.find("\\n{",index)
+            points=[x for x in (newline,legacy) if x>=0]
+            if not points:
+                break
+            index=min(points)+1 if newline>=0 and newline==min(points) else min(points)+2
+            continue
+        if isinstance(item,dict) and item.get("session"):
+            rows.append(item)
+        index=end
     return rows
 
 
@@ -58,6 +84,37 @@ def summarize(rows):
                 dt=0.0
             phases[str(row.get("watchdog_phase") or "unknown")]+=dt
         latest=items[-1]
+        adaptive_rows=[
+            row for row in items
+            if isinstance(row.get("adaptive_reasoning"),dict)
+            and row["adaptive_reasoning"].get("profile")
+        ]
+        adaptive_summary={}
+        if adaptive_rows:
+            events=[]
+            previous_candidate=""
+            for row in adaptive_rows:
+                decision=row["adaptive_reasoning"]
+                reason=(str(decision.get("reason") or "")
+                        if decision.get("abort") else "")
+                if reason and reason!=previous_candidate:
+                    events.append(reason)
+                previous_candidate=reason
+            last=adaptive_rows[-1]
+            verdict=last["adaptive_reasoning"]
+            adaptive_summary={
+                "mode":last.get("adaptive_reasoning_mode") or "unknown",
+                "profile":verdict.get("profile"),
+                "latest_gate":verdict.get("gate"),
+                "max_action_age":max(float(x["adaptive_reasoning"].get("action_age") or 0)
+                                      for x in adaptive_rows),
+                "max_reasoning_chars_since_action":max(
+                    int(x["adaptive_reasoning"].get("reasoning_chars_since_action") or 0)
+                    for x in adaptive_rows
+                ),
+                "candidate_episodes":len(events),
+                "candidate_reasons":dict(__import__("collections").Counter(events)),
+            }
         out.append({
             "session":sid,
             "agent":latest.get("agent"),
@@ -70,6 +127,7 @@ def summarize(rows):
             "invisible_no_progress_age":latest.get("invisible_no_progress_age",0),
             "phase_seconds":dict(sorted(phases.items(),key=lambda kv:(-kv[1],kv[0]))),
             "backend":latest.get("backend") or {},
+            "adaptive_reasoning":adaptive_summary,
         })
     return sorted(out,key=lambda x:(x.get("deliverable") or "",x["session"]))
 
@@ -227,6 +285,15 @@ def human(summary,anomalies):
             f"  no-progress: visible={item.get('visible_no_progress_age',0)}s "
             f"invisible={item.get('invisible_no_progress_age',0)}s"
         )
+        adaptive=item.get("adaptive_reasoning") or {}
+        if adaptive:
+            print(
+                "  adaptive: "
+                f"mode={adaptive.get('mode')} profile={adaptive.get('profile')} "
+                f"max_action_age={adaptive.get('max_action_age',0):.1f}s "
+                f"max_reasoning_chars={adaptive.get('max_reasoning_chars_since_action',0)} "
+                f"would_interrupt_episodes={adaptive.get('candidate_episodes',0)}"
+            )
 
 
 def main():
@@ -242,6 +309,10 @@ def main():
     if not rows:
         rows=live_rows
     project=ns.project or live_project
+    # A project-scoped report must not quietly mix sessions from previous
+    # canaries that wrote into this repo-wide telemetry log.
+    if ns.project:
+        rows=[row for row in rows if row.get("directory")==ns.project]
     result=summarize(rows)
     anomalies=detect_anomalies(project,ns.db)
     if ns.json:
