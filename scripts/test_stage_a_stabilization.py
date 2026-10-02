@@ -2552,6 +2552,29 @@ class WorkerSubprocessCwdProtocolTests(unittest.TestCase):
         self.assertIn("SAME cwd",prompt)
         self.assertIn("does NOT prove",prompt)
 
+    def test_final_manifest_writer_gets_existing_command_guard(self):
+        leaf={"role":"test-builder","owned_artifact_paths":[".opencode-v2/TEST_CHECKS.json"],
+              "complexity":"S","verify_command":".opencode-v2/bin/run-checks"}
+        base="DELIVERABLE_D007-A\nSCOPE\nSOME\nOTHER"
+        with mock.patch.object(supervisor,"implementation_prompt",return_value=base), \
+             mock.patch.object(supervisor,"load_manifest",
+                               return_value={"leaves":{"D007-A":leaf}}), \
+             mock.patch.object(supervisor,"owned_artifact_paths",
+                               return_value=[".opencode-v2/TEST_CHECKS.json"]), \
+             mock.patch.object(supervisor,"plan_contract_reverify_pending",
+                               return_value=False), \
+             mock.patch.object(supervisor,"implementation_max_step_continuation_prompt_pending",
+                               return_value=""), \
+             mock.patch.object(supervisor,"early_write_completed_turn_limit",
+                               return_value=4), \
+             mock.patch.object(supervisor,"verify_reporting_rule",return_value=""):
+            prompt=supervisor.implementation_runtime_prompt("D007-A","test-builder")
+        self.assertIn("TEST MANIFEST EXECUTABILITY",prompt)
+        self.assertIn("currently existing test files",prompt)
+        self.assertIn("Do not invent",prompt)
+        self.assertIn(".opencode-v2/bin/run-checks",prompt)
+
+
     def test_test_builder_gets_bounded_test_only_import_fix(self):
         leaf={"role":"test-builder","owned_artifact_paths":["tests/test_cli.py"],
               "complexity":"M","verify_command":"python3 -m unittest tests.test_cli -v"}

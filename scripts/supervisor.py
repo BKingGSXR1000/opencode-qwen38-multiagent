@@ -1109,6 +1109,18 @@ def implementation_runtime_prompt(did,agent):
                 "bubblewrap, or any sandbox wrapper; the runtime wraps bash automatically."
             )
         base=base+implementer_direct_write
+        if agent=="test-builder" and ".opencode-v2/TEST_CHECKS.json" in owned:
+            base+=(
+                "\nTEST MANIFEST EXECUTABILITY — EXACT: Only reference currently "
+                "existing test files and helpers in TEST_CHECKS.json. Do not "
+                "invent new .opencode-v2/scripts helpers outside owned paths. "
+                "Prefer a minimal existing standalone test command such as "
+                "python3 -m unittest discover -s tests -v; add optional checks "
+                "only if their literal shell command is valid and can run "
+                "independently. Avoid multiline shell-embedded python -c "
+                "quoting. A missing helper or unsafe test command is a failed "
+                "Verify, never an excuse to skip the exact .opencode-v2/bin/run-checks."
+            )
         if agent=="test-builder" and any(
             str(path).startswith("tests/") for path in owned
         ):
