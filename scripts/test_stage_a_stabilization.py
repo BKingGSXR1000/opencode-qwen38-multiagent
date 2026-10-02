@@ -2538,6 +2538,43 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         self.assertEqual(supervisor.claim_splitter("D001","claim-seven"),(True,"claimed"))
 
 
+class WorkerSubprocessCwdProtocolTests(unittest.TestCase):
+    def test_probe_split_handoff_demands_identical_cwd_reproduction(self):
+        leaf={"split_handoff_only":True,"role":"probe-builder",
+              "owned_artifact_paths":[]}
+        base="DELIVERABLE_D005-B1\nSCOPE\nSOME\nOTHER"
+        with mock.patch.object(supervisor,"implementation_prompt",return_value=base), \
+             mock.patch.object(supervisor,"load_manifest",
+                               return_value={"leaves":{"D005-B1":leaf}}), \
+             mock.patch.object(supervisor,"verify_reporting_rule",return_value=""):
+            prompt=supervisor.implementation_runtime_prompt("D005-B1","probe-builder")
+        self.assertIn("subprocess.run(cwd=...)",prompt)
+        self.assertIn("SAME cwd",prompt)
+        self.assertIn("does NOT prove",prompt)
+
+    def test_test_builder_gets_bounded_test_only_import_fix(self):
+        leaf={"role":"test-builder","owned_artifact_paths":["tests/test_cli.py"],
+              "complexity":"M","verify_command":"python3 -m unittest tests.test_cli -v"}
+        base="DELIVERABLE_D005-B2\nSCOPE\nSOME\nOTHER"
+        with mock.patch.object(supervisor,"implementation_prompt",return_value=base), \
+             mock.patch.object(supervisor,"load_manifest",
+                               return_value={"leaves":{"D005-B2":leaf}}), \
+             mock.patch.object(supervisor,"owned_artifact_paths",
+                               return_value=["tests/test_cli.py"]), \
+             mock.patch.object(supervisor,"plan_contract_reverify_pending",
+                               return_value=False), \
+             mock.patch.object(supervisor,"implementation_max_step_continuation_prompt_pending",
+                               return_value=""), \
+             mock.patch.object(supervisor,"early_write_completed_turn_limit",
+                               return_value=6), \
+             mock.patch.object(supervisor,"verify_reporting_rule",return_value=""):
+            prompt=supervisor.implementation_runtime_prompt("D005-B2","test-builder")
+        self.assertIn("TEST SUBPROCESS CWD CHECK",prompt)
+        self.assertIn("PYTHONPATH",prompt)
+        self.assertIn("failed exit-code assertions",prompt)
+        self.assertIn("EARLY WRITE GATE",prompt)
+
+
 class InlinePythonVerifyProvenanceTests(unittest.TestCase):
     """Reject a helper owned only by a downstream child before any worker runs."""
 

@@ -1024,6 +1024,14 @@ def implementation_runtime_prompt(did,agent):
             "evidence: record the concrete paths/sizes, the missing requirement, and the exact "
             "writer delta, then set HANDOFF_READY: true. Do not loop searching for unavailable "
             "evidence.\n"
+            "TEST SUBPROCESS REPRODUCTION: When the failed test invokes a local "
+            "package using subprocess.run(cwd=...), reproduce it with the SAME "
+            "cwd and subprocess environment. A successful invocation from the "
+            "repository root does NOT prove the test works from a temporary "
+            "working directory. If the local module is missing, the writer may "
+            "fix only its owned test by supplying project-root PYTHONPATH to "
+            "the child process or using project-root cwd with an absolute temp "
+            "fixture. Never propose changing unowned CLI/module code.\n"
             "EVIDENCE AUTHORITY — EXACT:\n"
             "Use context fields parent_supervisor_verify_evidence and "
             "parent_supervisor_functional_diagnostic_evidence BEFORE discovery. "
@@ -1101,6 +1109,18 @@ def implementation_runtime_prompt(did,agent):
                 "bubblewrap, or any sandbox wrapper; the runtime wraps bash automatically."
             )
         base=base+implementer_direct_write
+        if agent=="test-builder" and any(
+            str(path).startswith("tests/") for path in owned
+        ):
+            base+=(
+                "\nTEST SUBPROCESS CWD CHECK: If a subprocess test changes cwd "
+                "away from the repository root, confirm local package import "
+                "visibility inside THAT subprocess. Set an explicit project-root "
+                "PYTHONPATH in subprocess.run(env=...) or use the project root "
+                "as child cwd with an absolute temp fixture. Show stderr in "
+                "failed exit-code assertions. A passing CLI invocation from "
+                "repository cwd is not equivalent to the failed temp-cwd test."
+            )
 
     if agent=="probe-builder" and owned:
         direct_write=(
