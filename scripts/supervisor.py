@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import argparse,base64,contextlib,copy,hashlib,json,os,re,shlex,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
+from acceptance_contract import must_acceptance_ids
 from control_state import (phase_ready, ready_info as state_ready_info,
+                           ready_provenance as state_ready_provenance,
                            snapshot as state_snapshot, attempt_state,
                            load_attempts as state_load_attempts,
+                           _plan_contract_revision_credit_count,
+                           _parent_contract_repair_credit_count,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
                            MAX_CONTEXT_DELIVERY_RETRY_GRANTS,
@@ -12,12 +16,14 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            MAX_OPERATOR_INFRASTRUCTURE_ABORTS,
                            RECURSIVE_SPLIT_PROTOCOL, MAX_SPLIT_DEPTH,
                            LEAF_READY_PROTOCOL, VERIFY_WAIT_PROTOCOL,
-                           split_depth, valid_deliverable_id)
+                           split_depth, valid_deliverable_id,
+                           planner_restart_limit as state_planner_restart_limit)
 from leaf_contract import (
     IMPLEMENTATION_ROLES, READ_ONLY_ROLES,
     strict_owned_artifact_paths as shared_strict_owned_artifact_paths,
     canonical_owned_artifacts as shared_canonical_owned_artifacts,
     validate_leaf_contract, validate_verify_command,
+    validate_verify_adequacy, validate_contract_challenge_reason,
 )
 from state_io import (
     StateCorruptionError, load_json_object, atomic_write_json, atomic_write_text,
@@ -36,10 +42,17 @@ from worker_sandbox import (
         worker_sandbox_has_only_denied_preexecution_violations,
     command_invokes_manual_sandbox_wrapper as
         worker_command_invokes_manual_sandbox_wrapper,
+    exact_worker_verify_command as worker_exact_verify_command,
 )
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 from control_query_views import materialize_control_query_views
+from control_policy import (
+    control_policy_fingerprint,
+    supervisor_runtime_fingerprint,
+    reexec_source_paths,
+)
 from deterministic_dispatch import select_actions as deterministic_select_actions
+from runtime_contract import verify_state as verify_runtime_state
 from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
     visible_watchdog_decision, visible_progress_marker,
@@ -51,6 +64,8 @@ LOG=ROOT/"logs"/"supervisor-events.log"; CSV=ROOT/"logs"/"supervisor-events.csv"
 WATCHDOG_TELEMETRY=ROOT/"logs"/"watchdog-telemetry.jsonl"
 PROJECT=os.environ.get("V2_PROJECT","")
 START_MS=int(time.time()*1000)-5000; POLL=0.5
+START_CONTROL_POLICY_FINGERPRINT=control_policy_fingerprint()
+START_SUPERVISOR_RUNTIME_FINGERPRINT=supervisor_runtime_fingerprint()
 HARD_SECONDS=120; HARD_REASONING_CHARS=20000; HARD_TEXT_CHARS=12000
 MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
@@ -58,8 +73,12 @@ PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=2
 EARLY_WRITE_COMPLETED_TURNS_BY_COMPLEXITY={"S":4,"M":6}
 MAX_REFERENCE_FOUNDATION_SESSIONS=3
 MAX_REFERENCE_VALIDATION_SESSIONS=8
+MAX_REFERENCE_FOUNDATION_WEB_CALLS=6
+MAX_REFERENCE_POSTCHECKPOINT_LOCAL_TOOLS=8
+MAX_REFERENCE_VALIDATION_WEB_CALLS=4
 MAX_REFERENCE_STAGNANT_SESSIONS=2
 MAX_REFERENCE_COMPACTIONS=1
+REFERENCE_SEMANTIC_RETRY_PROTOCOL="v2-semantic-infrastructure-retry-v1"
 MAX_IMPLEMENTATION_COMPACTIONS=3
 PLANNER_CONTEXT_INPUT_CEILING=45000
 # gametest2s showed three healthy setup/read sequences reaching the old 150s
@@ -103,7 +122,7 @@ SPLIT_HANDOFF_STAGE_RE=re.compile(
     r"(?:\([a-z]\)|\(\d+\)|\b(?:first|second|third|then|followed\s+by)\b)",
     re.I,
 )
-lock=threading.RLock(); dispatch_lock=threading.RLock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}
+lock=threading.RLock(); dispatch_lock=threading.RLock(); policy_restart_lock=threading.Lock(); watch={}; dispatch_seen=set(); session_task={}; abort_count={}; compaction_seen={}; supervisor_abort_reasons={}; restart_adopted_sessions=set()
 event_watch={}; event_threads={}; planner_checkpoints={}; planner_completion_seen=set(); post_finalize_seen=set(); worker_progress={}; abort_intent_lock=threading.RLock(); planner_restart_lock=threading.RLock()
 state_blocker_exempt_active_seen=set()
 root_seen_active=False; root_idle_since=None; lessons_started=False; lessons_launch_attempts=0
@@ -165,7 +184,97 @@ def csv(kind,sid="",agent="",detail=""):
         if new: f.write("timestamp,event,session,agent,detail\n")
         f.write(f'{time.strftime("%Y-%m-%dT%H:%M:%S%z")},{kind},{sid},{agent},"{detail}"\n')
 
-def db_connect(): return sqlite3.connect(f"file:{DB}?mode=ro",uri=True,timeout=1)
+
+def ensure_running_control_policy_current():
+    """Self-reexec when control policy or long-lived supervisor runtime rotates."""
+    try:
+        current_policy=control_policy_fingerprint()
+        current_runtime=supervisor_runtime_fingerprint()
+    except Exception as exc:
+        log(f"CONTROL_POLICY_READ_BLOCKED error={exc!r}")
+        return False
+    if (
+        current_policy==START_CONTROL_POLICY_FINGERPRINT
+        and current_runtime==START_SUPERVISOR_RUNTIME_FINGERPRINT
+    ):
+        return True
+    with policy_restart_lock:
+        current_policy=control_policy_fingerprint()
+        current_runtime=supervisor_runtime_fingerprint()
+        if (
+            current_policy==START_CONTROL_POLICY_FINGERPRINT
+            and current_runtime==START_SUPERVISOR_RUNTIME_FINGERPRINT
+        ):
+            return True
+        if current_policy!=START_CONTROL_POLICY_FINGERPRINT:
+            kind="CONTROL_POLICY_ROTATION_REEXEC"
+            detail=(
+                f"old={START_CONTROL_POLICY_FINGERPRINT[:20]} "
+                f"new={current_policy[:20]}"
+            )
+        else:
+            kind="SUPERVISOR_RUNTIME_ROTATION_REEXEC"
+            detail=(
+                f"old={START_SUPERVISOR_RUNTIME_FINGERPRINT[:20]} "
+                f"new={current_runtime[:20]}"
+            )
+        # Never replace a healthy long-lived supervisor with source that
+        # cannot even import. Source updates can be observed mid-write during
+        # development/deployment; fail closed and keep the old process alive.
+        compile_cmd=[
+            sys.executable,"-m","py_compile",
+            *[str(path) for path in reexec_source_paths()],
+        ]
+        checked=subprocess.run(
+            compile_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+        if checked.returncode!=0:
+            error=(checked.stderr or checked.stdout or "").strip()
+            log(
+                "CONTROL_POLICY_REEXEC_PREFLIGHT_BLOCKED "
+                f"{detail} error={error[:1600]!r}"
+            )
+            csv(
+                "CONTROL_POLICY_REEXEC_PREFLIGHT_BLOCKED",
+                detail=detail+" "+error[:800].replace("\n"," "),
+            )
+            return False
+        log(f"{kind} {detail}")
+        csv(kind,detail=detail)
+        script=str(Path(__file__).resolve())
+        os.execv(sys.executable,[sys.executable,script,*sys.argv[1:]])
+        raise RuntimeError("supervisor reexec returned unexpectedly")
+
+
+def restart_reconcile_session_allowed(sid,time_created,active,pending_sessions):
+    """Adopt sessions that were active across a supervisor restart."""
+    try:
+        older=int(time_created or 0)<START_MS
+    except (TypeError,ValueError):
+        older=False
+    if not older:
+        return True
+    if sid in active:
+        restart_adopted_sessions.add(sid)
+    return sid in pending_sessions or sid in restart_adopted_sessions
+
+
+def runtime_db_path():
+    return Path(os.environ.get("V2_OPENCODE_DB",str(DB)))
+
+
+def runtime_project():
+    return str(os.environ.get("V2_PROJECT") or PROJECT)
+
+
+def db_connect():
+    path=runtime_db_path()
+    return sqlite3.connect(f"file:{path}?mode=ro",uri=True,timeout=1)
+
 
 def session_table_name():
     name=str(os.environ.get("V2_OPENCODE_SESSION_TABLE") or "session_v2")
@@ -193,7 +302,8 @@ def v1_session_status_snapshot(strict=False):
         if strict:
             raise RuntimeError('V2_OPENCODE_BASE_URL is not configured')
         return {}
-    query=urllib.parse.urlencode({'directory':PROJECT}) if PROJECT else ''
+    project=runtime_project()
+    query=urllib.parse.urlencode({'directory':project}) if project else ''
     url=base+'/session/status'+(('?'+query) if query else '')
     try:
         req=urllib.request.Request(url,headers={'Accept':'application/json'})
@@ -584,6 +694,72 @@ def last_assistant_text_db(sid):
     return ""
 
 
+MAX_STEP_TERMINAL_RE=re.compile(
+    r"(?:maximum steps for this agent have been reached|max steps reached for this agent session)",
+    re.IGNORECASE,
+)
+
+
+def max_step_terminal_summary_db(sid):
+    """Return a max-step terminal summary even if text/compaction followed it.
+
+    OpenCode may append compaction summaries or continuation prose after either
+    supported max-step terminal marker. Accept that history only when no later
+    tool part exists after the marker; any later tool execution means the
+    session was no longer terminal at that point.
+    """
+    latest=last_assistant_text_db(sid)
+    marker_re=MAX_STEP_TERMINAL_RE
+    if marker_re.search(latest or ""):
+        return latest
+
+    if not v1_runtime_enabled():
+        return ""
+
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT time_created,data FROM part "
+            "WHERE session_id=? ORDER BY time_created,id",
+            (sid,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return ""
+
+    marker_time=-1
+    marker_text=""
+    later_tool_time=-1
+    for created,raw in rows:
+        try:
+            part=json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if not isinstance(part,dict):
+            continue
+        when=int(created or 0)
+        if part.get("type")=="text":
+            text=str(part.get("text") or "")
+            if marker_re.search(text):
+                marker_time=when
+                marker_text=text.strip()
+                later_tool_time=-1
+            continue
+        if (
+            marker_time>=0
+            and when>marker_time
+            and part.get("type")=="tool"
+        ):
+            later_tool_time=max(later_tool_time,when)
+
+    if marker_time<0 or later_tool_time>marker_time:
+        return ""
+
+    if latest and latest.strip()!=marker_text:
+        return marker_text+"\n\nLatest post-terminal summary:\n"+latest.strip()
+    return marker_text
+
+
 def parse_split_parent(text):
     m=re.search(
         r"(?m)^\s*SPLIT_PARENT:\s*(D\d{3}(?:-[AB](?:[12])?)?)(?:\r?$|\r?\n)",
@@ -627,13 +803,189 @@ def _next_ordinal_word(value):
     return {4:"fifth",6:"seventh"}.get(int(value),f"{int(value)+1}th")
 
 
+CONTRACT_CHALLENGE_RE=re.compile(
+    r"(?m)^CONTRACT_CHALLENGE:\s*(.{20,800})\s*$"
+)
+
+def parse_contract_challenge(text):
+    matches=CONTRACT_CHALLENGE_RE.findall(str(text or ""))
+    if len(matches)!=1:
+        return ""
+    reason=" ".join(str(matches[0]).split())
+    return "" if validate_contract_challenge_reason(reason) else reason
+
 def verify_reporting_rule():
     return (
-        "\n\nEXACT VERIFY REPORTING:\n"
-        "Say `exact Verify passed` only when the packet's verify_command ran UNCHANGED "
-        "and exited 0. Label every other check `noncanonical check`. Run Verify directly; "
-        "no helper/temp/wrapper files outside owned artifacts. Supervisor evidence wins."
+        "\n\nVERIFY REPORTING:\n"
+        "Say exact Verify passed only if packet verify_command ran UNCHANGED and exited 0; "
+        "label all other checks noncanonical. If failed exact Verify contradicts "
+        "Done-when/Acceptance, STOP edits and return one line: "
+        "CONTRACT_CHALLENGE: <20..800 char concrete contradiction>. "
+        "Never use this for implementation bugs or missing work; it grants no retry."
     )
+
+
+def plan_contract_reverify_pending(did,leaf=None):
+    """True only for a supervisor-recorded stronger Verify awaiting recheck."""
+    if not did:
+        return False
+    if leaf is None:
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if not isinstance(leaf,dict):
+        return False
+    command=str(leaf.get("verify_command") or "")
+    if not command:
+        return False
+    try:
+        entry=(load_attempts().get("deliverables") or {}).get(did,{})
+        rows=entry.get("plan_contract_revisions") or []
+        digest=hashlib.sha256(command.encode()).hexdigest()
+        matching_revisions=[
+            row for row in rows
+            if isinstance(row,dict)
+            and (
+                (
+                    row.get("source")=="supervisor-plan-contract-revision"
+                    and row.get("current_verify_sha256")==digest
+                ) or (
+                    row.get("source")=="supervisor-dependency-contract-repair"
+                    and row.get("consumer_verify_sha256")==digest
+                )
+            )
+        ]
+        if not matching_revisions:
+            return False
+        evidence=load_supervisor_verify_evidence(did)
+    except Exception:
+        return False
+    rows=list(evidence.get("entries") or []) if isinstance(evidence,dict) else []
+    latest=evidence.get("latest") if isinstance(evidence,dict) else None
+    if isinstance(latest,dict):
+        rows.append(latest)
+    current_verified=any(
+        isinstance(item,dict)
+        and item.get("command")==command
+        and item.get("result")=="verified"
+        for item in rows
+    )
+    if current_verified:
+        return False
+    revision_requires_recheck=any(
+        str(row.get("previous_result") or "")=="verified"
+        or str(row.get("previous_result") or "").startswith("verify-failed-")
+        for row in matching_revisions
+    )
+    if revision_requires_recheck:
+        return True
+    prior_verified=any(
+        isinstance(item,dict)
+        and item.get("result")=="verified"
+        and str(item.get("command") or "")
+        and item.get("command")!=command
+        for item in rows
+    )
+    return prior_verified
+
+
+def _tool_is_exact_leaf_verify(leaf,tool,args,sid=""):
+    """Recognize only the canonical Verify, including exact runtime wrappers.
+
+    The early-write guard runs before the worker-sandbox mutation hook. It can
+    therefore see the raw model command, harmless shell quoting of a path-only
+    Verify, or an exact wrapper reflected from persisted tool history. Decode
+    only the canonical current project/session/agent worker wrapper; near
+    matches and arbitrary wrapper invocations remain non-Verify.
+    """
+    if tool not in {"bash","shell","execute"} or not isinstance(leaf,dict):
+        return False
+    command=(args or {}).get("command") if isinstance(args,dict) else None
+    canonical=str(leaf.get("verify_command") or "")
+    if not isinstance(command,str) or not canonical:
+        return False
+    if command==canonical:
+        return True
+
+    # Shell quoting around a path-only canonical command is semantically
+    # identical and adds no shell behavior. Do not apply argv normalization to
+    # multi-token Verifies, where quoting the whole string changes semantics.
+    if not any(ch.isspace() for ch in canonical):
+        try:
+            if shlex.split(command,posix=True)==[canonical]:
+                return True
+        except ValueError:
+            pass
+
+    if not sid:
+        return False
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return False
+    common=[
+        "--project",str(Path(PROJECT).resolve()),
+        "--session",sid,"--agent",agent,"--command-b64",
+    ]
+    wrapper=str((ROOT/"scripts"/"worker_sandbox.py").resolve())
+    prefixes=[
+        ["python3",wrapper,"run-bash",*common],
+        ["python3",wrapper,"run-worker-verify",*common],
+    ]
+    try:
+        parts=shlex.split(command,posix=True)
+    except ValueError:
+        return False
+    if not any(
+        len(parts)==len(prefix)+1 and parts[:-1]==prefix
+        for prefix in prefixes
+    ):
+        return False
+    try:
+        decoded=base64.b64decode(parts[-1],validate=True).decode("utf-8")
+    except Exception:
+        return False
+    return decoded==canonical
+
+
+def plan_contract_session_exact_verify_failure_count(sid,leaf):
+    """Count completed nonzero runs of this leaf's exact canonical Verify."""
+    if not sid or not isinstance(leaf,dict):
+        return 0
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return 0
+    agent=_session_agent_db(sid)
+    count=0
+    for row in persisted_model_bash_commands(sid,agent):
+        if row.get("command")!=canonical:
+            continue
+        if row.get("status")!="completed":
+            continue
+        code=row.get("exit_code")
+        if isinstance(code,int) and code!=0:
+            count+=1
+    return count
+
+
+def plan_contract_session_exact_verify_state(sid,leaf):
+    """Return not-attempted, passed, or failed for this session's exact Verify."""
+    if not sid or not isinstance(leaf,dict):
+        return "not-attempted"
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return "not-attempted"
+    agent=_session_agent_db(sid)
+    rows=[
+        row for row in persisted_model_bash_commands(sid,agent)
+        if row.get("command")==canonical
+    ]
+    if not rows:
+        return "not-attempted"
+    latest=rows[-1]
+    if (
+        latest.get("status")=="completed"
+        and latest.get("exit_code")==0
+    ):
+        return "passed"
+    return "failed"
 
 
 def implementation_runtime_prompt(did,agent):
@@ -665,6 +1017,20 @@ def implementation_runtime_prompt(did,agent):
             "evidence: record the concrete paths/sizes, the missing requirement, and the exact "
             "writer delta, then set HANDOFF_READY: true. Do not loop searching for unavailable "
             "evidence.\n"
+            "EVIDENCE AUTHORITY — EXACT:\n"
+            "Use context fields parent_supervisor_verify_evidence and "
+            "parent_supervisor_functional_diagnostic_evidence BEFORE discovery. "
+            "Any writer repair delta MUST stay within parent_owned_artifact_paths. "
+            "If an owned artifact references a missing path outside that set, repair the "
+            "owned artifact to remove/replace the dependency; NEVER propose creating the "
+            "unowned path. "
+            "Rejected splitter/model proposal archives are NON-AUTHORITATIVE and mechanically "
+            "unreadable; never use them to judge parent-contract validity. Treat current_progress "
+            "as provisional continuity scratch: on retry, first discard/rewrite claims not "
+            "corroborated by inline supervisor evidence or current artifacts. If inline supervisor "
+            "evidence references a helper/log/path and a bounded current read confirms it is "
+            "absent, treat absence as conclusive and checkpoint the smallest writer delta; do "
+            "not search alternate locations.\n"
             "3. AFTER every valid checkpoint, exactly ONE discovery tool-bearing response "
             "is allowed. That one discovery response MAY contain multiple independent read/grep "
             "calls in parallel; batch all already-known required inputs instead of spending one "
@@ -685,22 +1051,48 @@ def implementation_runtime_prompt(did,agent):
     owned=owned_artifact_paths(leaf) if isinstance(leaf,dict) else []
 
     if agent in IMPLEMENTATION_AGENTS and owned:
-        implementer_direct_write=(
-            "\n\nIMPLEMENTER DIRECT-WRITE ORDER — EXACT:\n"
-            "1. Read the context packet exactly once.\n"
-            "2. Before first write, read only the named split_handoff_source once and each "
-            "existing owned artifact once; batch them. No plan/repo/cache/runtime exploration.\n"
-            "3. NEXT tool-bearing response MUST write/edit an owned artifact. Start with a "
-            "SMALL, parseable, contract-shaped artifact (prefer a minimal executable/exportable "
-            "skeleton). For an existing nontrivial file, repair it with SMALL TARGETED EDITS; "
-            "do not replace the whole file with one large write. After success, continue with "
-            "bounded edits rather than monolithic rewrites. Missing evidence is not permission "
-            "for extra discovery.\n"
-            "4. After first change, inspect only direct dependencies, run exact Verify, and "
-            "repair only owned artifacts.\n"
-            "5. Bash gets only the intended command. Never invoke worker_sandbox.py, run-bash, "
-            "bubblewrap, or any sandbox wrapper; the runtime wraps bash automatically."
+        continuation_prompt=implementation_max_step_continuation_prompt_pending(did)
+        reverify=(
+            plan_contract_reverify_pending(did,leaf)
+            or continuation_prompt
         )
+        if reverify:
+            implementer_direct_write=(
+                "\n\nPLAN-CONTRACT REVERIFY ORDER — EXACT:\n"
+                "1. Read the context packet exactly once.\n"
+                "2. Read only the named split_handoff_source once and each existing owned "
+                "artifact once; batch them. No plan/repo/cache/runtime/dependency exploration.\n"
+                "3. NEXT tool-bearing response MUST run the packet verify_command UNCHANGED. "
+                "Do NOT mutate any owned artifact before this exact Verify.\n"
+                "4. If exact Verify exits 0, STOP using tools and return immediately; product "
+                "artifacts were already correct and no write is permitted or needed.\n"
+                "5. If exact Verify fails, you MAY read each local path in "
+                "supervisor_execution_correction.authoritative_sources or "
+                "parent_supervisor_execution_correction.authoritative_sources at most once; "
+                "no other discovery. Then make exactly ONE SMALL targeted owned write/edit; "
+                "do not replace a nontrivial file wholesale. Rerun exact Verify before any "
+                "additional owned mutation.\n"
+                "6. Bash gets only the exact Verify or a post-failure bounded repair command. "
+                "Never invoke worker_sandbox.py, run-bash, bubblewrap, or any sandbox wrapper; "
+                "the runtime wraps bash automatically."
+            )
+        else:
+            implementer_direct_write=(
+                "\n\nIMPLEMENTER DIRECT-WRITE ORDER — EXACT:\n"
+                "1. Read the context packet exactly once.\n"
+                "2. Before first write, read only the named split_handoff_source once and each "
+                "existing owned artifact once; batch them. No plan/repo/cache/runtime exploration.\n"
+                "3. NEXT tool-bearing response MUST write/edit an owned artifact. Start with a "
+                "SMALL, parseable, contract-shaped artifact (prefer a minimal executable/exportable "
+                "skeleton). For an existing nontrivial file, repair it with SMALL TARGETED EDITS; "
+                "do not replace the whole file with one large write. After success, continue with "
+                "bounded edits rather than monolithic rewrites. Missing evidence is not permission "
+                "for extra discovery.\n"
+                "4. After first change, inspect only direct dependencies, run exact Verify, and "
+                "repair only owned artifacts.\n"
+                "5. Bash gets only the intended command. Never invoke worker_sandbox.py, run-bash, "
+                "bubblewrap, or any sandbox wrapper; the runtime wraps bash automatically."
+            )
         base=base+implementer_direct_write
 
     if agent=="probe-builder" and owned:
@@ -721,13 +1113,24 @@ def implementation_runtime_prompt(did,agent):
 
     if agent not in READ_ONLY_SPLIT_ROLES and owned:
         deadline=early_write_completed_turn_limit(leaf)
-        gate=(
-            "\n\nEARLY WRITE GATE — EXACT:\n"
-            f"By completed tool turn {deadline}, if no owned artifact differs, the NEXT "
-            "tool-bearing response is WRITE-ONLY and MUST change an owned artifact. No "
-            "read/search/web/discovery then. Only exception: exact progress-file write when "
-            "the owned artifact is already correct. Any other tool retires the session."
-        )
+        if (
+            plan_contract_reverify_pending(did,leaf)
+            or implementation_max_step_continuation_prompt_pending(did)
+        ):
+            gate=(
+                "\n\nPLAN-CONTRACT REVERIFY GATE — EXACT:\n"
+                "Before mutation, exact packet Verify is mandatory. Pass => return with "
+                "no more tools. Fail => only the bounded authoritative-source reads above, then "
+                "owned repair; no other tool is allowed."
+            )
+        else:
+            gate=(
+                "\n\nEARLY WRITE GATE — EXACT:\n"
+                f"By completed tool turn {deadline}, if no owned artifact differs, the NEXT "
+                "tool-bearing response is WRITE-ONLY and MUST change an owned artifact. No "
+                "read/search/web/discovery then. Only exception: exact progress-file write when "
+                "the owned artifact is already correct. Any other tool retires the session."
+            )
         return base+gate+verify_reporting_rule()
 
     return base+verify_reporting_rule()
@@ -993,7 +1396,7 @@ def _upgrade_split_request_functional_evidence(did,request):
             policy["verification_recovery_allowed"]=allowed
             changed=True
         precedence=(
-            "A structurally invalid or unsafe canonical verify_command may use "
+            "A structurally invalid, unsafe, or deterministically inadequate canonical verify_command may use "
             "v2-split-parent-contract-invalid-v1. A passing canonical Verify plus "
             "a failed supervisor_functional_diagnostic_evidence record is NOT a "
             "parent-contract defect: it is a verification-related execution failure "
@@ -1239,7 +1642,7 @@ def split_request(did):
                 for item in compact if isinstance(item,dict)
             ),
             "parent_verify_invalid_precedence":(
-                "A structurally invalid or unsafe canonical verify_command may use "
+                "A structurally invalid, unsafe, or deterministically inadequate canonical verify_command may use "
                 "v2-split-parent-contract-invalid-v1. A passing canonical Verify plus "
                 "a failed supervisor_functional_diagnostic_evidence record is NOT a "
                 "parent-contract defect: it is a verification-related execution failure "
@@ -2104,6 +2507,9 @@ def validate_split_proposal(parent, proposals, request=None):
                 )
         else:
             contract_errors=validate_leaf_contract(role, owned_list, proposal["verify_command"])
+            contract_errors.extend(validate_verify_adequacy(
+                proposal.get("done_when",""), proposal["verify_command"]
+            ))
             if contract_errors:
                 raise ValueError("; ".join(contract_errors))
             parent_verify=str(leaf.get("verify_command") or "").strip()
@@ -2412,7 +2818,14 @@ def _validate_parent_contract_invalid_payload(did, payload, request):
         parent_contract.get("verify_command") if isinstance(parent_contract,dict) else ""
     )
     verify_errors=validate_verify_command(verify_command)
-    return field,reason,verify_errors
+    done_when=(
+        str(parent_contract.get("done_when") or "")
+        if isinstance(parent_contract,dict) else ""
+    )
+    verify_errors.extend(
+        validate_verify_adequacy(done_when,verify_command)
+    )
+    return field,reason,list(dict.fromkeys(verify_errors))
 
 
 def _request_parent_contract_repair(did, field, reason, request, verify_errors):
@@ -2491,6 +2904,7 @@ def _request_parent_contract_repair(did, field, reason, request, verify_errors):
             "message":repair_message,
         }],
         "baseline":_repair_baseline(repair_keys),
+        "planner_restart_baseline":planner_restart_count(),
     })
     (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").unlink(missing_ok=True)
 
@@ -2556,7 +2970,8 @@ def _request_parent_contract_repair(did, field, reason, request, verify_errors):
 # of facts and the child retains its original model/profile and no-tool policy.
 SPLITTER_FALSE_PARENT_INVALID_CONTEXT=(
     "The supervisor independently validated that the parent contract's exact "
-    "Verify command is structurally valid. `parent-contract-invalid` is not "
+    "Verify command is structurally valid and adequate for Done-when. "
+    "`parent-contract-invalid` is not "
     "available for this claim. A supervisor_functional_diagnostic_evidence "
     "failure is authoritative verification-related evidence even when the "
     "canonical Verify itself passed; recover that failed functional dimension "
@@ -3014,7 +3429,10 @@ def recover_exhausted_splitter_deterministic_handoff(parent):
             "scope":(
                 "Diagnose the exact failed parent Verify from authoritative "
                 "supervisor evidence and current parent-owned artifacts; record "
-                "the concrete failure cause and smallest writer repair delta."
+                "the concrete failure cause and smallest writer repair delta. "
+                "The repair delta MUST stay inside the parent-owned artifact set; "
+                "a missing unowned dependency must be removed/replaced by editing "
+                "an owned artifact, never proposed as a new artifact to create."
             ),
             "owned_artifacts":"none",
             "verify_command":SPLIT_HANDOFF_VERIFY_SENTINEL,
@@ -3348,6 +3766,29 @@ def recover_false_ownership_finalize(did):
                 )
                 if ok:
                     entry.pop("split_required",None)
+                elif str(detail).startswith("verify-failed-"):
+                    # The ownership attribution was disproven, but same-attempt
+                    # supervisor re-verification found a genuine semantic
+                    # failure. Preserve the old reason as audit evidence while
+                    # normalizing the terminal row to the authoritative Verify
+                    # result. This grants no retry and leaves split accounting
+                    # unchanged.
+                    rows=[
+                        item for item in (entry.get("failure_history") or [])
+                        if isinstance(item,dict)
+                        and int(item.get("attempt") or 0)==count
+                        and item.get("session")==sid
+                    ]
+                    if len(rows)==1 and rows[0].get("reason")==reason:
+                        row=rows[0]
+                        row["original_reason"]=reason
+                        row["reason"]=str(detail)
+                        row["reclassified_by"]="runtime-false-ownership-verify-recheck"
+                        row["reclassified_at"]=time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                        )
+                        marker["ownership_disproven"]=True
+                        marker["terminal_reason_normalized"]=str(detail)
                 save_attempts(data)
 
     event=(
@@ -3513,14 +3954,223 @@ def recover_version_skew_zero_work_dispatch(did):
     return True,"rearmed-same-attempt"
 
 
+CONTROLLER_REPLAY_EVIDENCE_RECOVERY_PROTOCOL=(
+    "v2-controller-replay-evidence-zero-work-recovery-v1"
+)
+
+
+def controller_replay_evidence_fix_installed():
+    try:
+        controller=(ROOT/"scripts/stage_a_controller.py").read_text(
+            errors="replace"
+        )
+        state_source=(ROOT/"scripts/control_state.py").read_text(
+            errors="replace"
+        )
+    except OSError:
+        return False
+    return (
+        '"scheduler": dict(scheduler)' in controller
+        and "replayable_zero_work_orphans" in controller
+        and "current_attempt_is_terminal" in controller
+        and "same-execution-reusable-reservation-terminal-zero-work-child" in controller
+        and '"infrastructure_abort","infrastructure_blocked"' in state_source
+    )
+
+
+def recover_controller_replay_evidence_zero_work(did):
+    """Rearm one blocked zero-work dispatch after fixed replay-evidence loss."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"controller-replay-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"controller-replay-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1
+                or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"controller-replay-recovery-current-session-mismatch"
+            sid=sessions[-1]
+            current_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(current_rows)!=1:
+                return False,"controller-replay-recovery-operator-record-mismatch"
+            current_row=current_rows[0]
+            if not (
+                current_row.get("state")=="infrastructure_blocked"
+                and current_row.get("outcome")=="infrastructure_abort"
+                and current_row.get("consumes_operator_grant") is False
+                and current_row.get("source")=="supervisor"
+                and current_row.get("evidence")==
+                    "immediate-runtime-cancel zero-token-zero-tool aborted"
+            ):
+                return False,"controller-replay-recovery-terminal-state-mismatch"
+            prior=entry.get("controller_replay_evidence_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"controller-replay-recovery-history-invalid"
+            if any(
+                isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+                for row in prior
+            ):
+                return True,"already-recovered"
+
+    statuses=v1_session_status_snapshot()
+    status=statuses.get(sid)
+    if isinstance(status,dict) and str(
+        status.get("type") or status.get("status") or ""
+    ).lower()=="busy":
+        return False,"controller-replay-recovery-session-still-active"
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return False,"controller-replay-recovery-agent-invalid"
+    if meaningful_worker_execution(sid,did):
+        return False,"controller-replay-recovery-meaningful-execution-present"
+    if persisted_completed_tool_turns(sid):
+        return False,"controller-replay-recovery-tool-execution-present"
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if changed or delta!="unchanged":
+        return False,"controller-replay-recovery-owned-state-changed"
+
+    try:
+        events=LOG.read_text(errors="replace")
+    except OSError:
+        return False,"controller-replay-recovery-event-log-missing"
+    interrupt=(
+        f"INTERRUPT session={sid} agent={agent} "
+        "reason=dispatch_guard attempt_ledger_invalid "
+        f"deliverable={did} count={count}"
+    )
+    if interrupt not in events:
+        return False,"controller-replay-recovery-interrupt-proof-missing"
+    if not controller_replay_evidence_fix_installed():
+        return False,"controller-replay-recovery-current-code-unfixed"
+
+    marker_id=hashlib.sha256(
+        f"{CONTROLLER_REPLAY_EVIDENCE_RECOVERY_PROTOCOL}\0"
+        f"{did}\0{count}\0{sid}".encode()
+    ).hexdigest()[:20]
+    placeholder=(
+        f"dispatch:controller-replay-recovery:{marker_id}:{did}"
+    )
+    now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"controller-replay-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"controller-replay-recovery-ledger-changed"
+            current_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(current_rows)!=1 or (
+                current_rows[0].get("state")!="infrastructure_blocked"
+            ):
+                return False,"controller-replay-recovery-operator-record-changed"
+            op=current_rows[0]
+            original={
+                key:op.get(key)
+                for key in (
+                    "sequence","session","state","outcome","evidence",
+                    "resolved_at","consumes_operator_grant","source",
+                )
+            }
+            history=entry.setdefault(
+                "controller_replay_evidence_recoveries",[]
+            )
+            history.append({
+                "protocol":CONTROLLER_REPLAY_EVIDENCE_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "replacement":placeholder,
+                "original_operator_record":original,
+                "evidence":{
+                    "interrupt_reason":"dispatch_guard attempt_ledger_invalid",
+                    "meaningful_execution":False,
+                    "completed_tool_turns":0,
+                    "owned_state":"unchanged",
+                },
+                "source":"supervisor-controller-replay-evidence-repair",
+                "timestamp":now,
+            })
+            entry["sessions"][-1]=placeholder
+            op["session"]=placeholder
+            op["state"]="reserved"
+            op["consumes_operator_grant"]=False
+            op["rearmed_by"]=CONTROLLER_REPLAY_EVIDENCE_RECOVERY_PROTOCOL
+            op["rearmed_at"]=now
+            for key in ("outcome","evidence","resolved_at"):
+                op.pop(key,None)
+            entry["unmaterialized_dispatch_sequence"]=count
+            entry["unmaterialized_dispatch_replays"]=0
+            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+                "sequence":count,
+                "replaced":sid,
+                "replacement":placeholder,
+                "source":"supervisor-controller-replay-evidence-repair",
+                "timestamp":now,
+            })
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"controller-replay-recovery-projected-ledger-invalid"
+            if not projected.get("unmaterialized_dispatch_reusable"):
+                return False,"controller-replay-recovery-not-reusable"
+            if int(projected.get("count") or 0)!=count:
+                return False,"controller-replay-recovery-count-changed"
+            save_attempts(data)
+
+    log(
+        f"CONTROLLER_REPLAY_EVIDENCE_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} placeholder={placeholder}"
+    )
+    csv(
+        "CONTROLLER_REPLAY_EVIDENCE_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} placeholder={placeholder}",
+    )
+    return True,"rearmed-same-attempt"
+
+
 def persisted_model_bash_commands(sid,agent):
-    """Recover model-supplied bash text from old plugin-persisted wrappers."""
+    """Recover model-supplied bash text from canonical persisted wrappers."""
     if not sid or agent not in IMPLEMENTATION_AGENTS:
         return []
-    prefix=[
-        "python3",str((ROOT/"scripts"/"worker_sandbox.py").resolve()),
-        "run-bash","--project",str(Path(PROJECT).resolve()),
+    common=[
+        "--project",str(Path(PROJECT).resolve()),
         "--session",sid,"--agent",agent,"--command-b64",
+    ]
+    wrapper=str((ROOT/"scripts"/"worker_sandbox.py").resolve())
+    prefixes=[
+        ["python3",wrapper,"run-bash",*common],
+        ["python3",wrapper,"run-worker-verify",*common],
     ]
     out=[]
     try:
@@ -3551,17 +4201,31 @@ def persisted_model_bash_commands(sid,agent):
                 parts=shlex.split(command,posix=True)
             except ValueError:
                 continue
-            if len(parts)!=len(prefix)+1 or parts[:-1]!=prefix:
+            if not any(
+                len(parts)==len(prefix)+1 and parts[:-1]==prefix
+                for prefix in prefixes
+            ):
                 continue
             try:
                 original=base64.b64decode(parts[-1],validate=True).decode("utf-8")
             except Exception:
                 continue
+            metadata=(
+                state.get("metadata")
+                if isinstance(state.get("metadata"),dict)
+                else {}
+            )
+            exit_code=metadata.get("exit")
+            try:
+                exit_code=int(exit_code) if exit_code is not None else None
+            except (TypeError,ValueError):
+                exit_code=None
             out.append({
                 "command":original,
                 "status":str(state.get("status") or ""),
                 "output":str(state.get("output") or ""),
                 "error":str(state.get("error") or ""),
+                "exit_code":exit_code,
             })
     return out
 
@@ -3599,6 +4263,390 @@ def sandbox_wrapper_history_evidence(sid,did):
         "completed_tool_turns":persisted_completed_tool_turns(sid),
         "meaningful_execution":bool(meaningful_worker_execution(sid,did)),
     }
+
+
+def trusted_verify_wrapper_contamination_evidence(sid,did):
+    """Prove one attempt was poisoned by trusted-Verify wrapper/shadow defects."""
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return {}
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    canonical=str(leaf.get("verify_command") or "").strip() if isinstance(leaf,dict) else ""
+    if not canonical:
+        return {}
+
+    prefix=[
+        "python3",str((ROOT/"scripts"/"worker_sandbox.py").resolve()),
+        "run-worker-verify","--project",str(Path(PROJECT).resolve()),
+        "--session",sid,"--agent",agent,"--command-b64",
+    ]
+    exact_calls=0
+    shadow_failures=0
+    reflection_denials=0
+    max_steps=False
+    try:
+        records=_v1_message_records(sid)
+    except Exception:
+        records=[]
+    for record in records:
+        if record.get("data",{}).get("role")!="assistant":
+            continue
+        for part in _v1_message_parts(record["id"]):
+            if part.get("type")=="text":
+                text=str(part.get("text") or "")
+                if re.search(r"\bmax(?:imum)? steps reached\b",text,re.IGNORECASE):
+                    max_steps=True
+                continue
+            if part.get("type")!="tool" or part.get("tool") not in {"bash","shell"}:
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            raw=state.get("input")
+            if isinstance(raw,dict):
+                args=raw
+            elif isinstance(raw,str):
+                try:
+                    args=json.loads(raw)
+                except Exception:
+                    args={}
+            else:
+                args={}
+            command=args.get("command") if isinstance(args,dict) else None
+            if not isinstance(command,str) or not command:
+                continue
+            try:
+                parts=shlex.split(command,posix=True)
+            except ValueError:
+                continue
+            if len(parts)!=len(prefix)+1 or parts[:-1]!=prefix:
+                continue
+            try:
+                decoded=base64.b64decode(parts[-1],validate=True).decode("utf-8")
+            except Exception:
+                continue
+            if decoded.strip()!=canonical:
+                continue
+            exact_calls+=1
+            combined=(
+                str(state.get("output") or "")+" "+
+                str(state.get("error") or "")
+            )
+            if "required_files entry resolves outside project" in combined:
+                shadow_failures+=1
+            if (
+                "IMPLEMENTATION_POST_WRITE_VERIFY_REQUIRED" in combined
+                or "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED" in combined
+            ):
+                reflection_denials+=1
+    return {
+        "agent":agent,
+        "canonical_verify":canonical,
+        "trusted_verify_wrapper_calls":exact_calls,
+        "verify_shadow_required_file_failures":shadow_failures,
+        "trusted_verify_wrapper_reflection_denials":reflection_denials,
+        "maximum_steps_reached":max_steps,
+        "completed_tool_turns":persisted_completed_tool_turns(sid),
+        "meaningful_execution":bool(meaningful_worker_execution(sid,did)),
+    }
+
+
+def trusted_verify_wrapper_contamination_fix_installed():
+    try:
+        source=(ROOT/"scripts"/"worker_sandbox.py").read_text(errors="replace")
+    except OSError:
+        return False
+    return all(marker in source for marker in (
+        'if name=="TEST_CHECKS.json" and child.is_file() and not child.is_symlink():',
+        '["python3",str(Path(__file__).resolve()),"run-worker-verify",*common]',
+        'or "run-worker-verify" in following',
+    ))
+
+
+TRUSTED_VERIFY_INFRA_HISTORY_RECONCILE_PROTOCOL=(
+    "v2-trusted-verify-infrastructure-history-reconcile-v1"
+)
+
+
+def reconcile_trusted_verify_infrastructure_history(did):
+    """Repair a partial historical trusted-Verify infrastructure classification.
+
+    This grants no retry. It only aligns an already-recorded supervisor
+    infrastructure grant with the exact same attempt/session failure row after
+    proving the trusted Verify defect from immutable session evidence.
+    """
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"trusted-verify-history-reconcile-missing-ledger-entry"
+            prior=entry.get("trusted_verify_infrastructure_history_reconciliations") or []
+            if not isinstance(prior,list):
+                return False,"trusted-verify-history-reconcile-history-invalid"
+
+            sessions=entry.get("sessions")
+            failures=entry.get("failure_history")
+            infra=entry.get("infrastructure_failures")
+            if not isinstance(sessions,list) or not isinstance(failures,list) or not isinstance(infra,list):
+                return False,"trusted-verify-history-reconcile-ledger-shape-invalid"
+
+            candidates=[]
+            for grant in infra:
+                if not isinstance(grant,dict):
+                    continue
+                if not (
+                    grant.get("source")=="supervisor"
+                    and int(grant.get("grant") or 0)==1
+                    and grant.get("kind")=="verification-sandbox"
+                    and grant.get("reason")=="trusted-verify-shadow-required-file-false-escape"
+                ):
+                    continue
+                sid=grant.get("session")
+                if not isinstance(sid,str) or sessions.count(sid)!=1:
+                    continue
+                attempt=sessions.index(sid)+1
+                rows=[
+                    row for row in failures
+                    if isinstance(row,dict)
+                    and int(row.get("attempt") or 0)==attempt
+                    and row.get("session")==sid
+                ]
+                if len(rows)!=1:
+                    continue
+                row=rows[0]
+                if row.get("classification")=="infrastructure":
+                    continue
+                if not (
+                    row.get("classification")=="genuine"
+                    and row.get("reason")=="verify-failed-1"
+                ):
+                    continue
+                if any(
+                    isinstance(mark,dict)
+                    and int(mark.get("attempt") or 0)==attempt
+                    and mark.get("session")==sid
+                    for mark in prior
+                ):
+                    continue
+                candidates.append((attempt,sid,row,grant))
+
+            if len(candidates)!=1:
+                return False,"trusted-verify-history-reconcile-proof-count"
+
+            attempt,sid,row,grant=candidates[0]
+
+    evidence=trusted_verify_wrapper_contamination_evidence(sid,did)
+    if not (
+        int(evidence.get("trusted_verify_wrapper_calls") or 0)>=1
+        and int(evidence.get("verify_shadow_required_file_failures") or 0)>=1
+        and bool(evidence.get("meaningful_execution"))
+        and trusted_verify_wrapper_contamination_fix_installed()
+    ):
+        return False,"trusted-verify-history-reconcile-session-proof-mismatch"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"trusted-verify-history-reconcile-ledger-disappeared"
+            sessions=entry.get("sessions") or []
+            failures=entry.get("failure_history") or []
+            infra=entry.get("infrastructure_failures") or []
+            if not (1 <= attempt <= len(sessions) and sessions[attempt-1]==sid):
+                return False,"trusted-verify-history-reconcile-ledger-changed"
+            rows=[
+                item for item in failures
+                if isinstance(item,dict)
+                and int(item.get("attempt") or 0)==attempt
+                and item.get("session")==sid
+            ]
+            grants=[
+                item for item in infra
+                if isinstance(item,dict)
+                and item.get("session")==sid
+                and item.get("reason")=="trusted-verify-shadow-required-file-false-escape"
+                and item.get("kind")=="verification-sandbox"
+            ]
+            if len(rows)!=1 or len(grants)!=1 or not (
+                rows[0].get("classification")=="genuine"
+                and rows[0].get("reason")=="verify-failed-1"
+            ):
+                return False,"trusted-verify-history-reconcile-state-changed"
+
+            failure=rows[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]="verify-failed-1"
+            failure["classification"]="infrastructure"
+            failure["reason"]=grants[0]["reason"]
+            failure["reclassified_by"]="runtime-trusted-verify-infrastructure-history-reconcile"
+            stamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+            entry.setdefault(
+                "trusted_verify_infrastructure_history_reconciliations",[]
+            ).append({
+                "protocol":TRUSTED_VERIFY_INFRA_HISTORY_RECONCILE_PROTOCOL,
+                "attempt":attempt,
+                "session":sid,
+                "grant_reason":grants[0]["reason"],
+                "source":"supervisor-trusted-verify-history-reconcile",
+                "timestamp":stamp,
+            })
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"trusted-verify-history-reconcile-projected-ledger-invalid"
+            save_attempts(data)
+
+    log(
+        f"TRUSTED_VERIFY_INFRA_HISTORY_RECONCILED deliverable={did} "
+        f"attempt={attempt} session={sid}"
+    )
+    csv(
+        "TRUSTED_VERIFY_INFRA_HISTORY_RECONCILED",sid,"supervisor",
+        f"{did} attempt={attempt}",
+    )
+    return True,"reconciled"
+
+
+RUN_CHECKS_DIAGNOSTIC_RECOVERY_PROTOCOL=(
+    "v2-run-checks-diagnostic-omission-recovery-v1"
+)
+
+
+def recover_run_checks_diagnostic_omissions(did):
+    """Refund historical run-checks attempts that lacked failure diagnostics."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"run-checks-diagnostic-recovery-requires-executable-leaf"
+    if str(leaf.get("verify_command") or "").strip()!=RUN_CHECKS_COMMAND:
+        return False,"run-checks-diagnostic-recovery-not-canonical-run-checks"
+    try:
+        source=(ROOT/"scripts"/"run-checks.py").read_text(errors="replace")
+    except OSError:
+        return False,"run-checks-diagnostic-recovery-runner-missing"
+    if not (
+        "bounded_failure_diagnostic" in source
+        and 'result["diagnostic"]=bounded_failure_diagnostic(stdout,stderr)' in source
+    ):
+        return False,"run-checks-diagnostic-recovery-current-fix-unavailable"
+
+    verify_entries=load_supervisor_verify_evidence(did).get("entries") or []
+    evidence_by_key={}
+    for item in verify_entries:
+        if not isinstance(item,dict):
+            continue
+        try:
+            key=(int(item.get("attempt") or 0),str(item.get("session") or ""))
+        except (TypeError,ValueError):
+            continue
+        evidence_by_key[key]=item
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"run-checks-diagnostic-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"run-checks-diagnostic-recovery-invalid-ledger"
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            remaining=max(0,MAX_INFRASTRUCTURE_RETRY_GRANTS-grants)
+            if remaining<=0:
+                return False,"run-checks-diagnostic-recovery-infrastructure-limit"
+
+            prior=entry.get("run_checks_diagnostic_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"run-checks-diagnostic-recovery-history-invalid"
+            candidates=[]
+            for row in entry.get("failure_history") or []:
+                if not isinstance(row,dict) or not (
+                    row.get("classification")=="genuine"
+                    and row.get("reason")=="verify-failed-1"
+                ):
+                    continue
+                attempt=int(row.get("attempt") or 0)
+                sid=str(row.get("session") or "")
+                if not attempt or not sid:
+                    continue
+                if any(
+                    isinstance(mark,dict)
+                    and int(mark.get("attempt") or 0)==attempt
+                    and mark.get("session")==sid
+                    for mark in prior
+                ):
+                    continue
+                ev=evidence_by_key.get((attempt,sid))
+                if not isinstance(ev,dict) or not (
+                    ev.get("command")==RUN_CHECKS_COMMAND
+                    and ev.get("result")=="verify-failed-1"
+                    and int(ev.get("exit_code") or -1)==1
+                ):
+                    continue
+                stdout=str(ev.get("stdout") or "")
+                if not (
+                    '"protocol": "v2-test-report-v1"' in stdout
+                    and '"status": "fail"' in stdout
+                    and '"exit_code": 125' in stdout
+                    and '"diagnostic"' not in stdout
+                ):
+                    continue
+                candidates.append((attempt,sid,row))
+            candidates=candidates[:remaining]
+            if not candidates:
+                return False,"run-checks-diagnostic-recovery-no-proven-omissions"
+
+            stamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+            for attempt,sid,row in candidates:
+                reason="run-checks-failure-diagnostic-omitted-from-supervisor-evidence"
+                row["original_classification"]="genuine"
+                row["original_reason"]="verify-failed-1"
+                row["classification"]="infrastructure"
+                row["reason"]=reason
+                row["reclassified_by"]="runtime-run-checks-diagnostic-repair"
+                entry.setdefault("infrastructure_failures",[]).append({
+                    "timestamp":stamp,
+                    "grant":1,
+                    "source":"supervisor",
+                    "kind":"verification-environment",
+                    "session":sid,
+                    "evidence":"durable-partial-state-preserved",
+                    "reason":reason,
+                })
+                entry.setdefault("run_checks_diagnostic_recoveries",[]).append({
+                    "protocol":RUN_CHECKS_DIAGNOSTIC_RECOVERY_PROTOCOL,
+                    "attempt":attempt,
+                    "session":sid,
+                    "verify_result":"verify-failed-1",
+                    "failed_exit_code":125,
+                    "source":"supervisor-run-checks-diagnostic-repair",
+                    "timestamp":stamp,
+                })
+            entry["infrastructure_retry_grants"]=grants+len(candidates)
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"run-checks-diagnostic-recovery-projected-ledger-invalid"
+            if int(projected.get("allowed_attempts") or 0)<=int(entry.get("count") or 0):
+                return False,"run-checks-diagnostic-recovery-no-retry-slot"
+            save_attempts(data)
+
+    for attempt,sid,_row in candidates:
+        log(
+            f"RUN_CHECKS_DIAGNOSTIC_RECOVERY deliverable={did} "
+            f"attempt={attempt} session={sid}"
+        )
+        csv(
+            "RUN_CHECKS_DIAGNOSTIC_RECOVERY",sid,"supervisor",
+            f"{did} attempt={attempt}",
+        )
+    return True,f"recovered-{len(candidates)}"
 
 
 SANDBOX_WRAPPER_HISTORY_RECOVERY_PROTOCOL=(
@@ -3655,17 +4703,37 @@ def recover_sandbox_wrapper_history_poison(did):
     status=v1_session_status_snapshot().get(sid)
     if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
         return False,"wrapper-history-recovery-session-still-active"
-    evidence=sandbox_wrapper_history_evidence(sid,did)
-    if int(evidence.get("persisted_wrapper_calls") or 0)<5:
-        return False,"wrapper-history-recovery-insufficient-persisted-wrappers"
-    if int(evidence.get("manual_wrapper_calls") or 0)<1:
-        return False,"wrapper-history-recovery-no-manual-wrapper"
-    if int(evidence.get("manual_wrapper_failures") or 0)<1:
-        return False,"wrapper-history-recovery-no-wrapper-failure"
-    if not evidence.get("maximum_steps_reached"):
-        return False,"wrapper-history-recovery-no-max-step-terminal"
-    if not evidence.get("meaningful_execution"):
-        return False,"wrapper-history-recovery-no-durable-execution"
+    legacy_evidence=sandbox_wrapper_history_evidence(sid,did)
+    trusted_evidence=trusted_verify_wrapper_contamination_evidence(sid,did)
+    legacy_poison=(
+        int(legacy_evidence.get("persisted_wrapper_calls") or 0)>=5
+        and int(legacy_evidence.get("manual_wrapper_calls") or 0)>=1
+        and int(legacy_evidence.get("manual_wrapper_failures") or 0)>=1
+        and bool(legacy_evidence.get("maximum_steps_reached"))
+        and bool(legacy_evidence.get("meaningful_execution"))
+    )
+    trusted_poison=(
+        int(trusted_evidence.get("trusted_verify_wrapper_calls") or 0)>=2
+        and int(trusted_evidence.get("verify_shadow_required_file_failures") or 0)>=1
+        and int(trusted_evidence.get("trusted_verify_wrapper_reflection_denials") or 0)>=1
+        and bool(trusted_evidence.get("maximum_steps_reached"))
+        and bool(trusted_evidence.get("meaningful_execution"))
+    )
+    if not (legacy_poison or trusted_poison):
+        if int(trusted_evidence.get("trusted_verify_wrapper_calls") or 0):
+            return False,"wrapper-history-recovery-proof-mismatch"
+        if int(legacy_evidence.get("persisted_wrapper_calls") or 0)<5:
+            return False,"wrapper-history-recovery-insufficient-persisted-wrappers"
+        if int(legacy_evidence.get("manual_wrapper_calls") or 0)<1:
+            return False,"wrapper-history-recovery-no-manual-wrapper"
+        if int(legacy_evidence.get("manual_wrapper_failures") or 0)<1:
+            return False,"wrapper-history-recovery-no-wrapper-failure"
+        if not legacy_evidence.get("maximum_steps_reached"):
+            return False,"wrapper-history-recovery-no-max-step-terminal"
+        if not legacy_evidence.get("meaningful_execution"):
+            return False,"wrapper-history-recovery-no-durable-execution"
+        return False,"wrapper-history-recovery-proof-mismatch"
+    evidence={**legacy_evidence,**trusted_evidence}
 
     verify=load_supervisor_verify_evidence(did).get("latest") or {}
     if not (
@@ -3677,30 +4745,42 @@ def recover_sandbox_wrapper_history_poison(did):
     ):
         return False,"wrapper-history-recovery-verify-evidence-mismatch"
 
-    try:
-        plugin_text=(
-            ROOT/"xdg/config/opencode/plugins/v2-bounded-subagent.js"
-        ).read_text(errors="replace")
-    except OSError:
-        return False,"wrapper-history-recovery-current-plugin-missing"
-    legacy_history_fix=(
-        "captureOriginalSandboxCommand(event, output);" in plugin_text
-        and "restoreOriginalSandboxCommand(event, output);" in plugin_text
-    )
-    transform_history_fix=all(marker in plugin_text for marker in (
-        'function unwrapPersistedSandboxCommand(command, directory)',
-        '"experimental.chat.messages.transform": async (_input, output) => {',
-        'sanitizeSandboxHistoryForModel(output?.messages, directory);',
-    ))
-    if not (legacy_history_fix or transform_history_fix):
-        return False,"wrapper-history-recovery-current-plugin-unfixed"
-
-    reason=(
-        "sandbox-wrapper-history-poison "
-        f"persisted={evidence['persisted_wrapper_calls']} "
-        f"manual={evidence['manual_wrapper_calls']} "
-        f"failed={evidence['manual_wrapper_failures']} maximum_steps_reached"
-    )
+    mode="legacy-wrapper-history" if legacy_poison else "trusted-verify-wrapper-history"
+    if legacy_poison:
+        try:
+            plugin_text=(
+                ROOT/"xdg/config/opencode/plugins/v2-bounded-subagent.js"
+            ).read_text(errors="replace")
+        except OSError:
+            return False,"wrapper-history-recovery-current-plugin-missing"
+        legacy_history_fix=(
+            "captureOriginalSandboxCommand(event, output);" in plugin_text
+            and "restoreOriginalSandboxCommand(event, output);" in plugin_text
+        )
+        transform_history_fix=all(marker in plugin_text for marker in (
+            'function unwrapPersistedSandboxCommand(command, directory)',
+            '"experimental.chat.messages.transform": async (_input, output) => {',
+            'sanitizeSandboxHistoryForModel(output?.messages, directory);',
+        ))
+        if not (legacy_history_fix or transform_history_fix):
+            return False,"wrapper-history-recovery-current-plugin-unfixed"
+        reason=(
+            "sandbox-wrapper-history-poison "
+            f"persisted={evidence.get('persisted_wrapper_calls',0)} "
+            f"manual={evidence.get('manual_wrapper_calls',0)} "
+            f"failed={evidence.get('manual_wrapper_failures',0)} "
+            "maximum_steps_reached"
+        )
+    else:
+        if not trusted_verify_wrapper_contamination_fix_installed():
+            return False,"wrapper-history-recovery-current-trusted-verify-fix-unavailable"
+        reason=(
+            "trusted-verify-wrapper-contamination "
+            f"calls={evidence.get('trusted_verify_wrapper_calls',0)} "
+            f"shadow_failures={evidence.get('verify_shadow_required_file_failures',0)} "
+            f"reflection_denials={evidence.get('trusted_verify_wrapper_reflection_denials',0)} "
+            "maximum_steps_reached"
+        )
     with dispatch_lock:
         with attempt_lock():
             data=load_attempts()
@@ -3742,12 +4822,20 @@ def recover_sandbox_wrapper_history_poison(did):
             entry["infrastructure_retry_grants"]=grants+1
             entry.setdefault("sandbox_wrapper_history_recoveries",[]).append({
                 "protocol":SANDBOX_WRAPPER_HISTORY_RECOVERY_PROTOCOL,
+                "mode":mode,
                 "attempt":count,
                 "session":sid,
-                "persisted_wrapper_calls":int(evidence["persisted_wrapper_calls"]),
-                "manual_wrapper_calls":int(evidence["manual_wrapper_calls"]),
-                "manual_wrapper_failures":int(evidence["manual_wrapper_failures"]),
-                "completed_tool_turns":int(evidence["completed_tool_turns"]),
+                "persisted_wrapper_calls":int(evidence.get("persisted_wrapper_calls") or 0),
+                "manual_wrapper_calls":int(evidence.get("manual_wrapper_calls") or 0),
+                "manual_wrapper_failures":int(evidence.get("manual_wrapper_failures") or 0),
+                "trusted_verify_wrapper_calls":int(evidence.get("trusted_verify_wrapper_calls") or 0),
+                "verify_shadow_required_file_failures":int(
+                    evidence.get("verify_shadow_required_file_failures") or 0
+                ),
+                "trusted_verify_wrapper_reflection_denials":int(
+                    evidence.get("trusted_verify_wrapper_reflection_denials") or 0
+                ),
+                "completed_tool_turns":int(evidence.get("completed_tool_turns") or 0),
                 "verify_result":"verify-failed-1",
                 "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
             })
@@ -3762,17 +4850,1809 @@ def recover_sandbox_wrapper_history_poison(did):
 
     log(
         f"SANDBOX_WRAPPER_HISTORY_RECOVERY deliverable={did} attempt={count} "
-        f"session={sid} persisted={evidence['persisted_wrapper_calls']} "
-        f"manual={evidence['manual_wrapper_calls']} "
-        f"failed={evidence['manual_wrapper_failures']}"
+        f"session={sid} mode={mode} "
+        f"persisted={evidence.get('persisted_wrapper_calls',0)} "
+        f"manual={evidence.get('manual_wrapper_calls',0)} "
+        f"failed={evidence.get('manual_wrapper_failures',0)} "
+        f"trusted_calls={evidence.get('trusted_verify_wrapper_calls',0)} "
+        f"shadow_failures={evidence.get('verify_shadow_required_file_failures',0)} "
+        f"reflection_denials={evidence.get('trusted_verify_wrapper_reflection_denials',0)}"
     )
     csv(
         "SANDBOX_WRAPPER_HISTORY_RECOVERY",sid,"supervisor",
-        f"{did} attempt={count} persisted={evidence['persisted_wrapper_calls']} "
-        f"manual={evidence['manual_wrapper_calls']} "
-        f"failed={evidence['manual_wrapper_failures']}",
+        f"{did} attempt={count} mode={mode} "
+        f"persisted={evidence.get('persisted_wrapper_calls',0)} "
+        f"manual={evidence.get('manual_wrapper_calls',0)} "
+        f"failed={evidence.get('manual_wrapper_failures',0)} "
+        f"trusted_calls={evidence.get('trusted_verify_wrapper_calls',0)} "
+        f"shadow_failures={evidence.get('verify_shadow_required_file_failures',0)} "
+        f"reflection_denials={evidence.get('trusted_verify_wrapper_reflection_denials',0)}",
     )
     return True,"recovered"
+
+
+EXACT_VERIFY_SHELL_SEMANTICS_RECOVERY_PROTOCOL=(
+    "v2-exact-verify-shell-semantics-recovery-v1"
+)
+
+
+def exact_verify_shell_semantics_fix_installed():
+    try:
+        sandbox=(ROOT/"scripts/worker_sandbox.py").read_text(errors="replace")
+        source=Path(__file__).read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        '"/bin/bash","-lc",command' in sandbox
+        and "Exact-Verify shell semantics regression" in sandbox
+        and "plan_contract_reverify_pending" in source
+        and "implementation plan-contract exact-verify recheck" in source
+    )
+
+
+def recover_exact_verify_shell_semantics_failure(did):
+    """Refund one plan-reverify attempt lost because supervisor injected errexit."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"exact-verify-shell-recovery-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return False,"exact-verify-shell-recovery-verify-missing"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"exact-verify-shell-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"exact-verify-shell-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"exact-verify-shell-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("exact_verify_shell_semantics_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"exact-verify-shell-recovery-history-invalid"
+            if any(
+                isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+                for row in prior
+            ):
+                return True,"already-recovered"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-143"
+            ):
+                return False,"exact-verify-shell-recovery-terminal-failure-mismatch"
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"exact-verify-shell-recovery-infrastructure-limit"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"exact-verify-shell-recovery-session-still-active"
+
+    if not plan_contract_reverify_pending(did,leaf):
+        return False,"exact-verify-shell-recovery-not-plan-reverify"
+    worker_exact=[
+        item for item in persisted_model_bash_commands(
+            sid,_session_agent_db(sid)
+        )
+        if (
+            item.get("command")==canonical
+            and item.get("status")=="completed"
+            and int(item.get("exit_code") if item.get("exit_code") is not None else -1)==0
+        )
+    ]
+
+    verify_evidence=load_supervisor_verify_evidence(did)
+    recurrence_proof={}
+    if not worker_exact:
+        evidence_entries=(
+            verify_evidence.get("entries") or []
+            if isinstance(verify_evidence,dict) else []
+        )
+        prior_rows=entry.get("exact_verify_shell_semantics_recoveries") or []
+        for recovery in reversed(prior_rows):
+            if not isinstance(recovery,dict):
+                continue
+            try:
+                prior_attempt=int(recovery.get("attempt") or 0)
+            except (TypeError,ValueError):
+                continue
+            prior_sid=str(recovery.get("session") or "")
+            if not (
+                recovery.get("protocol")==EXACT_VERIFY_SHELL_SEMANTICS_RECOVERY_PROTOCOL
+                and 0<prior_attempt<count
+                and prior_sid
+                and int(recovery.get("supervisor_exit_code") or -1)==143
+                and recovery.get("owned_state_restored") is True
+            ):
+                continue
+            prior_verify=next((
+                row for row in evidence_entries
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==prior_attempt
+                and row.get("session")==prior_sid
+                and row.get("executed") is True
+                and row.get("result")=="verify-failed-143"
+                and int(row.get("exit_code") or -1)==143
+                and str(row.get("command") or "")==canonical
+            ),None)
+            if prior_verify is None:
+                continue
+            prior_worker=[
+                item for item in persisted_model_bash_commands(
+                    prior_sid,_session_agent_db(prior_sid)
+                )
+                if (
+                    item.get("command")==canonical
+                    and item.get("status")=="completed"
+                    and int(
+                        item.get("exit_code")
+                        if item.get("exit_code") is not None else -1
+                    )==0
+                )
+            ]
+            if not prior_worker:
+                continue
+            recurrence_proof={
+                "attempt":prior_attempt,
+                "session":prior_sid,
+                "worker_exact_completed":len(prior_worker),
+            }
+            break
+        if not recurrence_proof:
+            return False,"exact-verify-shell-recovery-worker-exact-pass-missing"
+
+    verify=verify_evidence.get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")=="verify-failed-143"
+        and int(verify.get("exit_code") or -1)==143
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"exact-verify-shell-recovery-supervisor-evidence-mismatch"
+
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if changed or delta!="unchanged":
+        return False,"exact-verify-shell-recovery-owned-state-not-restored"
+    if not exact_verify_shell_semantics_fix_installed():
+        return False,"exact-verify-shell-recovery-current-code-unfixed"
+
+    proof_detail=(
+        f"worker_exact_completed={len(worker_exact)}"
+        if worker_exact else
+        "recurrence_prior_attempt="
+        f"{recurrence_proof.get('attempt')} "
+        "prior_worker_exact_completed="
+        f"{recurrence_proof.get('worker_exact_completed')}"
+    )
+    reason=(
+        "exact-verify-shell-semantics "
+        f"{proof_detail} supervisor_exit=143"
+    )
+    clear_split=False
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"exact-verify-shell-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"exact-verify-shell-recovery-ledger-changed"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-143"
+            ):
+                return False,"exact-verify-shell-recovery-failure-changed"
+            state=attempt_state(entry)
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"exact-verify-shell-recovery-infrastructure-limit"
+
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]="verify-failed-143"
+            failure["classification"]="infrastructure"
+            failure["reason"]=reason
+            failure["reclassified_by"]="runtime-exact-verify-shell-semantics-repair"
+            entry.setdefault("infrastructure_failures",[]).append({
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "grant":1,
+                "source":"supervisor",
+                "kind":"verification-environment",
+                "session":sid,
+                "evidence":"durable-partial-state-preserved",
+                "reason":reason,
+            })
+            entry["infrastructure_retry_grants"]=grants+1
+            recovery_row={
+                "protocol":EXACT_VERIFY_SHELL_SEMANTICS_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "worker_exact_completed":len(worker_exact),
+                "supervisor_exit_code":143,
+                "owned_state_restored":True,
+                "source":"supervisor-exact-verify-shell-semantics-repair",
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            }
+            if recurrence_proof:
+                recovery_row["recurrence_prior_attempt"]=recurrence_proof["attempt"]
+                recovery_row["recurrence_prior_session"]=recurrence_proof["session"]
+                recovery_row["prior_worker_exact_completed"]=(
+                    recurrence_proof["worker_exact_completed"]
+                )
+            entry.setdefault(
+                "exact_verify_shell_semantics_recoveries",[]
+            ).append(recovery_row)
+            effective=sum(
+                1 for row in (entry.get("failure_history") or [])
+                if failure_counts_as_genuine(row)
+            )
+            if effective<2:
+                entry.pop("split_required",None)
+                clear_split=True
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(projected.get("infrastructure_retry_grants") or 0)!=grants+1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"exact-verify-shell-recovery-projected-ledger-invalid"
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    log(
+        f"EXACT_VERIFY_SHELL_SEMANTICS_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} {proof_detail.replace('_completed','')} "
+        "supervisor_exit=143"
+    )
+    csv(
+        "EXACT_VERIFY_SHELL_SEMANTICS_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} {proof_detail} supervisor_exit=143",
+    )
+    return True,"recovered"
+
+
+PLAN_CONTRACT_REVERIFY_STEERING_RECOVERY_PROTOCOL=(
+    "v2-plan-contract-reverify-steering-recovery-v1"
+)
+PLAN_CONTRACT_AUTHORITATIVE_READ_RECOVERY_PROTOCOL=(
+    "v2-plan-contract-authoritative-read-recovery-v1"
+)
+PLAN_CONTRACT_WRITE_SERIALIZATION_RECOVERY_PROTOCOL=(
+    "v2-plan-contract-write-serialization-recovery-v1"
+)
+
+
+def plan_contract_reverify_steering_fix_installed():
+    try:
+        source=Path(__file__).read_text(errors="replace")
+        plugin=(
+            ROOT/"xdg/config/opencode/plugins/v2-bounded-subagent.js"
+        ).read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        "PLAN-CONTRACT REVERIFY ORDER — EXACT" in source
+        and "implementation-exact-verify-required" in source
+        and "PLAN_CONTRACT_EXACT_VERIFY_REQUIRED" in source
+        and "implementation-return-required" in source
+        and "EXACT_VERIFY_REQUIRED|RETURN_REQUIRED" in plugin
+    )
+
+
+def plan_contract_reverify_steering_evidence(sid,did):
+    """Prove the old contradictory reverify/write steering from persisted tools."""
+    result={
+        "write_required_denials":0,
+        "forced_owned_mutations":0,
+        "exact_verify_attempts":0,
+        "model_followed_write_steering":False,
+    }
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict):
+        return result
+    canonical=str(leaf.get("verify_command") or "")
+    agent=_session_agent_db(sid)
+    result["exact_verify_attempts"]=sum(
+        1 for row in persisted_model_bash_commands(sid,agent)
+        if row.get("command")==canonical
+    )
+    denied=False
+    for record in session_completed_tool_records(sid):
+        tool=str(record.get("tool") or "")
+        args=record.get("input") if isinstance(record.get("input"),dict) else {}
+        error=str(record.get("error") or "")
+        if (
+            "IMPLEMENTATION_WRITE_REQUIRED" in error
+            and "next_tool=direct-owned-artifact-write" in error
+        ):
+            result["write_required_denials"]+=1
+            denied=True
+            continue
+        if (
+            denied
+            and record.get("status")=="completed"
+            and _current_tool_directly_mutates_owned_artifact(
+                did,tool,args
+            )
+        ):
+            result["forced_owned_mutations"]+=1
+    last=(last_assistant_text_db(sid) or "").lower()
+    result["model_followed_write_steering"]=bool(
+        "early-write gate fired" in last
+        and "write owned artifacts first" in last
+    )
+    return result
+
+
+def recover_plan_contract_reverify_steering_failure(did):
+    """Refund one replacement attempt forced to mutate by contradictory gate text."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"plan-reverify-steering-recovery-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return False,"plan-reverify-steering-recovery-verify-missing"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"plan-reverify-steering-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"plan-reverify-steering-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"plan-reverify-steering-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("plan_contract_reverify_steering_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"plan-reverify-steering-recovery-history-invalid"
+            if any(
+                isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+                for row in prior
+            ):
+                return True,"already-recovered"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-143"
+            ):
+                return False,"plan-reverify-steering-recovery-terminal-failure-mismatch"
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"plan-reverify-steering-recovery-infrastructure-limit"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"plan-reverify-steering-recovery-session-still-active"
+    if not plan_contract_reverify_pending(did,leaf):
+        return False,"plan-reverify-steering-recovery-not-plan-reverify"
+
+    evidence=plan_contract_reverify_steering_evidence(sid,did)
+    if int(evidence.get("exact_verify_attempts") or 0)!=0:
+        return False,"plan-reverify-steering-recovery-exact-verify-was-attempted"
+    if int(evidence.get("write_required_denials") or 0)<1:
+        return False,"plan-reverify-steering-recovery-write-steering-missing"
+    if int(evidence.get("forced_owned_mutations") or 0)<1:
+        return False,"plan-reverify-steering-recovery-forced-mutation-missing"
+    if not evidence.get("model_followed_write_steering"):
+        return False,"plan-reverify-steering-recovery-model-evidence-missing"
+
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")=="verify-failed-143"
+        and int(verify.get("exit_code") or -1)==143
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"plan-reverify-steering-recovery-supervisor-evidence-mismatch"
+
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if changed or delta!="unchanged":
+        return False,"plan-reverify-steering-recovery-owned-state-not-restored"
+    if not plan_contract_reverify_steering_fix_installed():
+        return False,"plan-reverify-steering-recovery-current-code-unfixed"
+
+    reason=(
+        "plan-contract-reverify-steering "
+        f"write_required_denials={evidence['write_required_denials']} "
+        f"forced_owned_mutations={evidence['forced_owned_mutations']} "
+        "operator-aborted-after-forced-mutation"
+    )
+    clear_split=False
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"plan-reverify-steering-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"plan-reverify-steering-recovery-ledger-changed"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="verify-failed-143"
+            ):
+                return False,"plan-reverify-steering-recovery-failure-changed"
+            state=attempt_state(entry)
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"plan-reverify-steering-recovery-infrastructure-limit"
+
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]="verify-failed-143"
+            failure["classification"]="infrastructure"
+            failure["reason"]=reason
+            failure["reclassified_by"]="runtime-plan-reverify-steering-repair"
+            entry.setdefault("infrastructure_failures",[]).append({
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "grant":1,
+                "source":"supervisor",
+                "kind":"runtime-cancel",
+                "session":sid,
+                "evidence":"durable-partial-state-preserved",
+                "reason":reason,
+            })
+            entry["infrastructure_retry_grants"]=grants+1
+            entry.setdefault("plan_contract_reverify_steering_recoveries",[]).append({
+                "protocol":PLAN_CONTRACT_REVERIFY_STEERING_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "write_required_denials":int(
+                    evidence["write_required_denials"]
+                ),
+                "forced_owned_mutations":int(
+                    evidence["forced_owned_mutations"]
+                ),
+                "exact_verify_attempts":0,
+                "owned_state_restored":True,
+                "source":"supervisor-plan-reverify-steering-repair",
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            })
+            effective=sum(
+                1 for row in (entry.get("failure_history") or [])
+                if failure_counts_as_genuine(row)
+            )
+            if effective<2:
+                entry.pop("split_required",None)
+                clear_split=True
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(projected.get("infrastructure_retry_grants") or 0)!=grants+1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"plan-reverify-steering-recovery-projected-ledger-invalid"
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    log(
+        f"PLAN_CONTRACT_REVERIFY_STEERING_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} "
+        f"denials={evidence['write_required_denials']} "
+        f"forced_mutations={evidence['forced_owned_mutations']}"
+    )
+    csv(
+        "PLAN_CONTRACT_REVERIFY_STEERING_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} denials={evidence['write_required_denials']} "
+        f"forced_mutations={evidence['forced_owned_mutations']}",
+    )
+    return True,"recovered"
+
+
+def plan_contract_authoritative_read_fix_installed():
+    try:
+        source=Path(__file__).read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        "implementation_repair_authoritative_read_targets" in source
+        and "PLAN_CONTRACT_REPAIR_SOURCE_READ" in source
+        and "implementation-authoritative-read-once" in source
+        and "authoritative_sources at most once" in source
+    )
+
+
+def plan_contract_small_write_fix_installed():
+    try:
+        source=Path(__file__).read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        "SMALL targeted write/edit calls" in source
+        and "do not replace an existing nontrivial file in one large write" in source
+    )
+
+
+def plan_contract_authoritative_read_gate_evidence(sid,did):
+    """Prove bounded reverify-source or write-serialization failure evidence."""
+    result={
+        "exact_verify_state":"not-attempted",
+        "authorized_sources":[],
+        "completed_authoritative_reads":[],
+        "denied_authoritative_reads":[],
+        "invalid_write_attempts":0,
+        "write_required_denials":0,
+    }
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict):
+        return result
+    result["exact_verify_state"]=plan_contract_session_exact_verify_state(
+        sid,leaf
+    )
+    authorized=implementation_repair_authoritative_read_targets(did)
+    result["authorized_sources"]=list(authorized)
+    completed=[]
+    denied=[]
+    invalid_writes=0
+    write_required_denials=0
+    for record in session_completed_tool_records(sid):
+        tool=str(record.get("tool") or "")
+        status=str(record.get("status") or "").lower()
+        args=record.get("input") if isinstance(record.get("input"),dict) else {}
+        error=str(record.get("error") or "")
+        if tool=="read":
+            for target in authorized:
+                if not _tool_targets_exact_project_path("read",args,target):
+                    continue
+                if status=="completed":
+                    completed.append(target)
+                if "IMPLEMENTATION_WRITE_REQUIRED" in error:
+                    denied.append(target)
+                break
+        if "IMPLEMENTATION_WRITE_REQUIRED" in error:
+            write_required_denials+=1
+        invalid_detail=str(args.get("error") or "") if tool=="invalid" else ""
+        if (
+            tool=="invalid"
+            and "Invalid input for tool write" in invalid_detail
+            and "JSON parsing failed" in invalid_detail
+        ):
+            invalid_writes+=1
+    result["completed_authoritative_reads"]=list(dict.fromkeys(completed))
+    result["denied_authoritative_reads"]=list(dict.fromkeys(denied))
+    result["invalid_write_attempts"]=invalid_writes
+    result["write_required_denials"]=write_required_denials
+    return result
+
+
+def recover_plan_contract_authoritative_read_gate_failure(did):
+    """Rearm one operator-funded attempt blocked by the old post-Verify read gate."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"authoritative-read-recovery-requires-executable-leaf"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"authoritative-read-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"authoritative-read-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"authoritative-read-recovery-session-mismatch"
+            sid=sessions[-1]
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="owned-artifacts-missing"
+                and failures[0].get("session")==sid
+            ):
+                return False,"authoritative-read-recovery-terminal-failure-mismatch"
+            operator_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(operator_rows)!=1 or not (
+                operator_rows[0].get("state")=="consumed"
+                and operator_rows[0].get("outcome")=="meaningful_execution"
+                and operator_rows[0].get("consumes_operator_grant") is True
+                and operator_rows[0].get("source")=="supervisor"
+            ):
+                return False,"authoritative-read-recovery-operator-record-mismatch"
+            prior=entry.get("plan_contract_authoritative_read_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"authoritative-read-recovery-history-invalid"
+            if any(
+                isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+                for row in prior
+            ):
+                return True,"already-recovered"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(
+        status.get("type") or status.get("status") or ""
+    ).lower()=="busy":
+        return False,"authoritative-read-recovery-session-still-active"
+    if not plan_contract_reverify_pending(did,leaf):
+        return False,"authoritative-read-recovery-not-plan-reverify"
+
+    evidence=plan_contract_authoritative_read_gate_evidence(sid,did)
+    if evidence.get("exact_verify_state")!="failed":
+        return False,"authoritative-read-recovery-exact-verify-not-failed"
+    authorized=list(evidence.get("authorized_sources") or [])
+    completed=list(evidence.get("completed_authoritative_reads") or [])
+    denied=list(evidence.get("denied_authoritative_reads") or [])
+    invalid_writes=int(evidence.get("invalid_write_attempts") or 0)
+    write_denials=int(evidence.get("write_required_denials") or 0)
+    write_serialization=(
+        not denied
+        and invalid_writes==1
+        and write_denials>=1
+        and set(authorized).issubset(set(completed))
+    )
+    if not denied and not write_serialization:
+        return False,"authoritative-read-recovery-denied-source-proof-missing"
+    if write_serialization and any(
+        isinstance(row,dict)
+        and int(row.get("attempt") or 0)==count
+        and row.get("recovery_kind")=="write-serialization"
+        for row in prior
+    ):
+        return False,"authoritative-read-recovery-write-serialization-limit"
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if changed or delta!="unchanged":
+        return False,"authoritative-read-recovery-owned-state-changed"
+    if denied and not plan_contract_authoritative_read_fix_installed():
+        return False,"authoritative-read-recovery-current-code-unfixed"
+    if write_serialization and not plan_contract_small_write_fix_installed():
+        return False,"authoritative-read-recovery-small-write-fix-missing"
+
+    recovery_protocol=(
+        PLAN_CONTRACT_WRITE_SERIALIZATION_RECOVERY_PROTOCOL
+        if write_serialization
+        else PLAN_CONTRACT_AUTHORITATIVE_READ_RECOVERY_PROTOCOL
+    )
+    recovery_kind=(
+        "write-serialization"
+        if write_serialization
+        else "authoritative-read-denial"
+    )
+    recovery_source=(
+        "supervisor-plan-reverify-write-serialization-repair"
+        if write_serialization
+        else "supervisor-plan-reverify-authoritative-read-repair"
+    )
+    recovery_event=(
+        "PLAN_CONTRACT_WRITE_SERIALIZATION_RECOVERY"
+        if write_serialization
+        else "PLAN_CONTRACT_AUTHORITATIVE_READ_RECOVERY"
+    )
+    marker_id=hashlib.sha256(
+        f"{recovery_protocol}\0"
+        f"{did}\0{count}\0{sid}".encode()
+    ).hexdigest()[:20]
+    placeholder=(
+        (
+            "dispatch:plan-reverify-write-serialization-recovery:"
+            if write_serialization
+            else "dispatch:plan-reverify-authoritative-read-recovery:"
+        )
+        + f"{marker_id}:{did}"
+    )
+    now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    clear_split=False
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"authoritative-read-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"authoritative-read-recovery-ledger-changed"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            operator_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1 or len(operator_rows)!=1:
+                return False,"authoritative-read-recovery-records-changed"
+            failure=failures[0]
+            op=operator_rows[0]
+            if not (
+                failure.get("classification")=="genuine"
+                and failure.get("reason")=="owned-artifacts-missing"
+                and op.get("state")=="consumed"
+                and op.get("outcome")=="meaningful_execution"
+                and op.get("consumes_operator_grant") is True
+            ):
+                return False,"authoritative-read-recovery-state-changed"
+
+            original_failure=dict(failure)
+            original_operator=dict(op)
+            entry["failure_history"]=[
+                row for row in (entry.get("failure_history") or [])
+                if row is not failure
+            ]
+            entry["sessions"][-1]=placeholder
+            op["session"]=placeholder
+            op["state"]="reserved"
+            op["consumes_operator_grant"]=False
+            op["rearmed_by"]=recovery_protocol
+            op["rearmed_at"]=now
+            for key in ("outcome","evidence","consumed_at","resolved_at"):
+                op.pop(key,None)
+            entry.setdefault(
+                "plan_contract_authoritative_read_recoveries",[]
+            ).append({
+                "protocol":recovery_protocol,
+                "recovery_kind":recovery_kind,
+                "attempt":count,
+                "session":sid,
+                "replacement":placeholder,
+                "original_failure_record":original_failure,
+                "original_operator_record":original_operator,
+                "authorized_sources":authorized,
+                "completed_authoritative_reads":completed,
+                "denied_authoritative_reads":denied,
+                "invalid_write_attempts":invalid_writes,
+                "write_required_denials":write_denials,
+                "exact_verify_state":"failed",
+                "owned_state":"unchanged",
+                "source":recovery_source,
+                "timestamp":now,
+            })
+            entry["unmaterialized_dispatch_sequence"]=count
+            entry["unmaterialized_dispatch_replays"]=0
+            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+                "sequence":count,
+                "replaced":sid,
+                "replacement":placeholder,
+                "source":recovery_source,
+                "timestamp":now,
+            })
+            if entry.pop("split_required",None) is not None:
+                clear_split=True
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"authoritative-read-recovery-projected-ledger-invalid"
+            if not projected.get("unmaterialized_dispatch_reusable"):
+                return False,"authoritative-read-recovery-not-reusable"
+            if int(projected.get("count") or 0)!=count:
+                return False,"authoritative-read-recovery-count-changed"
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    detail=(
+        f"kind={recovery_kind} denied={','.join(denied)} "
+        f"completed={','.join(completed)} invalid_writes={invalid_writes} "
+        f"write_denials={write_denials}"
+    )
+    log(
+        f"{recovery_event} deliverable={did} attempt={count} session={sid} "
+        f"{detail} placeholder={placeholder}"
+    )
+    csv(
+        recovery_event,sid,"supervisor",
+        f"{did} attempt={count} {detail} placeholder={placeholder}",
+    )
+    return True,"rearmed-same-attempt"
+
+
+SILENT_NONZERO_FEEDBACK_RECOVERY_PROTOCOL=(
+    "v2-silent-nonzero-worker-feedback-recovery-v1"
+)
+
+
+def silent_nonzero_feedback_fix_installed():
+    try:
+        text=(ROOT/"scripts/worker_sandbox.py").read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        "V2_WORKER_COMMAND_EXIT=" in text
+        and "report_worker_command_exit" in text
+    )
+
+
+def recover_silent_nonzero_worker_feedback(did):
+    """Rearm one pre-fix attempt where silent nonzero Verify looked successful."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"silent-nonzero-recovery-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return False,"silent-nonzero-recovery-missing-verify"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"silent-nonzero-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"silent-nonzero-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"silent-nonzero-recovery-session-mismatch"
+            sid=sessions[-1]
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1:
+                return False,"silent-nonzero-recovery-failure-record-mismatch"
+            failure=failures[0]
+            failure_match=re.fullmatch(
+                r"verify-failed-([1-9]\d*)",
+                str(failure.get("reason") or ""),
+            )
+            if not (
+                failure.get("classification")=="genuine"
+                and failure_match
+            ):
+                return False,"silent-nonzero-recovery-terminal-state-mismatch"
+            verify_exit=int(failure_match.group(1))
+            prior=entry.get("silent_nonzero_feedback_recoveries") or []
+            if not isinstance(prior,list):
+                return False,"silent-nonzero-recovery-history-invalid"
+            if any(
+                isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+                for row in prior
+            ):
+                return True,"already-recovered"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(
+        status.get("type") or status.get("status") or ""
+    ).lower()=="busy":
+        return False,"silent-nonzero-recovery-session-still-active"
+    if _session_agent_db(sid) not in IMPLEMENTATION_AGENTS:
+        return False,"silent-nonzero-recovery-agent-invalid"
+    if session_owned_mutation_seen(sid,did):
+        return False,"silent-nonzero-recovery-owned-mutation-present"
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if changed or delta!="unchanged":
+        return False,"silent-nonzero-recovery-owned-state-changed"
+    project=Path(PROJECT)
+    if worker_sandbox_has_fatal_violation(project,did,sid):
+        return False,"silent-nonzero-recovery-fatal-sandbox-violation"
+    violations=ownership_violations(did,sid)
+    if violations:
+        return False,"silent-nonzero-recovery-ownership-violation:"+",".join(violations[:4])
+
+    exact=[
+        item for item in persisted_model_bash_commands(
+            sid,_session_agent_db(sid)
+        )
+        if (
+            item.get("command")==canonical
+            and item.get("status")=="completed"
+            and int(
+                item.get("exit_code")
+                if item.get("exit_code") is not None else -1
+            )==verify_exit
+        )
+    ]
+    if len(exact)!=1:
+        return False,"silent-nonzero-recovery-exact-verify-proof-mismatch"
+    visible=(str(exact[0].get("output") or "")+"\n"+
+             str(exact[0].get("error") or ""))
+    if "V2_WORKER_COMMAND_EXIT=" in visible:
+        return False,"silent-nonzero-recovery-exit-marker-was-visible"
+
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")==f"verify-failed-{verify_exit}"
+        and int(verify.get("exit_code") or -1)==verify_exit
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"silent-nonzero-recovery-supervisor-evidence-mismatch"
+
+    terminal=last_assistant_text_db(sid) or ""
+    if not (
+        re.search(r"exact Verify passed",terminal,re.IGNORECASE)
+        and re.search(r"exit(?:\s+code)?\s*0",terminal,re.IGNORECASE)
+    ):
+        return False,"silent-nonzero-recovery-false-success-claim-missing"
+    if not silent_nonzero_feedback_fix_installed():
+        return False,"silent-nonzero-recovery-current-code-unfixed"
+
+    marker_id=hashlib.sha256(
+        f"{SILENT_NONZERO_FEEDBACK_RECOVERY_PROTOCOL}\0"
+        f"{did}\0{count}\0{sid}".encode()
+    ).hexdigest()[:20]
+    placeholder=f"dispatch:silent-nonzero-recovery:{marker_id}:{did}"
+    now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    clear_split=False
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"silent-nonzero-recovery-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"silent-nonzero-recovery-ledger-changed"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1:
+                return False,"silent-nonzero-recovery-failure-record-changed"
+            original_failure=dict(failures[0])
+            entry["failure_history"]=[
+                row for row in (entry.get("failure_history") or [])
+                if row is not failures[0]
+            ]
+            entry["sessions"][-1]=placeholder
+            entry.setdefault("silent_nonzero_feedback_recoveries",[]).append({
+                "protocol":SILENT_NONZERO_FEEDBACK_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "replacement":placeholder,
+                "original_failure_record":original_failure,
+                "verify_exit_code":verify_exit,
+                "model_false_success_claim":True,
+                "owned_state":"unchanged",
+                "source":"supervisor-silent-nonzero-feedback-repair",
+                "timestamp":now,
+            })
+            entry["unmaterialized_dispatch_sequence"]=count
+            entry["unmaterialized_dispatch_replays"]=0
+            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+                "sequence":count,
+                "replaced":sid,
+                "replacement":placeholder,
+                "source":"supervisor-silent-nonzero-feedback-repair",
+                "timestamp":now,
+            })
+            if entry.pop("split_required",None) is not None:
+                clear_split=True
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"silent-nonzero-recovery-projected-ledger-invalid"
+            if not projected.get("unmaterialized_dispatch_reusable"):
+                return False,"silent-nonzero-recovery-not-reusable"
+            if int(projected.get("count") or 0)!=count:
+                return False,"silent-nonzero-recovery-count-changed"
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    log(
+        f"SILENT_NONZERO_FEEDBACK_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid} exit={verify_exit} "
+        f"placeholder={placeholder}"
+    )
+    csv(
+        "SILENT_NONZERO_FEEDBACK_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count} exit={verify_exit} placeholder={placeholder}",
+    )
+    return True,"rearmed-same-attempt"
+
+
+IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL=(
+    "v2-implementation-max-step-continuation-v1"
+)
+
+
+def verify_evidence_failure_diagnostic(item,limit=1500):
+    """Extract one bounded machine-readable failure summary from Verify evidence."""
+    if not isinstance(item,dict):
+        return ""
+    parts=[]
+    stdout=str(item.get("stdout") or "")
+    if stdout:
+        try:
+            report=json.loads(stdout)
+        except json.JSONDecodeError:
+            report=None
+        if isinstance(report,dict) and report.get("protocol")=="v2-test-report-v1":
+            for check in report.get("checks") or []:
+                if not isinstance(check,dict):
+                    continue
+                try:
+                    exit_code=int(check.get("exit_code") or 0)
+                except (TypeError,ValueError):
+                    exit_code=0
+                if exit_code==0 and not check.get("timed_out"):
+                    continue
+                detail=check.get("diagnostic")
+                messages=[]
+                if isinstance(detail,dict):
+                    for key in ("stderr","stdout"):
+                        text=str(detail.get(key) or "").strip()
+                        if text:
+                            messages.append(f"{key}={text}")
+                name=str(check.get("name") or "unnamed-check")
+                suffix="; ".join(messages) or f"exit_code={exit_code}"
+                parts.append(f"{name}: {suffix}")
+    if not parts:
+        stderr=str(item.get("stderr") or "").strip()
+        if stderr:
+            parts.append(stderr)
+    text=" | ".join(parts).replace("\x00","").strip()
+    if len(text)>int(limit):
+        text=text[:max(0,int(limit)-3)]+"..."
+    return text
+
+
+def trusted_verify_reverify_visibility_evidence(sid,did,canonical):
+    """Prove trusted exact Verify ran before stale reverify steering denials."""
+    if not sid or not did or not canonical:
+        return {}
+    agent=_session_agent_db(sid)
+    if agent not in IMPLEMENTATION_AGENTS:
+        return {}
+    common=[
+        "--project",str(Path(PROJECT).resolve()),
+        "--session",sid,"--agent",agent,"--command-b64",
+    ]
+    wrapper=str((ROOT/"scripts"/"worker_sandbox.py").resolve())
+    prefixes=[
+        ["python3",wrapper,"run-worker-verify",*common],
+    ]
+    seen_failed_exact=False
+    exact_failures=0
+    post_verify_denials=0
+    post_verify_owned_edit_denials=0
+    post_verify_owned_edits=0
+    post_latest_verify_owned_edits=0
+    try:
+        records=_v1_message_records(sid)
+    except Exception:
+        records=[]
+    for record in records:
+        if record.get("data",{}).get("role")!="assistant":
+            continue
+        for part in _v1_message_parts(record["id"]):
+            if part.get("type")!="tool":
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            raw=state.get("input")
+            if isinstance(raw,dict):
+                args=raw
+            elif isinstance(raw,str):
+                try:
+                    args=json.loads(raw)
+                except Exception:
+                    args={}
+            else:
+                args={}
+            command=args.get("command") if isinstance(args,dict) else None
+            if (
+                part.get("tool") in {"bash","shell"}
+                and isinstance(command,str)
+                and command
+            ):
+                try:
+                    pieces=shlex.split(command,posix=True)
+                except ValueError:
+                    pieces=[]
+                matched=any(
+                    len(pieces)==len(prefix)+1 and pieces[:-1]==prefix
+                    for prefix in prefixes
+                )
+                if matched:
+                    try:
+                        decoded=base64.b64decode(
+                            pieces[-1],validate=True
+                        ).decode("utf-8")
+                    except Exception:
+                        decoded=""
+                    metadata=(
+                        state.get("metadata")
+                        if isinstance(state.get("metadata"),dict)
+                        else {}
+                    )
+                    try:
+                        exit_code=int(metadata.get("exit"))
+                    except (TypeError,ValueError):
+                        exit_code=None
+                    if (
+                        decoded.strip()==canonical.strip()
+                        and state.get("status")=="completed"
+                        and isinstance(exit_code,int)
+                        and exit_code!=0
+                    ):
+                        exact_failures+=1
+                        seen_failed_exact=True
+                        post_latest_verify_owned_edits=0
+                        continue
+            if not seen_failed_exact:
+                continue
+            if (
+                str(state.get("status") or "").lower()=="completed"
+                and part.get("tool") in {
+                    "write","edit","apply_patch","patch","multiedit"
+                }
+                and _current_tool_directly_mutates_owned_artifact(
+                    did,str(part.get("tool") or ""),args
+                )
+            ):
+                post_verify_owned_edits+=1
+                post_latest_verify_owned_edits+=1
+            combined=(
+                str(state.get("output") or "")+" "+
+                str(state.get("error") or "")
+            )
+            if "PLAN_CONTRACT_EXACT_VERIFY_REQUIRED" not in combined:
+                continue
+            post_verify_denials+=1
+            if part.get("tool") in {
+                "write","edit","apply_patch","patch","multiedit"
+            }:
+                post_verify_owned_edit_denials+=1
+    return {
+        "agent":agent,
+        "trusted_exact_verify_failures":exact_failures,
+        "post_verify_exact_required_denials":post_verify_denials,
+        "post_verify_owned_edit_denials":post_verify_owned_edit_denials,
+        "post_verify_owned_edits":post_verify_owned_edits,
+        "post_latest_verify_owned_edits":post_latest_verify_owned_edits,
+        "current_classifier_state":plan_contract_session_exact_verify_state(
+            sid,(load_manifest().get("leaves") or {}).get(did,{})
+        ),
+        "owned_mutation_seen":session_owned_mutation_seen(sid,did),
+        "maximum_steps_reached":bool(max_step_terminal_summary_db(sid)),
+    }
+
+
+def reverify_single_write_cadence_fix_installed():
+    try:
+        source=Path(__file__).read_text(errors="replace")
+    except OSError:
+        return False
+    return (
+        "one_repair_per_verify_cycle=true" in source
+        and "Rerun exact Verify immediately before any additional owned mutation."
+        in source
+    )
+
+
+def recover_implementation_max_step_continuation(did,diagnostic=""):
+    """Rearm a bounded same-attempt continuation stopped by the agent step cap.
+
+    This never adds a retry grant or increments the attempt. A normal attempt
+    gets at most one continuation. Additional same-attempt continuations are
+    permitted only for bounded compatibility defects proven from persisted
+    history: historical missing handoff, stale trusted-Verify classification,
+    or the old multi-edit-after-failed-Verify cadence.
+    """
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    diagnostic=str(diagnostic or "").strip()
+    if len(diagnostic)>1500 or "\x00" in diagnostic:
+        return False,"max-step-continuation-diagnostic-invalid"
+
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"max-step-continuation-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "")
+    if not canonical:
+        return False,"max-step-continuation-missing-verify"
+    progress_path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"max-step-continuation-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"max-step-continuation-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1
+                or not isinstance(sessions,list)
+                or len(sessions)!=count
+                or not isinstance(sessions[-1],str)
+                or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"max-step-continuation-current-session-mismatch"
+            sid=sessions[-1]
+            history=entry.get("implementation_max_step_continuations") or []
+            if not isinstance(history,list):
+                return False,"max-step-continuation-history-invalid"
+            prior=[
+                row for row in history
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            legacy_missing_handoff=(
+                len(prior)==1
+                and not prior[0].get("handoff_progress_sha256")
+                and not progress_path.exists()
+            )
+            trusted_verify_visibility_candidate=(
+                len(prior)==1
+                and bool(prior[0].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            reverify_single_write_cadence_candidate=(
+                len(prior)==2
+                and prior[0].get("recovery_kind")=="initial"
+                and prior[1].get("recovery_kind")=="trusted-verify-visibility"
+                and bool(prior[1].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            if len(prior)>2:
+                return False,"max-step-continuation-limit"
+            if prior and not (
+                legacy_missing_handoff
+                or trusted_verify_visibility_candidate
+                or reverify_single_write_cadence_candidate
+            ):
+                return False,"max-step-continuation-limit"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            operator_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1 or len(operator_rows)>1:
+                return False,"max-step-continuation-records-mismatch"
+            failure=failures[0]
+            operator_funded=(len(operator_rows)==1)
+            op=operator_rows[0] if operator_funded else None
+            failure_match=re.fullmatch(
+                r"verify-failed-([1-9]\d*)",
+                str(failure.get("reason") or ""),
+            )
+            if not (
+                failure.get("classification")=="genuine"
+                and failure_match
+            ):
+                return False,"max-step-continuation-terminal-state-mismatch"
+            if operator_funded and not (
+                op.get("state")=="consumed"
+                and op.get("outcome")=="meaningful_execution"
+                and op.get("consumes_operator_grant") is True
+            ):
+                return False,"max-step-continuation-terminal-state-mismatch"
+            verify_exit_code=int(failure_match.group(1))
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(
+        status.get("type") or status.get("status") or ""
+    ).lower()=="busy":
+        return False,"max-step-continuation-session-still-active"
+    trusted_verify_visibility_evidence={}
+    trusted_visibility_proven=False
+    latest_verify_clean_tail_proven=False
+    if (
+        trusted_verify_visibility_candidate
+        or reverify_single_write_cadence_candidate
+    ):
+        trusted_verify_visibility_evidence=(
+            trusted_verify_reverify_visibility_evidence(
+                sid,did,canonical
+            )
+        )
+        if not trusted_verify_visibility_evidence:
+            return False,"max-step-continuation-limit"
+    if trusted_verify_visibility_candidate:
+        trusted_visibility_proven=bool(
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_verify_exact_required_denials"
+            ) or 0)>=1
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is False
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+        )
+        latest_verify_clean_tail_proven=bool(
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_latest_verify_owned_edits"
+            ) or 0)==0
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is True
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+        )
+        if not (
+            trusted_visibility_proven
+            or latest_verify_clean_tail_proven
+        ):
+            return (
+                False,
+                "max-step-continuation-trusted-verify-visibility-proof-mismatch",
+            )
+    if reverify_single_write_cadence_candidate:
+        if not (
+            int(trusted_verify_visibility_evidence.get(
+                "trusted_exact_verify_failures"
+            ) or 0)>=1
+            and int(trusted_verify_visibility_evidence.get(
+                "post_verify_owned_edits"
+            ) or 0)>=2
+            and trusted_verify_visibility_evidence.get(
+                "current_classifier_state"
+            )=="failed"
+            and trusted_verify_visibility_evidence.get(
+                "owned_mutation_seen"
+            ) is True
+            and trusted_verify_visibility_evidence.get(
+                "maximum_steps_reached"
+            ) is True
+            and reverify_single_write_cadence_fix_installed()
+        ):
+            return (
+                False,
+                "max-step-continuation-reverify-cadence-proof-mismatch",
+            )
+    terminal_summary=(max_step_terminal_summary_db(sid) or "").strip()
+    if not terminal_summary:
+        return False,"max-step-continuation-no-max-step-terminal"
+    if not durable_worker_execution(did,sid):
+        return False,"max-step-continuation-no-durable-owned-progress"
+    changed,delta=_owned_artifact_changed_since_execution_baseline(did,count)
+    if not changed or delta!="changed":
+        return False,"max-step-continuation-owned-state-not-changed"
+    project=Path(PROJECT)
+    if worker_sandbox_has_fatal_violation(project,did,sid):
+        return False,"max-step-continuation-fatal-sandbox-violation"
+    violations=ownership_violations(did,sid)
+    if violations:
+        return False,"max-step-continuation-ownership-violation:"+",".join(violations[:4])
+    verify=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        isinstance(verify,dict)
+        and int(verify.get("attempt") or 0)==count
+        and verify.get("session")==sid
+        and verify.get("executed") is True
+        and verify.get("result")==f"verify-failed-{verify_exit_code}"
+        and int(verify.get("exit_code") or -1)==verify_exit_code
+        and str(verify.get("command") or "")==canonical
+    ):
+        return False,"max-step-continuation-verify-evidence-mismatch"
+    if not diagnostic:
+        diagnostic=verify_evidence_failure_diagnostic(verify)
+
+    recovery_kind=(
+        "reverify-single-write-cadence"
+        if reverify_single_write_cadence_candidate
+        else (
+            "latest-verify-clean-tail"
+            if latest_verify_clean_tail_proven
+            else (
+                "trusted-verify-visibility"
+                if trusted_visibility_proven
+                else (
+                    "legacy-missing-handoff"
+                    if legacy_missing_handoff
+                    else "initial"
+                )
+            )
+        )
+    )
+    summary_tail=terminal_summary[-6500:]
+    progress_text=(
+        "SUPERVISOR_MAX_STEP_CONTINUATION: true\n"
+        f"DELIVERABLE: {did}\n"
+        f"ATTEMPT: {count}\n"
+        f"SOURCE_SESSION: {sid}\n"
+        f"RECOVERY_KIND: {recovery_kind}\n"
+        "AUTHORITATIVE_CONTRACT: context-packet-wins\n"
+        f"EXACT_VERIFY_RESULT: verify-failed-{verify_exit_code}\n"
+        + (
+            "SUPERVISOR_DIAGNOSTIC: "
+            + diagnostic.replace("\n"," ")
+            + "\n"
+            if diagnostic else ""
+        )
+        + "\nTerminal worker summary (continue from actual filesystem state):\n"
+        f"{summary_tail}\n"
+    )
+    progress_sha=hashlib.sha256(progress_text.encode("utf-8")).hexdigest()
+    marker_id=hashlib.sha256(
+        f"{IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL}\0"
+        f"{did}\0{count}\0{sid}\0{recovery_kind}".encode()
+    ).hexdigest()[:20]
+    placeholder=f"dispatch:max-step-continuation:{marker_id}:{did}"
+    now=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+    clear_split=False
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"max-step-continuation-ledger-disappeared"
+            if (
+                int(entry.get("count") or 0)!=count
+                or (entry.get("sessions") or [])[-1:]!=[sid]
+            ):
+                return False,"max-step-continuation-ledger-changed"
+            history=entry.get("implementation_max_step_continuations") or []
+            if not isinstance(history,list):
+                return False,"max-step-continuation-history-invalid"
+            prior_now=[
+                row for row in history
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            legacy_now=(
+                len(prior_now)==1
+                and not prior_now[0].get("handoff_progress_sha256")
+                and not progress_path.exists()
+            )
+            trusted_visibility_now=(
+                len(prior_now)==1
+                and bool(prior_now[0].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            reverify_cadence_now=(
+                len(prior_now)==2
+                and prior_now[0].get("recovery_kind")=="initial"
+                and prior_now[1].get("recovery_kind")=="trusted-verify-visibility"
+                and bool(prior_now[1].get("handoff_progress_sha256"))
+                and progress_path.exists()
+            )
+            if recovery_kind=="initial":
+                if prior_now:
+                    return False,"max-step-continuation-limit"
+            elif recovery_kind=="legacy-missing-handoff":
+                if not legacy_now:
+                    return False,"max-step-continuation-legacy-handoff-proof-changed"
+            elif recovery_kind in {
+                "trusted-verify-visibility","latest-verify-clean-tail"
+            }:
+                if not trusted_visibility_now:
+                    return (
+                        False,
+                        "max-step-continuation-trusted-verify-visibility-proof-changed",
+                    )
+            elif recovery_kind=="reverify-single-write-cadence":
+                if not reverify_cadence_now:
+                    return (
+                        False,
+                        "max-step-continuation-reverify-cadence-proof-changed",
+                    )
+            else:
+                return False,"max-step-continuation-recovery-kind-invalid"
+
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            operator_rows=[
+                row for row in (entry.get("operator_retry_attempts") or [])
+                if isinstance(row,dict)
+                and int(row.get("sequence") or 0)==count
+                and row.get("session")==sid
+            ]
+            if len(failures)!=1 or len(operator_rows)>1:
+                return False,"max-step-continuation-records-changed"
+            failure=failures[0]
+            operator_funded_now=(len(operator_rows)==1)
+            op=operator_rows[0] if operator_funded_now else None
+            failure_match_now=re.fullmatch(
+                r"verify-failed-([1-9]\d*)",
+                str(failure.get("reason") or ""),
+            )
+            if not (
+                failure.get("classification")=="genuine"
+                and failure_match_now
+                and int(failure_match_now.group(1))==verify_exit_code
+            ):
+                return False,"max-step-continuation-state-changed"
+            if operator_funded_now and not (
+                op.get("state")=="consumed"
+                and op.get("outcome")=="meaningful_execution"
+                and op.get("consumes_operator_grant") is True
+            ):
+                return False,"max-step-continuation-state-changed"
+
+            original_failure=dict(failure)
+            original_operator=dict(op) if operator_funded_now else None
+            entry["failure_history"]=[
+                row for row in (entry.get("failure_history") or [])
+                if row is not failure
+            ]
+            entry["sessions"][-1]=placeholder
+            if operator_funded_now:
+                op["session"]=placeholder
+                op["state"]="reserved"
+                op["consumes_operator_grant"]=False
+                op["rearmed_by"]=IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL
+                op["rearmed_at"]=now
+                for key in ("outcome","evidence","consumed_at","resolved_at"):
+                    op.pop(key,None)
+            continuation_row={
+                "protocol":IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL,
+                "recovery_kind":recovery_kind,
+                "attempt":count,
+                "session":sid,
+                "replacement":placeholder,
+                "original_failure_record":original_failure,
+                "original_operator_record":original_operator,
+                "completed_tool_turns":persisted_completed_tool_turns(sid),
+                "owned_state":"changed",
+                "verify_result":f"verify-failed-{verify_exit_code}",
+                "verify_exit_code":verify_exit_code,
+                "handoff_progress_path":str(
+                    progress_path.relative_to(Path(PROJECT))
+                ),
+                "handoff_progress_sha256":progress_sha,
+                "source":"supervisor-max-step-continuation",
+                "timestamp":now,
+            }
+            if diagnostic:
+                continuation_row["supervisor_diagnostic"]=diagnostic
+                continuation_row["supervisor_diagnostic_sha256"]=hashlib.sha256(
+                    diagnostic.encode("utf-8")
+                ).hexdigest()
+            if recovery_kind in {
+                "legacy-missing-handoff",
+                "trusted-verify-visibility",
+                "latest-verify-clean-tail",
+                "reverify-single-write-cadence",
+            }:
+                continuation_row["previous_continuation_session"]=str(
+                    prior[-1].get("session") or ""
+                )
+            if recovery_kind=="trusted-verify-visibility":
+                continuation_row[
+                    "trusted_verify_visibility_evidence"
+                ]={
+                    "trusted_exact_verify_failures":int(
+                        trusted_verify_visibility_evidence.get(
+                            "trusted_exact_verify_failures"
+                        ) or 0
+                    ),
+                    "post_verify_exact_required_denials":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_exact_required_denials"
+                        ) or 0
+                    ),
+                    "post_verify_owned_edit_denials":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_owned_edit_denials"
+                        ) or 0
+                    ),
+                    "current_classifier_state":str(
+                        trusted_verify_visibility_evidence.get(
+                            "current_classifier_state"
+                        ) or ""
+                    ),
+                }
+            if recovery_kind=="latest-verify-clean-tail":
+                continuation_row["latest_verify_clean_tail_evidence"]={
+                    "trusted_exact_verify_failures":int(
+                        trusted_verify_visibility_evidence.get(
+                            "trusted_exact_verify_failures"
+                        ) or 0
+                    ),
+                    "post_verify_owned_edits":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_owned_edits"
+                        ) or 0
+                    ),
+                    "post_latest_verify_owned_edits":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_latest_verify_owned_edits"
+                        ) or 0
+                    ),
+                    "current_classifier_state":str(
+                        trusted_verify_visibility_evidence.get(
+                            "current_classifier_state"
+                        ) or ""
+                    ),
+                    "maximum_steps_reached":bool(
+                        trusted_verify_visibility_evidence.get(
+                            "maximum_steps_reached"
+                        )
+                    ),
+                }
+            if recovery_kind=="reverify-single-write-cadence":
+                continuation_row["reverify_single_write_cadence_evidence"]={
+                    "trusted_exact_verify_failures":int(
+                        trusted_verify_visibility_evidence.get(
+                            "trusted_exact_verify_failures"
+                        ) or 0
+                    ),
+                    "post_verify_owned_edits":int(
+                        trusted_verify_visibility_evidence.get(
+                            "post_verify_owned_edits"
+                        ) or 0
+                    ),
+                    "current_classifier_state":str(
+                        trusted_verify_visibility_evidence.get(
+                            "current_classifier_state"
+                        ) or ""
+                    ),
+                    "maximum_steps_reached":bool(
+                        trusted_verify_visibility_evidence.get(
+                            "maximum_steps_reached"
+                        )
+                    ),
+                }
+            entry.setdefault(
+                "implementation_max_step_continuations",[]
+            ).append(continuation_row)
+            entry["unmaterialized_dispatch_sequence"]=count
+            entry["unmaterialized_dispatch_replays"]=0
+            entry.setdefault("unmaterialized_dispatch_history",[]).append({
+                "sequence":count,
+                "replaced":sid,
+                "replacement":placeholder,
+                "source":"supervisor-max-step-continuation",
+                "recovery_kind":recovery_kind,
+                "timestamp":now,
+            })
+            if entry.pop("split_required",None) is not None:
+                clear_split=True
+            projected=attempt_state(entry)
+            if not projected.get("valid"):
+                return False,"max-step-continuation-projected-ledger-invalid"
+            if not projected.get("unmaterialized_dispatch_reusable"):
+                return False,"max-step-continuation-not-reusable"
+            if int(projected.get("count") or 0)!=count:
+                return False,"max-step-continuation-count-changed"
+            atomic_write_text(progress_path,progress_text)
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    log(
+        f"IMPLEMENTATION_MAX_STEP_CONTINUATION deliverable={did} "
+        f"attempt={count} session={sid} kind={recovery_kind} "
+        f"handoff_sha256={progress_sha} placeholder={placeholder}"
+    )
+    csv(
+        "IMPLEMENTATION_MAX_STEP_CONTINUATION",sid,"supervisor",
+        f"{did} attempt={count} kind={recovery_kind} "
+        f"handoff_sha256={progress_sha} placeholder={placeholder}",
+    )
+    return True,"rearmed-same-attempt"
 
 
 CONTEXT_DELIVERY_RECOVERY_PROTOCOL="v2-context-delivery-recovery-v1"
@@ -3863,11 +6743,7 @@ def context_delivery_failure_evidence(sid,did,attempt):
         pass
 
     result["maximum_steps_reached"]=bool(
-        re.search(
-            r"maximum steps for this agent have been reached",
-            last_assistant_text_db(sid) or "",
-            re.IGNORECASE,
-        )
+        MAX_STEP_TERMINAL_RE.search(last_assistant_text_db(sid) or "")
     )
     result["completed_tool_turns"]=persisted_completed_tool_turns(sid)
     return result
@@ -5569,6 +8445,54 @@ def recover_legacy_handoff_writer_verify(parent):
     return True,"writer-contract-replacement-ready"
 
 
+def historical_split_child_completion(child_id,child_def):
+    """Prove a child completed its old committed split contract.
+
+    This is intentionally weaker than current ready_info(): a later parent
+    contract revision may make the historical child non-authoritative today.
+    For retiring that stale split projection, require the immutable READY
+    marker and supervisor Verify evidence to match the child definition stored
+    in the committed split transaction. The replacement parent must then pass
+    its current contract before it can become READY again.
+    """
+    if not child_id or not isinstance(child_def,dict):
+        return False
+    if ready_info(child_id):
+        return True
+    command=str(child_def.get("verify_command") or "").strip()
+    if not command:
+        return False
+    ready_path=Path(PROJECT)/".opencode-v2"/"work"/f"{child_id}.ready"
+    try:
+        fields={}
+        for line in ready_path.read_text(errors="replace").splitlines():
+            if "=" in line:
+                key,value=line.split("=",1)
+                fields[key.strip()]=value.strip()
+    except OSError:
+        return False
+    if not (
+        fields.get("status")=="complete"
+        and fields.get("deliverable")==child_id
+        and fields.get("owner")=="supervisor"
+        and fields.get("verified")=="true"
+    ):
+        return False
+    expected_hash=fields.get("verify_sha256")
+    current_hash=hashlib.sha256(command.encode()).hexdigest()
+    if expected_hash and expected_hash!=current_hash:
+        return False
+    evidence=load_supervisor_verify_evidence(child_id)
+    latest=evidence.get("latest") if isinstance(evidence,dict) else {}
+    return bool(
+        isinstance(latest,dict)
+        and latest.get("executed") is True
+        and latest.get("result")=="verified"
+        and int(latest.get("exit_code") or 0)==0
+        and str(latest.get("command") or "")==command
+    )
+
+
 def recover_stale_split_parent_contract(parent):
     """Retire an old split projection after a proven parent contract revision.
 
@@ -5586,8 +8510,18 @@ def recover_stale_split_parent_contract(parent):
         with dispatch_lock:
             with attempt_lock():
                 status=load_split_status(parent)
-                if status.get("state")!="parent-finalize-failed":
-                    return False,"stale-split-recovery-requires-parent-finalize-failed"
+                status_state=str(status.get("state") or "")
+                historically_finalized=(
+                    status_state=="accepted"
+                    and status.get("parent_finalize_last_result")=="finalized"
+                )
+                if not (
+                    status_state=="parent-finalize-failed"
+                    or historically_finalized
+                ):
+                    return False,"stale-split-recovery-requires-finalized-or-failed-parent"
+                if ready_info(parent):
+                    return False,"stale-split-parent-still-currently-ready"
 
                 txn=load_split_transaction(parent)
                 if (
@@ -5598,8 +8532,16 @@ def recover_stale_split_parent_contract(parent):
                 ):
                     return False,"stale-split-transaction-not-committed"
                 children=list(txn["children"])
-                if not children or any(not ready_info(child) for child in children):
-                    return False,"stale-split-children-not-ready"
+                child_defs=txn["child_defs"]
+                if not children:
+                    return False,"stale-split-children-missing"
+                if any(
+                    not historical_split_child_completion(
+                        child,child_defs.get(child)
+                    )
+                    for child in children
+                ):
+                    return False,"stale-split-children-not-historically-complete"
 
                 raw_manifest=load_json_object(
                     guard_path,label="implementation manifest"
@@ -5615,15 +8557,57 @@ def recover_stale_split_parent_contract(parent):
 
                 current_owned=set(owned_artifact_paths(parent_leaf))
                 prior_owned=set()
-                child_defs=txn["child_defs"]
+                nested_retirements={}
                 for child in children:
                     child_def=child_defs.get(child)
                     if not isinstance(child_def,dict):
                         return False,"stale-split-child-definition-missing"
                     prior_owned.update(owned_artifact_paths(child_def))
                     live_child=leaves.get(child)
-                    if not isinstance(live_child,dict) or live_child!=child_def:
+                    if not isinstance(live_child,dict):
+                        return False,"stale-split-live-child-missing"
+                    if live_child==child_def:
+                        continue
+
+                    # A historical writer may have been recursively split after
+                    # the root transaction committed. Permit exactly that
+                    # structural drift, but no ownership/Verify/Done-when drift.
+                    live_base=dict(live_child)
+                    nested_children=list(live_base.pop("split_children",[]) or [])
+                    old_base=dict(child_def)
+                    old_base.pop("split_children",None)
+                    if (
+                        len(nested_children)!=2
+                        or live_base!=old_base
+                    ):
                         return False,"stale-split-live-child-drift"
+
+                    nested_status=load_split_status(child)
+                    nested_txn=load_split_transaction(child)
+                    if not (
+                        nested_status.get("state")=="accepted"
+                        and nested_status.get("parent_finalize_last_result")=="finalized"
+                        and nested_txn.get("state")=="committed"
+                        and nested_txn.get("parent_id")==child
+                        and list(nested_txn.get("children") or [])==nested_children
+                        and isinstance(nested_txn.get("child_defs"),dict)
+                    ):
+                        return False,"stale-split-nested-transaction-invalid"
+                    nested_defs=nested_txn["child_defs"]
+                    for nested_child in nested_children:
+                        nested_def=nested_defs.get(nested_child)
+                        if not isinstance(nested_def,dict):
+                            return False,"stale-split-nested-child-definition-missing"
+                        if not historical_split_child_completion(
+                            nested_child,nested_def
+                        ):
+                            return False,"stale-split-nested-child-not-historically-complete"
+                        if leaves.get(nested_child)!=nested_def:
+                            return False,"stale-split-nested-live-child-drift"
+                    nested_retirements[child]={
+                        "children":nested_children,
+                        "transaction":nested_txn,
+                    }
                 missing=sorted(current_owned-prior_owned)
                 if not missing:
                     return False,"stale-split-current-ownership-already-covered"
@@ -5670,6 +8654,19 @@ def recover_stale_split_parent_contract(parent):
                     or overlay_entry.get("child_defs")!=child_defs
                 ):
                     return False,"stale-split-overlay-mismatch"
+                for nested_parent,nested_info in nested_retirements.items():
+                    nested_txn=nested_info["transaction"]
+                    nested_overlay=parents.get(nested_parent)
+                    if not (
+                        isinstance(nested_overlay,dict)
+                        and nested_overlay.get("transaction_id")
+                            ==nested_txn.get("transaction_id")
+                        and nested_overlay.get("child_defs")
+                            ==nested_txn.get("child_defs")
+                        and list(nested_overlay.get("children") or [])
+                            ==list(nested_txn.get("children") or [])
+                    ):
+                        return False,"stale-split-nested-overlay-mismatch"
 
                 history=entry.setdefault("stale_split_contract_recoveries",[])
                 if not isinstance(history,list):
@@ -5686,6 +8683,16 @@ def recover_stale_split_parent_contract(parent):
                     archive=_archive_split_state_for_contract_repair(parent)
                     if archive is None:
                         return False,"stale-split-archive-missing"
+                    nested_archives={}
+                    for nested_parent in nested_retirements:
+                        nested_archive=_archive_split_state_for_contract_repair(
+                            nested_parent
+                        )
+                        if nested_archive is None:
+                            return False,"stale-split-nested-archive-missing"
+                        nested_archives[nested_parent]=str(
+                            nested_archive.relative_to(project)
+                        )
                     existing={
                         "protocol":"v2-stale-split-contract-recovery-v1",
                         "state":"prepared",
@@ -5697,6 +8704,11 @@ def recover_stale_split_parent_contract(parent):
                         "current_owned_artifacts":sorted(current_owned),
                         "current_verify_sha256":current_sha,
                         "archive":str(archive.relative_to(project)),
+                        "nested_archives":nested_archives,
+                        "nested_transactions":{
+                            nested_parent:info["transaction"].get("transaction_id")
+                            for nested_parent,info in nested_retirements.items()
+                        },
                         "prepared_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
                     }
                     history.append(existing)
@@ -5704,9 +8716,15 @@ def recover_stale_split_parent_contract(parent):
                 save_attempts(attempts)
 
                 parents.pop(parent,None)
+                for nested_parent in nested_retirements:
+                    parents.pop(nested_parent,None)
                 overlay["parents"]=parents
                 save_split_leaf_overlay(overlay)
-                for child in children:
+
+                retired_leaves=set(children)
+                for nested_info in nested_retirements.values():
+                    retired_leaves.update(nested_info["children"])
+                for child in retired_leaves:
                     leaves.pop(child,None)
                 parent_leaf["split_children"]=[]
                 parent_leaf.pop("split_depth",None)
@@ -5714,6 +8732,10 @@ def recover_stale_split_parent_contract(parent):
                 atomic_write_json(guard_path,raw_manifest)
 
                 _clear_split_request_state_for_contract_repair(parent)
+                for nested_parent in nested_retirements:
+                    _clear_split_request_state_for_contract_repair(
+                        nested_parent
+                    )
 
                 # Commit the transition only after both active projections are
                 # gone.  The immutable archive and old child/attempt files stay.
@@ -6195,8 +9217,31 @@ def reconcile_split_proposals():
         with splitter_state_lock(did):
             status=load_split_status(did)
             state=status.get("state")
+            if state=="split-validation-failed":
+                try:
+                    recovered,detail=(
+                        recover_exhausted_splitter_deterministic_handoff(did)
+                    )
+                except (
+                    OSError,ValueError,TypeError,StateCorruptionError
+                ) as exc:
+                    log(
+                        f"DETERMINISTIC_SPLITTER_FALLBACK_RECONCILE_ERROR "
+                        f"parent={did} error={exc!r}"
+                    )
+                    recovered=False
+                    detail=f"error:{type(exc).__name__}"
+                if recovered:
+                    log(
+                        f"DETERMINISTIC_SPLITTER_FALLBACK_RECONCILED "
+                        f"parent={did} detail={detail}"
+                    )
+                    continue
+                # Keep the pre-existing fail-closed blocked state when the
+                # strict fallback predicates are not all satisfied.
+                continue
             if state in {
-                "split-validation-failed","splitter-failed",
+                "splitter-failed",
                 "split-unavailable-read-only-parent",
             }:
                 continue
@@ -6284,6 +9329,176 @@ def reconcile_splits_once():
         "splits":splits,
     }
 
+
+
+TRUSTED_VERIFY_SANDBOX_RECOVERY_PROTOCOL="v2-trusted-worker-verify-sandbox-recovery-v1"
+
+
+def recover_trusted_verify_sandbox_failure(did):
+    """Reclassify one exact-Verify sandbox false positive as infrastructure."""
+    if not valid_deliverable_id(did):
+        return False,"invalid-deliverable"
+    if ready_info(did):
+        return True,"already-complete"
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict) or leaf_children(did):
+        return False,"trusted-verify-recovery-requires-executable-leaf"
+    canonical=str(leaf.get("verify_command") or "").strip()
+    if not canonical or not worker_exact_verify_command({"leaf":leaf},canonical):
+        return False,"trusted-verify-recovery-current-routing-unavailable"
+
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"trusted-verify-recovery-missing-ledger-entry"
+            state=attempt_state(entry)
+            if not state.get("valid"):
+                return False,"trusted-verify-recovery-invalid-ledger"
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions")
+            if (
+                count<1 or not isinstance(sessions,list) or len(sessions)!=count
+                or not isinstance(sessions[-1],str) or not sessions[-1]
+                or sessions[-1].startswith("dispatch:")
+            ):
+                return False,"trusted-verify-recovery-session-mismatch"
+            sid=sessions[-1]
+            prior=entry.get("trusted_verify_sandbox_recoveries") or []
+            if any(
+                isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+                and row.get("session")==sid
+                for row in prior
+            ):
+                return True,"already-recovered"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="sandbox-ownership-violation"
+            ):
+                return False,"trusted-verify-recovery-terminal-failure-mismatch"
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"trusted-verify-recovery-infrastructure-limit"
+
+    status=v1_session_status_snapshot().get(sid)
+    if isinstance(status,dict) and str(status.get("type") or "").lower()=="busy":
+        return False,"trusted-verify-recovery-session-still-active"
+
+    audit=worker_sandbox_violation_path(Path(PROJECT),did,sid)
+    try:
+        records=[
+            json.loads(line) for line in audit.read_text(errors="replace").splitlines()
+            if line.strip()
+        ]
+    except (OSError,json.JSONDecodeError):
+        return False,"trusted-verify-recovery-audit-unreadable"
+    trusted_roots={".opencode-v2/TEST_REPORT.json",".opencode-v2/test-logs"}
+    proofs=[]
+    for row in records:
+        if not isinstance(row,dict) or row.get("kind")!="sandbox-outside-ownership":
+            continue
+        detail=row.get("detail") if isinstance(row.get("detail"),dict) else {}
+        if str(detail.get("command") or "").strip()!=canonical:
+            continue
+        paths=[str(x).rstrip("/") for x in (detail.get("paths") or []) if isinstance(x,str)]
+        if not paths:
+            continue
+        if all(
+            path==".opencode-v2/TEST_REPORT.json"
+            or path==".opencode-v2/test-logs"
+            or path.startswith(".opencode-v2/test-logs/")
+            for path in paths
+        ):
+            proofs.append({"paths":paths,"exit_code":detail.get("exit_code")})
+    if len(proofs)!=1:
+        return False,"trusted-verify-recovery-proof-mismatch"
+
+    reason="canonical-verify-diagnostic-side-effects-misattributed-to-worker"
+    clear_split=False
+    with dispatch_lock:
+        with attempt_lock():
+            data=load_attempts()
+            entry=(data.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"trusted-verify-recovery-ledger-disappeared"
+            if int(entry.get("count") or 0)!=count or (entry.get("sessions") or [])[-1:]!=[sid]:
+                return False,"trusted-verify-recovery-ledger-changed"
+            failures=[
+                row for row in (entry.get("failure_history") or [])
+                if isinstance(row,dict)
+                and int(row.get("attempt") or 0)==count
+            ]
+            if len(failures)!=1 or not (
+                failures[0].get("classification")=="genuine"
+                and failures[0].get("reason")=="sandbox-ownership-violation"
+            ):
+                return False,"trusted-verify-recovery-failure-changed"
+            state=attempt_state(entry)
+            grants=int(state.get("infrastructure_retry_grants") or 0)
+            if grants>=MAX_INFRASTRUCTURE_RETRY_GRANTS:
+                return False,"trusted-verify-recovery-infrastructure-limit"
+
+            failure=failures[0]
+            failure["original_classification"]="genuine"
+            failure["original_reason"]="sandbox-ownership-violation"
+            failure["classification"]="infrastructure"
+            failure["reason"]=reason
+            failure["reclassified_by"]="runtime-trusted-worker-verify-sandbox-repair"
+            stamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+            entry.setdefault("infrastructure_failures",[]).append({
+                "timestamp":stamp,
+                "grant":1,
+                "source":"supervisor",
+                "kind":"verification-sandbox",
+                "session":sid,
+                "evidence":"durable-partial-state-preserved",
+                "reason":reason,
+            })
+            entry["infrastructure_retry_grants"]=grants+1
+            entry.setdefault("trusted_verify_sandbox_recoveries",[]).append({
+                "protocol":TRUSTED_VERIFY_SANDBOX_RECOVERY_PROTOCOL,
+                "attempt":count,
+                "session":sid,
+                "command":canonical,
+                "paths":proofs[0]["paths"],
+                "source":"supervisor-trusted-worker-verify-sandbox-repair",
+                "timestamp":stamp,
+            })
+            effective=sum(
+                1 for row in (entry.get("failure_history") or [])
+                if failure_counts_as_genuine(row)
+            )
+            if effective<2:
+                entry.pop("split_required",None)
+                clear_split=True
+            projected=attempt_state(entry)
+            if (
+                not projected.get("valid")
+                or int(projected.get("infrastructure_retry_grants") or 0)!=grants+1
+                or int(projected.get("allowed_attempts") or 0)<=count
+            ):
+                return False,"trusted-verify-recovery-projected-ledger-invalid"
+            save_attempts(data)
+
+    if clear_split:
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+    log(
+        f"TRUSTED_VERIFY_SANDBOX_RECOVERY deliverable={did} "
+        f"attempt={count} session={sid}"
+    )
+    csv(
+        "TRUSTED_VERIFY_SANDBOX_RECOVERY",sid,"supervisor",
+        f"{did} attempt={count}"
+    )
+    return True,"recovered"
 
 
 OWNERSHIP_ATTRIBUTION_RECOVERY_MARKER="runtime-ownership-attribution-repair"
@@ -6652,7 +9867,11 @@ def normalized_state_snapshot(project):
         reserved_count=MAX_CONCURRENT_IMPLEMENTATION_WORKERS
         latent_count=0
         scheduler_error=scheduler_error or f"{type(exc).__name__}: {exc}"
-    inflight_ids=active_ids | reserved_ids | native_pending_ids
+    # A reusable dispatch reservation holds capacity but is not a live
+    # worker. Keep it out of running/inflight state so the deterministic
+    # controller can emit a replay action for that same held slot.
+    replayable_reserved_ids=set(reserved_ids)
+    inflight_ids=active_ids | native_pending_ids
     occupied=min(
         MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
         active_count+reserved_count+latent_count,
@@ -6672,14 +9891,20 @@ def normalized_state_snapshot(project):
         ),
         "active_deliverables":sorted(active_ids),
         "reserved_deliverables":sorted(reserved_ids),
+        "replayable_reserved_deliverables":sorted(replayable_reserved_ids),
         "pending_deliverables":sorted(latent_ids),
         "error":scheduler_error,
     }
     for did in inflight_ids:
         if isinstance(leaves.get(did),dict):
             leaves[did]["running"]=True
-            leaves[did]["reserved"]=did in reserved_ids
+            leaves[did]["reserved"]=False
             leaves[did]["eligible"]=False
+    for did in replayable_reserved_ids:
+        if isinstance(leaves.get(did),dict):
+            leaves[did]["running"]=False
+            leaves[did]["reserved"]=True
+            leaves[did]["reservation_replay"]=True
 
     for did,leaf in leaves.items():
         if (
@@ -6912,6 +10137,870 @@ def _repair_baseline(keys):
         source=""
     return {"source_sha256":source,"affected_leaf_sha256":hashes}
 
+def acceptance_validator_report_records(sid):
+    """Completed writes to the exact final acceptance report for one validator."""
+    if not sid or _session_agent_db(sid)!="acceptance-validator":
+        return []
+    target=".opencode-v2/acceptance-report.json"
+    rows=[]
+    for rec in session_completed_tool_records(sid):
+        if not isinstance(rec,dict) or rec.get("status")!="completed":
+            continue
+        tool=str(rec.get("tool") or "")
+        args=rec.get("input") if isinstance(rec.get("input"),dict) else {}
+        if tool!="write" or not _tool_targets_exact_project_path(
+            tool,args,target
+        ):
+            continue
+        content=args.get("content")
+        if isinstance(content,str):
+            rows.append({
+                "tool":tool,
+                "content":content,
+                "sha256":hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            })
+    return rows
+
+
+def acceptance_validator_observed_commands():
+    """Exact executable evidence available before final acceptance starts."""
+    observed={}
+    ctrl=Path(PROJECT)/".opencode-v2"
+    try:
+        test_report=json.loads((ctrl/"TEST_REPORT.json").read_text())
+    except Exception:
+        test_report={}
+    if isinstance(test_report,dict):
+        for item in test_report.get("checks",[]) or []:
+            if not isinstance(item,dict):
+                continue
+            command=item.get("command")
+            code=item.get("exit_code")
+            if (
+                isinstance(command,str) and command.strip()
+                and isinstance(code,int) and not isinstance(code,bool)
+            ):
+                observed.setdefault(command,set()).add(code)
+
+    work=ctrl/"work"
+    if work.is_dir():
+        for path in sorted(work.glob("D*.verify-evidence.json")):
+            try:
+                data=json.loads(path.read_text())
+            except Exception:
+                continue
+            if not isinstance(data,dict):
+                continue
+            for item in data.get("entries",[]) or []:
+                if not isinstance(item,dict) or item.get("executed") is not True:
+                    continue
+                command=item.get("command")
+                code=item.get("exit_code")
+                if (
+                    isinstance(command,str) and command.strip()
+                    and isinstance(code,int) and not isinstance(code,bool)
+                ):
+                    observed.setdefault(command,set()).add(code)
+    return observed
+
+
+def validate_acceptance_report_write_content(content):
+    """Fail closed before the validator's one durable acceptance-report write."""
+    if not isinstance(content,str) or not content.strip():
+        return ["report-content-missing"]
+    try:
+        report=json.loads(content)
+    except Exception as exc:
+        return [f"invalid-json:{type(exc).__name__}"]
+    if not isinstance(report,dict):
+        return ["report-not-object"]
+    errors=[]
+    if report.get("protocol")!="v2-acceptance-report-v1":
+        errors.append("invalid-protocol")
+    result=report.get("result")
+    if result not in {"PASS","FAIL"}:
+        errors.append("invalid-result")
+    checks=report.get("checks")
+    if not isinstance(checks,list):
+        return errors+["checks-not-array"]
+
+    try:
+        must=must_acceptance_ids(
+            (Path(PROJECT)/".opencode-v2"/"ACCEPTANCE.md").read_text(
+                errors="replace"
+            )
+        )
+    except OSError:
+        return errors+["acceptance-contract-unavailable"]
+    must_set=set(must)
+    if not must or len(must)!=len(must_set):
+        return errors+["acceptance-contract-invalid"]
+
+    observed_commands=acceptance_validator_observed_commands()
+    seen=set()
+    failed=[]
+    for index,item in enumerate(checks,1):
+        if not isinstance(item,dict):
+            errors.append(f"check-{index}-not-object")
+            continue
+        cid=str(item.get("id") or "")
+        if cid not in must_set:
+            errors.append(f"invalid-id:{cid or index}")
+        elif cid in seen:
+            errors.append(f"duplicate-id:{cid}")
+        seen.add(cid)
+        status=item.get("status")
+        if status not in {"PASS","FAIL"}:
+            errors.append(f"{cid or index}-invalid-status")
+        elif status=="FAIL":
+            failed.append(cid)
+        evidence=str(item.get("evidence") or "").strip()
+        if len(evidence)<8:
+            errors.append(f"{cid or index}-insufficient-evidence")
+
+        executable=(
+            item.get("required_executable") is True
+            or "command" in item
+            or "exit_code" in item
+        )
+        if executable:
+            command=item.get("command")
+            exit_code=item.get("exit_code")
+            if item.get("required_executable") is not True:
+                errors.append(f"{cid or index}-required-executable-flag-missing")
+            command_valid=isinstance(command,str) and bool(command.strip())
+            if not command_valid:
+                errors.append(f"{cid or index}-missing-command")
+            else:
+                unsafe=validate_verify_command(command)
+                if unsafe:
+                    errors.append(
+                        f"{cid or index}-unsafe-command:{unsafe[0]}"
+                    )
+            exit_valid=(
+                isinstance(exit_code,int) and not isinstance(exit_code,bool)
+            )
+            if not exit_valid:
+                errors.append(f"{cid or index}-invalid-exit-code")
+            elif status=="PASS" and exit_code!=0:
+                errors.append(f"{cid or index}-pass-exit-{exit_code}")
+            if (
+                command_valid and exit_valid
+                and exit_code not in observed_commands.get(command,set())
+            ):
+                errors.append(
+                    f"{cid or index}-command-not-exact-observed-evidence"
+                )
+
+    if seen!=must_set:
+        missing=sorted(must_set-seen)
+        extra=sorted(seen-must_set)
+        errors.append(
+            "check-set-mismatch:"
+            f"missing={','.join(missing) or '-'}:"
+            f"extra={','.join(extra) or '-'}"
+        )
+    if result=="PASS" and failed:
+        errors.append("pass-report-has-failed-checks")
+    if result=="FAIL" and not failed:
+        errors.append("fail-report-has-no-failed-checks")
+    return errors
+
+
+def acceptance_validator_tool_state(sid,tool,args):
+    """Final validator gets exactly one valid durable report write and no other tools."""
+    if _session_agent_db(sid)!="acceptance-validator":
+        return "na","not-acceptance-validator"
+    writes=acceptance_validator_report_records(sid)
+    if writes:
+        try:
+            durable=json.loads(writes[0]["content"])
+            durable_result=str(durable.get("result") or "")
+        except Exception:
+            durable_result=""
+        terminal=(
+            "return_exact_bare_ACCEPTANCE_PASS_now"
+            if durable_result=="PASS"
+            else "return_ACCEPTANCE_FAIL_now"
+        )
+        return "deny",(
+            "ACCEPTANCE_VALIDATOR_REPORT_IMMUTABLE "
+            f"completed_report_writes={len(writes)} no_more_tools=true "
+            f"next_action={terminal}"
+        )
+    if (
+        tool=="write"
+        and _tool_targets_exact_project_path(
+            tool,args,".opencode-v2/acceptance-report.json"
+        )
+    ):
+        content=args.get("content") if isinstance(args,dict) else None
+        errors=validate_acceptance_report_write_content(content)
+        if errors:
+            return "deny",(
+                "ACCEPTANCE_VALIDATOR_REPORT_INVALID "
+                + " | ".join(errors[:8])
+                + " next_tool=corrected-write:.opencode-v2/acceptance-report.json "
+                "no_discovery=true"
+            )
+        return "allow","acceptance-report-first-valid-write"
+    return "deny",(
+        "ACCEPTANCE_VALIDATOR_FIRST_TOOL_REPORT_WRITE_REQUIRED "
+        "next_tool=write:.opencode-v2/acceptance-report.json"
+    )
+
+
+def _acceptance_terminal_verdict(sid):
+    text=(last_assistant_text_db(sid) or "").strip()
+    cleaned=re.sub(r"\s*</subagent>\s*$","",text).strip()
+    lines=[line.strip() for line in cleaned.splitlines() if line.strip()]
+    if (
+        lines
+        and lines[-1]=="ACCEPTANCE_PASS"
+        and "ACCEPTANCE_FAIL" not in cleaned
+    ):
+        return "pass",text
+    if text.startswith("ACCEPTANCE_FAIL"):
+        return "fail",text
+    return "invalid",text
+
+
+def recover_max_step_acceptance_report_terminal(sid,terminal,writes):
+    """Recover a terminal max-step validator from its one authoritative report."""
+    if not MAX_STEP_TERMINAL_RE.search(str(terminal or "")):
+        return "","max-step-report-terminal-marker-missing"
+    if len(writes)!=1:
+        return "",f"max-step-report-write-count:{len(writes)}"
+    content=str(writes[0].get("content") or "")
+    errors=validate_acceptance_report_write_content(content)
+    if errors:
+        return "","max-step-report-invalid:"+errors[0]
+    report_path=Path(PROJECT)/".opencode-v2"/"acceptance-report.json"
+    try:
+        current=report_path.read_text()
+        report=json.loads(content)
+    except Exception as exc:
+        return "","max-step-report-unreadable:"+type(exc).__name__
+    if current!=content:
+        return "","max-step-report-content-mismatch"
+    result=str(report.get("result") or "").upper()
+    if result not in {"PASS","FAIL"}:
+        return "","max-step-report-result-invalid"
+
+    audit=(
+        Path(PROJECT)/".opencode-v2"/"work"/
+        f"acceptance-validator-terminal-{sid}.json"
+    )
+    atomic_write_json(audit,{
+        "owner":"supervisor",
+        "protocol":"v2-acceptance-validator-terminal-reconcile-v1",
+        "session":sid,
+        "terminal_verdict":result,
+        "recovery_kind":"max-step-after-valid-immutable-report",
+        "first_report_sha256":writes[0]["sha256"],
+        "completed_report_writes":1,
+        "terminal_sha256":hashlib.sha256(
+            str(terminal or "").encode("utf-8")
+        ).hexdigest(),
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    })
+    log(
+        "FINAL_ACCEPTANCE_MAX_STEP_REPORT_RECOVERED "
+        f"session={sid} result={result}"
+    )
+    csv(
+        "FINAL_ACCEPTANCE_MAX_STEP_REPORT_RECOVERED",sid,
+        "acceptance-validator",f"result={result}",
+    )
+    return result.lower(),"max-step-valid-report-recovered"
+
+
+def recover_final_acceptance_failure(sid,allow_report_terminal=False):
+    """Restore the validator's first durable FAIL report for controller remediation."""
+    if not PROJECT or not sid:
+        return False,"acceptance-failure-missing-identity"
+    if _session_agent_db(sid)!="acceptance-validator":
+        return False,"acceptance-failure-not-validator"
+    if sid in _v1_active_session_ids(strict=True):
+        return False,"acceptance-failure-session-still-active"
+    verdict,terminal=_acceptance_terminal_verdict(sid)
+    if verdict!="fail" and not (
+        allow_report_terminal
+        and verdict=="invalid"
+        and MAX_STEP_TERMINAL_RE.search(terminal or "")
+    ):
+        return False,f"acceptance-failure-terminal-{verdict}"
+
+    writes=acceptance_validator_report_records(sid)
+    if not writes:
+        return False,"acceptance-failure-missing-report-write"
+    try:
+        first=json.loads(writes[0]["content"])
+    except Exception:
+        return False,"acceptance-failure-first-report-invalid-json"
+    if (
+        not isinstance(first,dict)
+        or first.get("protocol")!="v2-acceptance-report-v1"
+        or first.get("result")!="FAIL"
+        or not isinstance(first.get("checks"),list)
+    ):
+        return False,"acceptance-failure-first-report-not-fail"
+
+    acceptance_path=Path(PROJECT)/".opencode-v2"/"ACCEPTANCE.md"
+    try:
+        must=must_acceptance_ids(acceptance_path.read_text(errors="replace"))
+    except OSError:
+        return False,"acceptance-failure-contract-unavailable"
+    must_set=set(must)
+    seen=set()
+    failed=[]
+    for item in first["checks"]:
+        if not isinstance(item,dict):
+            return False,"acceptance-failure-check-invalid"
+        cid=str(item.get("id") or "")
+        if cid not in must_set or cid in seen:
+            return False,f"acceptance-failure-check-invalid:{cid}"
+        seen.add(cid)
+        if item.get("status") not in {"PASS","FAIL"}:
+            return False,f"acceptance-failure-status-invalid:{cid}"
+        if len(str(item.get("evidence") or "").strip())<8:
+            return False,f"acceptance-failure-evidence-invalid:{cid}"
+        if item.get("status")=="FAIL":
+            failed.append(cid)
+    if seen!=must_set:
+        return False,"acceptance-failure-check-set-mismatch"
+    if not failed:
+        return False,"acceptance-failure-no-failed-must"
+
+    ctrl=Path(PROJECT)/".opencode-v2"
+    atomic_write_text(ctrl/"acceptance-report.json",writes[0]["content"])
+    (ctrl/"acceptance-pass.json").unlink(missing_ok=True)
+    audit=ctrl/"work"/f"acceptance-validator-terminal-{sid}.json"
+    atomic_write_json(audit,{
+        "owner":"supervisor",
+        "protocol":"v2-acceptance-validator-terminal-reconcile-v1",
+        "session":sid,
+        "terminal_verdict":"FAIL",
+        "failed_acceptance_ids":sorted(failed),
+        "first_report_sha256":writes[0]["sha256"],
+        "completed_report_writes":len(writes),
+        "report_write_sha256":[row["sha256"] for row in writes],
+        "legacy_multiwrite_recovered":len(writes)>1,
+        "terminal_sha256":hashlib.sha256(
+            terminal.encode("utf-8")
+        ).hexdigest(),
+        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+    })
+    log(
+        "FINAL_ACCEPTANCE_FAIL_REPORT_RESTORED "
+        f"session={sid} failed={','.join(sorted(failed))} "
+        f"writes={len(writes)}"
+    )
+    csv(
+        "FINAL_ACCEPTANCE_FAIL_REPORT_RESTORED",sid,
+        "acceptance-validator",
+        f"failed={','.join(sorted(failed))} writes={len(writes)}",
+    )
+    return True,"fail-report-restored"
+
+
+def reconcile_terminal_acceptance_validator(sid):
+    """Validate terminal validator evidence or recover its explicit FAIL."""
+    if not PROJECT or not sid:
+        return False,"missing-identity"
+    if _session_agent_db(sid)!="acceptance-validator":
+        return False,"not-acceptance-validator"
+    if sid in _v1_active_session_ids(strict=True):
+        return False,"session-still-active"
+    verdict,terminal=_acceptance_terminal_verdict(sid)
+    writes=acceptance_validator_report_records(sid)
+    if verdict=="pass":
+        if len(writes)!=1:
+            return False,f"pass-report-write-count:{len(writes)}"
+        report_path=Path(PROJECT)/".opencode-v2"/"acceptance-report.json"
+        try:
+            current=report_path.read_text()
+        except OSError:
+            return False,"pass-report-missing"
+        if current!=writes[0]["content"]:
+            return False,"pass-report-content-mismatch"
+        return True,"pass-ok"
+    if verdict=="fail":
+        ok,detail=recover_final_acceptance_failure(sid)
+        return ok,("fail-recovered:"+detail if ok else detail)
+    recovered,recovery_detail=recover_max_step_acceptance_report_terminal(
+        sid,terminal,writes
+    )
+    if recovered=="pass":
+        return True,recovery_detail
+    if recovered=="fail":
+        ok,detail=recover_final_acceptance_failure(
+            sid,allow_report_terminal=True
+        )
+        return ok,("fail-recovered:"+detail if ok else detail)
+    return False,"terminal-verdict-invalid:"+recovery_detail
+
+
+
+
+SPLIT_CHALLENGE_REPAIR_PROTOCOL="v2-split-contract-producer-repair-v1"
+
+
+def _nested_contract_challenge_target(did,reason):
+    """Resolve a terminal split writer to its immutable root and one named upstream owner."""
+    if split_depth(did)!=2:
+        return {}, "split-challenge-unsupported-depth"
+    root=did[:4]
+    intermediate=did[:-1]
+    overlay=(load_split_leaf_overlay().get("parents") or {})
+    manifest=(load_manifest().get("leaves") or {})
+    original=manifest.get(root)
+    active=manifest.get(did)
+    if not isinstance(original,dict) or not isinstance(active,dict):
+        return {}, "split-challenge-contract-missing"
+    original_command=str(original.get("verify_command") or "").strip()
+    if not original_command or str(active.get("verify_command") or "").strip()!=original_command:
+        return {}, "split-challenge-inherited-verify-mismatch"
+    lineage=[]
+    for parent,child in ((root,intermediate),(intermediate,did)):
+        txn=load_split_transaction(parent)
+        ov=overlay.get(parent)
+        if not isinstance(ov,dict) or not (
+            txn.get("state")=="committed"
+            and txn.get("transaction_id")==ov.get("transaction_id")
+            and txn.get("child_defs")==ov.get("child_defs")
+            and child in (txn.get("children") or [])
+            and isinstance(manifest.get(child),dict)
+            and {
+                k:v for k,v in manifest[child].items()
+                if k not in {"split_children","split_depth"}
+            } == {
+                k:v for k,v in txn["child_defs"][child].items()
+                if k not in {"split_children","split_depth"}
+            }
+            and str(manifest[child].get("verify_command") or "").strip()==original_command
+        ):
+            return {}, "split-challenge-lineage-invalid"
+        children=txn["children"]
+        if len(children)!=2 or children[1]!=child:
+            return {}, "split-challenge-not-writer-chain"
+        handoff=txn["child_defs"].get(children[0])
+        writer=txn["child_defs"].get(child)
+        if not isinstance(handoff,dict) or not (
+            handoff.get("split_handoff_only")
+            and not writer.get("split_handoff_only")
+            and writer.get("split_handoff_source")==children[0]
+        ):
+            return {}, "split-challenge-not-progress-writer"
+        lineage.append({
+            "parent":parent,"writer":child,"handoff":children[0],
+            "transaction_id":txn["transaction_id"],
+        })
+    root_owned=set(owned_artifact_paths(original))
+    if not set(owned_artifact_paths(active)).issubset(root_owned):
+        return {}, "split-challenge-ownership-invalid"
+    # Upstream candidates are named original direct dependencies with a path
+    # explicitly mentioned by the worker. No guessing from all project files.
+    candidates=[]
+    for producer in original.get("launch_deps",[]) or []:
+        leaf=manifest.get(producer)
+        if not isinstance(leaf,dict) or split_depth(producer)!=0:
+            continue
+        for path in owned_artifact_paths(leaf):
+            leaf_name=Path(path).name
+            stem=Path(path).stem
+            # Accept the full filename or its distinctive stem, not arbitrary
+            # English text (a two-letter stem is not a safe ownership key).
+            if len(stem)<4:
+                continue
+            ref=re.compile(
+                r"(?<![A-Za-z0-9_])"+re.escape(stem)+
+                r"(?:\."+re.escape(Path(path).suffix.lstrip("."))+r")?"
+                r"(?![A-Za-z0-9_])",re.IGNORECASE,
+            )
+            if ref.search(reason):
+                candidates.append((producer,path,leaf))
+    if len(candidates)!=1:
+        return {}, "split-challenge-upstream-owner-not-unique"
+    producer,path,prod_leaf=candidates[0]
+    key=_structured_plan_symbolic_key(root)
+    producer_key=_structured_plan_symbolic_key(producer)
+    prod_command=str(prod_leaf.get("verify_command") or "").strip()
+    if (
+        not prod_command or producer_key==key
+        or path in root_owned
+        or producer not in (active.get("launch_deps") or [])
+    ):
+        return {}, "split-challenge-producer-contract-invalid"
+    return {
+        "root":root,"root_key":key,
+        "producer":producer,"producer_key":producer_key,
+        "producer_path":path,"lineage":lineage,
+        "root_verify_sha256":hashlib.sha256(original_command.encode()).hexdigest(),
+        "producer_verify_sha256":hashlib.sha256(prod_command.encode()).hexdigest(),
+        "root_owned_paths":sorted(root_owned),
+        "producer_owned_paths":sorted(owned_artifact_paths(prod_leaf)),
+    },""
+
+
+def _register_nested_dependency_repair(sid,did,target):
+    """One audit-bound replacement only for a terminal Verify failed under old upstream contract."""
+    producer=str(target.get("producer") or "")
+    root=str(target.get("root") or "")
+    manifest=(load_manifest().get("leaves") or {})
+    leaf=manifest.get(did)
+    upstream=manifest.get(producer)
+    original=manifest.get(root)
+    if not all(isinstance(x,dict) for x in (leaf,upstream,original)):
+        return False,"nested-dependency-repair-manifest-missing"
+    consumer_command=str(leaf.get("verify_command") or "").strip()
+    parent_command=str(original.get("verify_command") or "").strip()
+    producer_command=str(upstream.get("verify_command") or "").strip()
+    old_consumer=target.get("root_verify_sha256")
+    old_producer=target.get("producer_verify_sha256")
+    new_producer=hashlib.sha256(producer_command.encode()).hexdigest()
+    if (
+        not consumer_command or consumer_command!=parent_command
+        or hashlib.sha256(consumer_command.encode()).hexdigest()!=old_consumer
+        or new_producer==old_producer
+        or not ready_info(producer)
+    ):
+        return False,"nested-dependency-repair-contract-not-current"
+    latest=load_supervisor_verify_evidence(did).get("latest") or {}
+    if not (
+        latest.get("session")==sid
+        and latest.get("command")==consumer_command
+        and latest.get("result")=="verify-failed-1"
+        and latest.get("executed") is True
+    ):
+        return False,"nested-dependency-repair-terminal-verify-not-proven"
+    current_target,detail=_nested_contract_challenge_target(
+        did,
+        str(load_json_object(
+            Path(PROJECT)/".opencode-v2"/"work"/f"{did}.contract-challenge.json",
+            label="nested challenge"
+        ).get("reason") or ""),
+    )
+    # The producer Verify *must* have changed to resolve this challenge.
+    # Its original SHA is immutable authorization evidence, not the expected
+    # current SHA. Every other lineage/ownership/contract field stays exact.
+    comparable=lambda data: {
+        k:v for k,v in data.items()
+        if k not in {"protocol","producer_verify_sha256"}
+    }
+    if not current_target or comparable(current_target)!=comparable(target):
+        return False,"nested-dependency-repair-lineage-changed:"+detail
+    with dispatch_lock:
+        with attempt_lock():
+            ledger=load_attempts()
+            entry=(ledger.get("deliverables") or {}).get(did)
+            if not isinstance(entry,dict):
+                return False,"nested-dependency-repair-ledger-missing"
+            state=attempt_state(entry)
+            count=int(entry.get("count") or 0)
+            sessions=entry.get("sessions") or []
+            existing=[
+                x for x in (entry.get("plan_contract_revisions") or [])
+                if isinstance(x,dict)
+                and x.get("source")=="supervisor-dependency-contract-repair"
+                and x.get("producer")==producer
+                and x.get("producer_previous_sha256")==old_producer
+            ]
+            if existing:
+                match=existing[0]
+                if (
+                    len(existing)==1
+                    and match.get("session")==sid
+                    and match.get("attempt")==count
+                    and match.get("root")==root
+                    and match.get("producer_current_sha256")==new_producer
+                    and match.get("consumer_verify_sha256")==old_consumer
+                    and state.get("valid")
+                    and int(state.get("allowed_attempts") or 0)>=count+1
+                ):
+                    return True,"already-authorized"
+                return False,"nested-dependency-repair-conflicting-credit"
+            if not (
+                state.get("valid") and count>=1
+                and count==int(state.get("allowed_attempts") or -1)
+                and isinstance(sessions,list) and sessions[-1:]==[sid]
+                and any(
+                    x.get("attempt")==count
+                    and x.get("session")==sid
+                    and x.get("classification")=="genuine"
+                    and x.get("reason")=="verify-failed-1"
+                    for x in (entry.get("failure_history") or [])
+                    if isinstance(x,dict)
+                )
+            ):
+                return False,"nested-dependency-repair-terminal-attempt-not-exhausted"
+            row={
+                "protocol":"v2-dependency-contract-replacement-v1",
+                "source":"supervisor-dependency-contract-repair",
+                "attempt":count,"session":sid,"root":root,
+                "producer":producer,
+                "producer_previous_sha256":old_producer,
+                "producer_current_sha256":new_producer,
+                "consumer_verify_sha256":old_consumer,
+                "previous_result":"verify-failed-1",
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+            }
+            entry.setdefault("plan_contract_revisions",[]).append(row)
+            trial=attempt_state(entry)
+            if not trial.get("valid") or int(trial.get("allowed_attempts") or 0)<count+1:
+                entry["plan_contract_revisions"].pop()
+                return False,"nested-dependency-repair-ledger-projection-invalid"
+            entry.pop("split_required",None)
+            save_attempts(ledger)
+    return True,"dependency-contract-reverify-authorized"
+
+
+def reconcile_nested_contract_challenge_repairs():
+    """Replace a terminal writer only after a changed, independently READY upstream contract."""
+    if not PROJECT or not plan_ready():
+        return []
+    resolved=[]
+    work=Path(PROJECT)/".opencode-v2"/"work"
+    for path in sorted(work.glob("D*.contract-challenge.json")):
+        record=load_json_object(path,label="nested contract challenge")
+        target=record.get("nested_repair")
+        if not isinstance(target,dict) or record.get("state")!="planner-pending":
+            continue
+        if target.get("protocol")!=SPLIT_CHALLENGE_REPAIR_PROTOCOL:
+            continue
+        did=str(record.get("deliverable") or "")
+        producer=str(target.get("producer") or "")
+        manifest=(load_manifest().get("leaves") or {})
+        root_leaf=manifest.get(target.get("root"))
+        upstream=manifest.get(producer)
+        if not isinstance(root_leaf,dict) or not isinstance(upstream,dict):
+            continue
+        if (
+            hashlib.sha256(str(root_leaf.get("verify_command") or "").encode()).hexdigest()
+            !=target.get("root_verify_sha256")
+            or hashlib.sha256(str(upstream.get("verify_command") or "").encode()).hexdigest()
+            ==target.get("producer_verify_sha256")
+            or not ready_info(producer)
+        ):
+            continue
+        sid=str(record.get("session") or "")
+        if not all(ready_info(x["handoff"]) for x in target["lineage"]):
+            continue
+        ok,detail=_register_nested_dependency_repair(sid,did,target)
+        if not ok:
+            if record.get("last_upgrade_denial")!=detail:
+                record["last_upgrade_denial"]=detail
+                atomic_write_json(path,record)
+                log(f"NESTED_CHALLENGE_REVERIFY_WAIT did={did} reason={detail}")
+            continue
+        record["state"]="upstream-repaired"
+        record["upgrade_result"]=detail
+        record["upgraded_at"]=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
+        atomic_write_json(path,record)
+        log(f"NESTED_CHALLENGE_REVERIFY_AUTHORIZED session={sid} did={did} producer={producer}")
+        csv("NESTED_CHALLENGE_REVERIFY_AUTHORIZED",sid,"supervisor",f"{did} producer={producer}")
+        resolved.append(did)
+    return resolved
+
+
+def request_leaf_contract_challenge_repair(did,sid,reason):
+    """Request bounded planner review after supervisor-confirmed Verify contradiction."""
+    if not PROJECT or not did or not sid:
+        return False,"contract-challenge-missing-identity"
+    reason=" ".join(str(reason or "").split())
+    reason_errors=validate_contract_challenge_reason(reason)
+    if reason_errors:
+        return False,"contract-challenge-reason-invalid:"+reason_errors[0]
+
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    if not isinstance(leaf,dict):
+        return False,"contract-challenge-leaf-missing"
+    nested={}
+    if split_depth(did)>0:
+        nested,detail=_nested_contract_challenge_target(did,reason)
+        if not nested:
+            return False,detail
+        key=nested["producer_key"]
+        affected=[key]
+    else:
+        try:
+            key=_structured_plan_symbolic_key(did)
+        except (ValueError,StateCorruptionError):
+            return False,"contract-challenge-structured-key-missing"
+        affected=[key]
+    command=str(leaf.get("verify_command") or "").strip()
+    if not command:
+        return False,"contract-challenge-verify-missing"
+    acceptance_ids=[
+        value for value in (leaf.get("acceptance_ids") or [])
+        if isinstance(value,str) and value
+    ]
+
+    repair_path=Path(PROJECT)/".opencode-v2"/STRUCTURED_PLAN_REPAIR_FILENAME
+    if repair_path.exists():
+        existing=load_json_object(
+            repair_path,label="implementation plan repair packet"
+        )
+        if (
+            existing.get("source")=="runtime-leaf-contract-challenge"
+            and existing.get("affected_keys")==affected
+            and (existing.get("challenge") or {}).get("session")==sid
+        ):
+            return True,"already-requested"
+        return False,"contract-challenge-repair-already-pending"
+
+    message=(
+        f"{key}: implementation session {sid} raised a bounded completion-contract "
+        f"challenge after exact Verify failed under supervisor recheck. Review ONLY "
+        f"this leaf's verify_command/Done-when against its authoritative Acceptance IDs "
+        f"{','.join(acceptance_ids) if acceptance_ids else '(none)'}. Do not weaken "
+        f"Outcome or Acceptance. Change the leaf only if the challenge is valid; "
+        f"otherwise preserve it unchanged so deterministic repair validation fails "
+        f"closed. Challenge evidence: {reason}"
+    )
+    if nested:
+        message=(
+            f"Authoritative nested writer {did} reported an exact-Verify "
+            f"conflict outside its ownership. Direct original dependency "
+            f"{nested['producer']} ({nested['producer_key']}) alone owns "
+            f"{nested['producer_path']}. Repair ONLY this producer's "
+            f"structured verify_command and Done-when. Strengthen its "
+            f"verification so the upstream artifact satisfies the documented "
+            f"missing requirement without weakening Acceptance. Do not edit "
+            f"the parent {nested['root']} ({nested['root_key']}): its canonical "
+            f"verify_command must remain UNCHANGED and exactly the final "
+            f"test runner. The supervisor will grant ONE bounded "
+            f"dependency-contract reverify to the original nested writer "
+            f"only after this producer is independently READY. "
+            f"Worker evidence: {reason}"
+        )
+    payload={
+        "protocol":"v2-structured-plan-repair-v1",
+        "source":"runtime-leaf-contract-challenge",
+        "whole_plan":False,
+        "affected_keys":affected,
+        "errors":[{
+            "key":key,
+            "code":"runtime-leaf-contract-challenge",
+            "message":message,
+        }],
+        "baseline":_repair_baseline(affected),
+        "planner_restart_baseline":planner_restart_count(),
+        "challenge":{
+            "deliverable":did,
+            "session":sid,
+            "acceptance_ids":acceptance_ids,
+            "verify_sha256":hashlib.sha256(command.encode()).hexdigest(),
+            "reason":reason,
+            **({"nested_repair":{
+                "protocol":SPLIT_CHALLENGE_REPAIR_PROTOCOL,**nested,
+            }} if nested else {}),
+        },
+    }
+    atomic_write_json(repair_path,payload)
+    atomic_write_json(
+        Path(PROJECT)/".opencode-v2"/"work"/f"{did}.contract-challenge.json",
+        {
+            "owner":"supervisor",
+            "protocol":"v2-leaf-contract-challenge-v1",
+            "deliverable":did,
+            "session":sid,
+            "structured_key":key,
+            "acceptance_ids":acceptance_ids,
+            "verify_sha256":hashlib.sha256(command.encode()).hexdigest(),
+            "reason":reason,
+            **({"nested_repair":{
+                "protocol":SPLIT_CHALLENGE_REPAIR_PROTOCOL,**nested,
+            },"state":"planner-pending"} if nested else {}),
+            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        },
+    )
+    (Path(PROJECT)/".opencode-v2"/"IMPLEMENTATION_PLAN.ready").unlink(
+        missing_ok=True
+    )
+    log(
+        f"LEAF_CONTRACT_CHALLENGE_REQUESTED deliverable={did} key={key} "
+        f"session={sid}"
+    )
+    csv(
+        "LEAF_CONTRACT_CHALLENGE_REQUESTED",sid,"supervisor",
+        f"{did} key={key}",
+    )
+    return True,"contract-challenge-repair"
+
+
+def reconcile_invalid_leaf_contract_challenge_repair():
+    """Retire a stale runtime leaf challenge that fails shared contract validation."""
+    if not PROJECT:
+        return False
+    ctrl=Path(PROJECT)/".opencode-v2"
+    repair_path=ctrl/STRUCTURED_PLAN_REPAIR_FILENAME
+    if not repair_path.exists():
+        return False
+    try:
+        repair=load_json_object(
+            repair_path,label="implementation plan repair packet"
+        )
+    except Exception:
+        return False
+    if repair.get("source")!="runtime-leaf-contract-challenge":
+        return False
+    challenge=repair.get("challenge")
+    if not isinstance(challenge,dict):
+        challenge={}
+    reason=" ".join(str(challenge.get("reason") or "").split())
+    errors=validate_contract_challenge_reason(reason)
+    if not errors:
+        return False
+
+    did=str(challenge.get("deliverable") or "")
+    digest=hashlib.sha256(
+        json.dumps(repair,sort_keys=True,separators=(",",":")).encode()
+    ).hexdigest()
+    safe_did=did if valid_deliverable_id(did) else "unknown"
+    archive=ctrl/"work"/(
+        f"{safe_did}.contract-challenge.rejected-{digest[:12]}.json"
+    )
+    atomic_write_json(
+        archive,
+        {
+            "owner":"supervisor",
+            "protocol":"v2-leaf-contract-challenge-rejection-v1",
+            "deliverable":did,
+            "validation_errors":errors,
+            "repair_packet":repair,
+            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        },
+    )
+
+    challenge_path=ctrl/"work"/f"{safe_did}.contract-challenge.json"
+    if challenge_path.exists():
+        try:
+            record=load_json_object(
+                challenge_path,label=f"{safe_did} contract challenge"
+            )
+        except Exception:
+            record={}
+        record.update({
+            "state":"rejected",
+            "validation_errors":errors,
+            "rejection_archive":archive.name,
+        })
+        atomic_write_json(challenge_path,record)
+
+    repair_path.unlink(missing_ok=True)
+    finalized=_finalize_current_plan_without_rearm()
+    log(
+        f"LEAF_CONTRACT_CHALLENGE_REJECTED_STALE deliverable={did or 'unknown'} "
+        f"reason={errors[0]} finalized={str(finalized).lower()}"
+    )
+    csv(
+        "LEAF_CONTRACT_CHALLENGE_REJECTED_STALE","", "supervisor",
+        f"{did or 'unknown'} {errors[0]} finalized={str(finalized).lower()}",
+    )
+    return True
+
+
 def planner_plan_state(plan_path):
     """Classify durable structured-plan progress without Markdown bookkeeping."""
     path=Path(plan_path)
@@ -7077,6 +11166,10 @@ def planner_restart_count():
         raise StateCorruptionError("planner restart ledger count is negative")
     return count
 
+def planner_restart_limit():
+    return state_planner_restart_limit(PROJECT,MAX_PLANNER_RESTARTS)
+
+
 def planner_restart_counted_sessions(data):
     raw=data.get("counted_sessions")
     if raw is None:
@@ -7089,6 +11182,28 @@ def planner_restart_counted_sessions(data):
     ):
         raise StateCorruptionError("planner restart counted_sessions is invalid")
     return list(raw)
+
+def planner_infrastructure_recoveries(data):
+    raw=data.get("infrastructure_recoveries")
+    if raw is None:
+        return []
+    if not isinstance(raw,list):
+        raise StateCorruptionError("planner infrastructure_recoveries is invalid")
+    out=[]; seen=set()
+    for item in raw:
+        if not isinstance(item,dict):
+            raise StateCorruptionError("planner infrastructure recovery entry is invalid")
+        sid=str(item.get("session") or "")
+        if (
+            not sid or sid in seen
+            or item.get("source")!="operator-controller"
+            or not item.get("timestamp")
+            or not str(item.get("reason") or "").strip()
+        ):
+            raise StateCorruptionError("planner infrastructure recovery entry is invalid")
+        seen.add(sid); out.append(dict(item))
+    return out
+
 
 def record_planner_restart(sid,reason):
     """Charge at most one restart slot to one concrete planner session."""
@@ -7107,7 +11222,11 @@ def record_planner_restart(sid,reason):
         if count < 0:
             raise StateCorruptionError("planner restart ledger count is negative")
         counted=planner_restart_counted_sessions(data)
-        if sid in counted or count>=MAX_PLANNER_RESTARTS:
+        recoveries=planner_infrastructure_recoveries(data)
+        recovered={str(item.get("session") or "") for item in recoveries}
+        if sid in recovered:
+            return False
+        if sid in counted or count>=planner_restart_limit():
             return False
         counted.append(sid)
         atomic_write_json(
@@ -7118,14 +11237,113 @@ def record_planner_restart(sid,reason):
                 "retired_session":sid,
                 "reason":str(reason)[:1000],
                 "counted_sessions":counted,
+                "infrastructure_recoveries":recoveries,
             },
         )
         return True
 
+
+def recover_planner_infrastructure_failure(sid,reason):
+    """Refund one proven harness-induced planner failure, once and auditably."""
+    sid=str(sid or "").strip(); reason=str(reason or "").strip()
+    if not sid or not reason:
+        return False,"planner-infrastructure-recovery-requires-session-and-reason"
+    if len(reason)>1000:
+        return False,"planner-infrastructure-recovery-reason-too-long"
+    if _session_agent_db(sid)!="implementation-planner":
+        return False,"planner-infrastructure-recovery-session-agent-mismatch"
+    try:
+        if sid in _v1_active_session_ids(strict=True):
+            return False,"planner-infrastructure-recovery-session-still-active"
+    except Exception as exc:
+        return False,f"planner-infrastructure-recovery-status-error-{type(exc).__name__}"
+
+    structured=".opencode-v2/IMPLEMENTATION_PLAN.structured.json"
+    records=session_completed_tool_records(sid)
+    mutations=[]
+    for record in records:
+        tool=str(record.get("tool") or "")
+        args=record.get("input") if isinstance(record.get("input"),dict) else {}
+        if tool not in {"write","edit","apply_patch","patch","multiedit"}:
+            continue
+        if not _tool_targets_exact_project_path(tool,args,structured):
+            return False,"planner-infrastructure-recovery-nonstructured-mutation"
+        mutations.append(record)
+    partial_reread_deadlock=bool(mutations) and planner_structured_reread_deadlock_evidence(
+        sid,structured
+    )
+    packet_lifecycle_deadlock=(
+        bool(mutations)
+        and planner_repair_packet_lifecycle_deadlock_evidence(sid,structured)
+    )
+    if mutations and not (partial_reread_deadlock or packet_lifecycle_deadlock):
+        return False,"planner-infrastructure-recovery-structured-plan-was-mutated"
+
+    with planner_restart_lock:
+        data=load_json_object(
+            planner_restart_path(),
+            default_missing={"owner":"supervisor","count":0,"counted_sessions":[]},
+            label="planner restart ledger",
+        )
+        if data.get("owner") not in (None,"supervisor"):
+            return False,"planner-infrastructure-recovery-ledger-owner-invalid"
+        recoveries=planner_infrastructure_recoveries(data)
+        if any(item.get("session")==sid for item in recoveries):
+            return True,"already-recovered"
+        counted=planner_restart_counted_sessions(data)
+        if sid not in counted:
+            return False,"planner-infrastructure-recovery-session-not-counted"
+        try:
+            count=int(data.get("count") or 0)
+        except (ValueError,TypeError):
+            return False,"planner-infrastructure-recovery-count-invalid"
+        if count<1:
+            return False,"planner-infrastructure-recovery-count-invalid"
+        original_reason=str(data.get("reason") or "")
+        if sid==str(data.get("retired_session") or "") and \
+                not original_reason.startswith("planner_plan_progress_stalled"):
+            return False,"planner-infrastructure-recovery-not-stall-retirement"
+        counted=[item for item in counted if item!=sid]
+        recoveries.append({
+            "session":sid,
+            "source":"operator-controller",
+            "reason":reason,
+            "original_reason":original_reason,
+            "recovery_kind":(
+                "partial-structured-reread-deadlock"
+                if partial_reread_deadlock
+                else (
+                    "repair-packet-lifecycle-deadlock"
+                    if packet_lifecycle_deadlock
+                    else "zero-mutation-infrastructure"
+                )
+            ),
+            "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+        })
+        atomic_write_json(
+            planner_restart_path(),
+            {
+                "owner":"supervisor",
+                "count":count-1,
+                "retired_session":counted[-1] if counted else "",
+                "reason":original_reason,
+                "counted_sessions":counted,
+                "infrastructure_recoveries":recoveries,
+            },
+        )
+    log(
+        f"PLANNER_INFRASTRUCTURE_RECOVERED session={sid} "
+        f"count={count-1} reason={reason}"
+    )
+    csv("PLANNER_INFRASTRUCTURE_RECOVERED",sid,"operator-controller",reason)
+    return True,"recovered"
+
+
 def planner_retirement_reason(sid,elapsed,plan_path=None,paused=False):
     """One shared planner invariant for fresh and replacement sessions."""
-    if planner_restart_count()>=MAX_PLANNER_RESTARTS and not plan_ready():
-        return f"planner_restart_limit={MAX_PLANNER_RESTARTS}"
+    limit=planner_restart_limit()
+    if planner_restart_count()>=limit and not plan_ready():
+        return f"planner_restart_limit={limit}"
     return planner_progress_reason(sid,elapsed,plan_path,paused=paused)
 
 def _strict_owned_artifact_text(raw):
@@ -7257,20 +11475,28 @@ def load_supervisor_verify_evidence(did):
 
 
 def reconcile_plan_contract_revisions():
-    """Expire legacy completion when a new plan changes its exact Verify."""
+    """Reconcile historical execution when a plan changes its exact Verify.
+
+    A run made under an older Verify cannot exhaust the replacement contract:
+    both previously verified completion and failed exact-Verify history receive
+    one bounded old->new transition credit. The replacement credit is keyed to
+    the historical attempt, not to every
+    intermediate planner edit. If the same attempt's Verify is refined again
+    before a replacement dispatch, update that durable revision row in place.
+    """
     if not PROJECT:
         return []
     leaves=(load_manifest().get("leaves") or {})
     changed=[]
+    failed_contract_split_clear=[]
+    normalized_candidates=[]
     with dispatch_lock:
         with attempt_lock():
             data=load_attempts(); entries=data.get("deliverables") or {}
             for did,leaf in leaves.items():
                 if not isinstance(leaf,dict):
                     continue
-                ready=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready"
-                if not ready.exists():
-                    continue
+                normalized_candidates.append(did)
                 entry=entries.get(did)
                 if not isinstance(entry,dict):
                     continue
@@ -7280,32 +11506,105 @@ def reconcile_plan_contract_revisions():
                     continue
                 command=str(leaf.get("verify_command") or "")
                 latest=load_supervisor_verify_evidence(did).get("latest") or {}
-                old_command=str(latest.get("command") or "") if isinstance(latest,dict) else ""
-                if not command or latest.get("result")!="verified" or old_command==command:
-                    continue
-                digest=hashlib.sha256(command.encode()).hexdigest()
-                rows=entry.setdefault("plan_contract_revisions",[])
-                already=any(
-                    isinstance(row,dict) and int(row.get("attempt") or 0)==attempt
-                    and row.get("current_verify_sha256")==digest
-                    for row in rows
+                old_command=(
+                    str(latest.get("command") or "")
+                    if isinstance(latest,dict) else ""
                 )
-                if not already:
+                previous_result=str(latest.get("result") or "")
+                previous_executed=latest.get("executed") is True
+                if (
+                    not command
+                    or not previous_executed
+                    or not (
+                        previous_result=="verified"
+                        or previous_result.startswith("verify-failed-")
+                    )
+                    or old_command==command
+                ):
+                    continue
+
+                digest=hashlib.sha256(command.encode()).hexdigest()
+                previous_digest=hashlib.sha256(
+                    old_command.encode()
+                ).hexdigest()
+                rows=entry.setdefault("plan_contract_revisions",[])
+                same_transition=[
+                    row for row in rows
+                    if isinstance(row,dict)
+                    and row.get("source")=="supervisor-plan-contract-revision"
+                    and row.get("previous_verify_sha256")==previous_digest
+                    and row.get("current_verify_sha256")==digest
+                ]
+                same_attempt=[
+                    row for row in rows
+                    if isinstance(row,dict)
+                    and row.get("source")=="supervisor-plan-contract-revision"
+                    and int(row.get("attempt") or 0)==attempt
+                ]
+                row_changed=False
+                if same_transition:
+                    # The same old->new Verify change was already credited on
+                    # an earlier attempt. Do not mint another replacement slot.
+                    pass
+                elif same_attempt:
+                    row=same_attempt[-1]
+                    if row.get("current_verify_sha256")!=digest:
+                        row["current_verify_sha256"]=digest
+                        row["updated_at"]=time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                        )
+                        row_changed=True
+                else:
                     rows.append({
                         "attempt":attempt,
                         "source":"supervisor-plan-contract-revision",
-                        "previous_verify_sha256":hashlib.sha256(old_command.encode()).hexdigest(),
+                        "previous_verify_sha256":previous_digest,
                         "current_verify_sha256":digest,
-                        "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                        "previous_result":previous_result,
+                        "timestamp":time.strftime(
+                            "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                        ),
                     })
+                    row_changed=True
+
+                if (
+                    row_changed
+                    and previous_result.startswith("verify-failed-")
+                    and not leaf.get("split_children")
+                ):
+                    entry.pop("split_required",None)
+                    failed_contract_split_clear.append(did)
+
+                ready=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready"
+                ready_existed=ready.exists()
                 ready.unlink(missing_ok=True)
-                changed.append(did)
+                if row_changed or ready_existed:
+                    changed.append(did)
             if changed:
                 save_attempts(data)
+
+    for did in dict.fromkeys(failed_contract_split_clear):
+        _archive_split_state_for_contract_repair(did)
+        _clear_split_request_state_for_contract_repair(did)
+        splitter_lock_path(did).unlink(missing_ok=True)
+        log(
+            "PLAN_CONTRACT_FAILED_VERIFY_SUPERSEDED "
+            f"deliverable={did}"
+        )
+        csv(
+            "PLAN_CONTRACT_FAILED_VERIFY_SUPERSEDED","",
+            "supervisor",did,
+        )
+
+    normalized=[]
+    for did in normalized_candidates:
+        if normalize_supervisor_replacement_record(did):
+            normalized.append(did)
+
     for did in changed:
         log(f"PLAN_CONTRACT_READY_REVOKED deliverable={did}")
         csv("PLAN_CONTRACT_READY_REVOKED","","supervisor",did)
-    return changed
+    return list(dict.fromkeys(changed+normalized))
 
 
 def persist_supervisor_verify_evidence(did,sid,command,checked,detail,error=""):
@@ -7372,6 +11671,15 @@ def run_verify_fail_closed(command,runner=subprocess.run,session=""):
         kwargs={"cwd":PROJECT,"timeout":240}
         if runner is subprocess.run:
             kwargs.update({"capture_output":True,"text":True})
+            # Sessionless verification is used for split-parent collapse. The
+            # canonical run-checks command must be observational there:
+            # regenerating TEST_REPORT/test-logs on the real project would be
+            # detected (correctly) as a Verify-time project mutation. The
+            # canonical runner already supports a no-persist validation mode.
+            if command==RUN_CHECKS_COMMAND:
+                env=os.environ.copy()
+                env["V2_ACCEPTANCE_SANDBOX"]="1"
+                kwargs["env"]=env
         checked=runner(
             ["/bin/bash","-euo","pipefail","-c",command],
             **kwargs,
@@ -7912,12 +12220,22 @@ SUPERVISOR_DYNAMIC_CONTROL_PATHS={
     ".opencode-v2/control-status.json",
     ".opencode-v2/reference-gate.json",
     ".opencode-v2/reference-validation-gate.json",
+    ".opencode-v2/ACCEPTANCE.ready",
+    ".opencode-v2/ACCEPTANCE.guard-errors.txt",
+    ".opencode-v2/IMPLEMENTATION_PLAN.ready",
+    ".opencode-v2/IMPLEMENTATION_PLAN.md",
+    ".opencode-v2/IMPLEMENTATION_PLAN.structured.json",
+    ".opencode-v2/IMPLEMENTATION_PLAN.structured-map.json",
     ".opencode-v2/IMPLEMENTATION_PLAN.guard.json",
+    ".opencode-v2/IMPLEMENTATION_PLAN.guard-errors.txt",
+    ".opencode-v2/IMPLEMENTATION_PLAN.repair.json",
+    ".opencode-v2/TEST_REPORT.json",
     ".opencode-v2/work/stage-a-controller-executions.json",
     ".opencode-v2/work/stage-a-controller.lock",
 }
 SUPERVISOR_DYNAMIC_CONTROL_PREFIXES=(
     ".opencode-v2/query/",
+    ".opencode-v2/test-logs/",
 )
 
 def supervisor_dynamic_control_path(path):
@@ -8038,6 +12356,33 @@ def _session_agent_db(sid):
         return str(row[0] or "") if row else ""
     except Exception:
         return ""
+
+
+def effective_implementation_agent(sid,persisted_agent,first_user=""):
+    """Recover a bound worker's manifest role after transport rewrites agent state.
+
+    OpenCode can persist transport-root after compaction even though the same
+    session is still the implementation child already bound in attempts.json.
+    Never infer implementation authority from transport state alone: require the
+    durable prompt identity, an exact session/attempt ledger binding, and a valid
+    manifest implementation role.
+    """
+    agent=str(persisted_agent or "")
+    if agent in IMPLEMENTATION_AGENTS:
+        return agent
+
+    text=first_user or first_user_text_db(sid)
+    did=parse_deliverable(strip_subagent_prefix(text))
+    if not did:
+        return agent
+
+    attempt=attempt_sequence_for_session(sid,did)
+    if attempt < 1:
+        return agent
+
+    leaf=(load_manifest().get("leaves") or {}).get(did)
+    role=str(leaf.get("role") or "") if isinstance(leaf,dict) else ""
+    return role if role in IMPLEMENTATION_AGENTS else agent
 
 
 def _owned_artifact_changed_since_execution_baseline(did,attempt):
@@ -8168,6 +12513,137 @@ def _current_tool_mutates_owned_artifact(did,tool,args):
             if any(re.search(pattern,command) for pattern in patterns):
                 return True
     return False
+
+
+RECOVERABLE_EARLY_WRITE_STEERING_PREFIXES=(
+    "EARLY_WRITE_PROBE_WRITE_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_RETURN_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_CONTRACT_CHALLENGE_REQUIRED",
+)
+
+
+def recoverable_early_write_steering_error(error):
+    text=str(error or "").strip()
+    return any(
+        text.startswith(prefix)
+        for prefix in RECOVERABLE_EARLY_WRITE_STEERING_PREFIXES
+    )
+
+
+def persisted_effective_tool_turns(sid):
+    """Count tool turns, excluding turns made only of recoverable steering denials."""
+    def turn_counts(parts):
+        saw_tool=False
+        for part in parts:
+            if not isinstance(part,dict) or part.get("type")!="tool":
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            status=str(state.get("status") or "").lower()
+            if status not in {"completed","error"}:
+                continue
+            saw_tool=True
+            if status=="completed":
+                return True
+            if not recoverable_early_write_steering_error(state.get("error")):
+                return True
+        return False if saw_tool else None
+
+    if v1_runtime_enabled():
+        try:
+            turns=0
+            for mid,role,_created in _v1_message_rows(sid):
+                if role!="assistant":
+                    continue
+                counted=turn_counts(_v1_message_parts(mid))
+                if counted:
+                    turns+=1
+            return turns
+        except Exception:
+            return 0
+
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq",
+            (sid,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return 0
+    turns=0
+    for (raw,) in rows:
+        try:
+            data=json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        parts=data.get("content") if isinstance(data,dict) else []
+        if not isinstance(parts,list):
+            continue
+        if turn_counts(parts):
+            turns+=1
+    return turns
+
+
+def session_completed_tool_records(sid):
+    out=[]
+    if v1_runtime_enabled():
+        try:
+            for mid,role,_created in _v1_message_rows(sid):
+                if role!="assistant":
+                    continue
+                for part in _v1_message_parts(mid):
+                    if part.get("type")!="tool":
+                        continue
+                    state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                    status=str(state.get("status") or "").lower()
+                    if status not in {"completed","error"}:
+                        continue
+                    inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                    out.append({
+                        "tool":str(part.get("tool") or ""),
+                        "input":inp,
+                        "status":status,
+                        "error":str(state.get("error") or ""),
+                    })
+            return out
+        except Exception:
+            return []
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM session_message "
+            "WHERE session_id=? AND type='assistant' ORDER BY seq",
+            (sid,),
+        ).fetchall()
+        con.close()
+        for (raw,) in rows:
+            try:
+                data=json.loads(raw) if raw else {}
+            except Exception:
+                continue
+            content=data.get("content") if isinstance(data,dict) else []
+            if not isinstance(content,list):
+                continue
+            for part in content:
+                if not isinstance(part,dict) or part.get("type")!="tool":
+                    continue
+                state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                status=str(state.get("status") or "").lower()
+                if status not in {"completed","error"}:
+                    continue
+                inp=state.get("input") if isinstance(state.get("input"),dict) else {}
+                out.append({
+                    "tool":str(part.get("name") or part.get("tool") or ""),
+                    "input":inp,
+                    "status":status,
+                    "error":str(state.get("error") or ""),
+                })
+    except Exception:
+        pass
+    return out
 
 
 def session_completed_tool_inputs(sid):
@@ -8302,6 +12778,65 @@ def _v1_progress_discovery_batch_open(sid,did):
     )
 
 
+def _progress_handoff_ready_marker(text):
+    lines=[line.strip() for line in str(text or "").splitlines()]
+    markers=[line for line in lines if line.startswith("HANDOFF_READY:")]
+    return markers == [SPLIT_HANDOFF_MARKER]
+
+
+def _progress_handoff_unowned_repair_targets(did,text):
+    """Return explicit create/write/edit/update targets outside parent ownership."""
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    parent=str(leaf.get("parent") or "") if isinstance(leaf,dict) else ""
+    parent_leaf=(load_manifest().get("leaves") or {}).get(parent,{})
+    owned=owned_artifact_paths(parent_leaf) if isinstance(parent_leaf,dict) else []
+    if not parent or not owned or not _progress_handoff_ready_marker(text):
+        return []
+    payload=str(text or "")
+    next_step=payload.split("Next step:",1)[1] if "Next step:" in payload else payload
+    found=[]
+    # Bind the repair verb to its immediate grammatical object.  The older
+    # implementation scanned up to 120 characters for the next backticked
+    # span, which made ordinary prose such as
+    #   edit tests/test_text.py ..., replacing `from src.text import ...`
+    # attribute the source-code snippet as the repair target.  Accept either
+    # an immediately backticked path or an immediately following path token;
+    # do not mine later examples/commands from the sentence.
+    connector=(
+        r"(?:(?:the|a|an|new|existing|owned|parent-owned|sole|only|file|"
+        r"path|artifact)\s+){0,4}"
+    )
+    target_re=re.compile(
+        r"(?im)\b(?:create|write|edit|modify|update)\b\s+"
+        + connector
+        + r"(?:`([^`\n]+)`|([^\s,;:()]+))"
+    )
+    for match in target_re.finditer(next_step):
+        # Safety prose often says things like "do not create or edit any
+        # unowned artifacts; update the owned manifest instead".  Such
+        # negated verbs describe forbidden actions, not proposed repair
+        # targets.  Scope negation to the current clause so a later positive
+        # instruction after ';' / sentence boundary is still enforced.
+        prefix=next_step[:match.start()]
+        clause=re.split(r"[;.!?\n]",prefix)[-1].lower()
+        if re.search(
+            r"\b(?:do\s+not|don't|never|must\s+not|should\s+not|"
+            r"cannot|can't)\b",
+            clause,
+        ):
+            continue
+        raw=(match.group(1) or match.group(2) or "").strip()
+        if raw.lower() in {
+            "or","and","any","anything","unowned","outside","only",
+            "the","a","an",
+        }:
+            continue
+        rel=_project_relative_tool_path(raw)
+        if rel and not _path_inside_any(rel,owned):
+            found.append(rel)
+    return list(dict.fromkeys(found))
+
+
 def progress_handoff_tool_state(sid,tool,args):
     agent=_session_agent_db(sid)
     if agent!="probe-builder":
@@ -8330,6 +12865,63 @@ def progress_handoff_tool_state(sid,tool,args):
             last_progress=index
 
     current_progress_write=_tool_targets_exact_progress_file(did,tool,args)
+    if current_progress_write:
+        raw_content=""
+        if isinstance(args,dict):
+            if tool=="write" and isinstance(args.get("content"),str):
+                raw_content=args["content"]
+            else:
+                for key in ("newString","new_string","replacement","text"):
+                    if isinstance(args.get(key),str):
+                        raw_content=args[key]
+                        break
+        if _progress_handoff_ready_marker(raw_content):
+            if tool!="write":
+                return "deny","PROGRESS_READY_REQUIRES_FULL_WRITE"
+            bad=_progress_handoff_unowned_repair_targets(did,raw_content)
+            if bad:
+                leaf=(load_manifest().get("leaves") or {}).get(did,{})
+                parent=str(leaf.get("parent") or "") if isinstance(leaf,dict) else ""
+                parent_leaf=(load_manifest().get("leaves") or {}).get(parent,{})
+                allowed=(
+                    owned_artifact_paths(parent_leaf)
+                    if isinstance(parent_leaf,dict) else []
+                )
+                return "deny",(
+                    "PROGRESS_HANDOFF_UNOWNED_REPAIR_TARGET "
+                    f"paths={','.join(bad)} "
+                    f"allowed_targets={','.join(allowed) or '-'} "
+                    "rule=mention-unowned-paths-as-evidence-only; "
+                    "do-not-tell-writer-to-create/write/edit/update-unowned-artifacts; "
+                    "rewrite-Next-step-as-parent-owned-artifact-delta-that-removes-or-"
+                    "replaces-stale-requirements"
+                )
+
+    # Rejected splitter/model outputs are non-authoritative history. Progress
+    # probes diagnose from supervisor evidence + current artifacts only.
+    if tool=="read":
+        for raw in _target_path_values(args):
+            rel=_project_relative_tool_path(raw)
+            if not rel:
+                continue
+            name=Path(rel).name
+            parent=str(leaf.get("parent") or "")
+            if (
+                parent
+                and rel.startswith(".opencode-v2/work/")
+                and (
+                    name.startswith(f"{parent}.split-proposal.failed-")
+                    or name.startswith(
+                        f"{parent}.split-proposal.corrective-rejected-"
+                    )
+                    or name.startswith(f"{parent}.splitter-primary-response-")
+                )
+            ):
+                return "deny",(
+                    "PROGRESS_NONAUTHORITATIVE_HISTORY_DENY "
+                    f"path={rel} use=context-inline-supervisor-evidence"
+                )
+
     if last_progress < 0:
         if not history:
             if tool=="read" and _tool_targets_exact_project_path(tool,args,context):
@@ -8347,7 +12939,23 @@ def progress_handoff_tool_state(sid,tool,args):
     if not split_handoff_progress_checkpoint(progress_text):
         if current_progress_write:
             return "allow","repair-invalid-checkpoint"
-        return "deny","PROGRESS_CHECKPOINT_REQUIRED"
+        return "deny",(
+            "PROGRESS_CHECKPOINT_REQUIRED "
+            f"next_tool=write:{progress} "
+            "required_sections=HANDOFF_READY,Findings,Evidence,Next-step "
+            "no-discovery=true"
+        )
+
+    if split_handoff_progress_complete(progress_text):
+        expected=str(leaf.get("verify_command") or "").strip()
+        command=str((args or {}).get("command") or "").strip() if isinstance(args,dict) else ""
+        if tool=="bash" and expected and command==expected:
+            return "allow","progress-ready-exact-verify"
+        return "deny",(
+            "PROGRESS_READY_IMMUTABLE "
+            f"next_tool=exact-verify:{expected or '-'} "
+            "no-rewrite=true no-discovery=true"
+        )
 
     if current_progress_write:
         return "allow","checkpoint-write"
@@ -8360,7 +12968,12 @@ def progress_handoff_tool_state(sid,tool,args):
         return "allow","one-discovery-after-checkpoint"
     if _v1_progress_discovery_batch_open(sid,did):
         return "allow","same-discovery-response"
-    return "deny","PROGRESS_CHECKPOINT_REQUIRED"
+    return "deny",(
+        "PROGRESS_CHECKPOINT_REQUIRED "
+        f"next_tool=write:{progress} "
+        "required_sections=HANDOFF_READY,Findings,Evidence,Next-step "
+        "no-discovery=true"
+    )
 
 
 def _current_tool_directly_mutates_owned_artifact(did,tool,args):
@@ -8368,6 +12981,22 @@ def _current_tool_directly_mutates_owned_artifact(did,tool,args):
     if tool not in {"write","edit","apply_patch","patch","multiedit"}:
         return False
     return _current_tool_mutates_owned_artifact(did,tool,args)
+
+
+def session_owned_mutation_seen(sid,did):
+    """Whether this exact worker session has completed an owned mutation."""
+    if not sid or not did:
+        return False
+    for rec in session_completed_tool_records(sid):
+        if (
+            isinstance(rec,dict)
+            and rec.get("status")=="completed"
+            and _current_tool_mutates_owned_artifact(
+                did,rec.get("tool",""),rec.get("input") or {}
+            )
+        ):
+            return True
+    return False
 
 
 def probe_direct_write_gate_state(sid,tool="",args=None):
@@ -8410,6 +13039,69 @@ def probe_direct_write_gate_state(sid,tool="",args=None):
     return "probe-write-required",(
         f"PROBE_WRITE_REQUIRED deliverable={did} completed_tool_turns={turns} "
         f"required=2 detail={detail} next_tool=direct-owned-artifact-write"
+    )
+
+
+def implementation_max_step_continuation_prompt_pending(did):
+    """Whether the next/materialized worker is a same-attempt continuation.
+
+    The durable supervisor handoff is authoritative here. This lets the worker
+    prompt require exact re-Verify from its first actionable turn instead of
+    relying on a later steering denial to correct the generic direct-write
+    prompt.
+    """
+    entry=(load_attempts().get("deliverables") or {}).get(did)
+    if not isinstance(entry,dict):
+        return False
+    count=int(entry.get("count") or 0)
+    if count<1:
+        return False
+    history=entry.get("implementation_max_step_continuations") or []
+    if not any(
+        isinstance(row,dict)
+        and int(row.get("attempt") or 0)==count
+        and row.get("protocol")==IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL
+        for row in history
+    ):
+        return False
+    if any(
+        isinstance(row,dict)
+        and int(row.get("attempt") or 0)==count
+        for row in (entry.get("failure_history") or [])
+    ):
+        return False
+    progress=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.progress.md"
+    try:
+        lines=[line.strip() for line in progress.read_text(errors="replace").splitlines()]
+    except OSError:
+        return False
+    return (
+        "SUPERVISOR_MAX_STEP_CONTINUATION: true" in lines
+        and f"ATTEMPT: {count}" in lines
+    )
+
+
+def implementation_max_step_continuation_session_pending(sid,did,attempt):
+    """Whether sid is the materialized same-attempt max-step continuation."""
+    if not sid or not did or int(attempt or 0)<1:
+        return False
+    entry=(load_attempts().get("deliverables") or {}).get(did)
+    if not isinstance(entry,dict):
+        return False
+    if int(entry.get("count") or 0)!=int(attempt):
+        return False
+    sessions=entry.get("sessions")
+    if not isinstance(sessions,list) or sessions[-1:]!=[sid]:
+        return False
+    history=entry.get("implementation_max_step_continuations") or []
+    if not isinstance(history,list):
+        return False
+    return any(
+        isinstance(row,dict)
+        and int(row.get("attempt") or 0)==int(attempt)
+        and row.get("protocol")==IMPLEMENTATION_MAX_STEP_CONTINUATION_PROTOCOL
+        and str(row.get("session") or "")!=sid
+        for row in history
     )
 
 
@@ -8478,6 +13170,57 @@ def persisted_implementation_progress_read_seen(sid,did):
     return persisted_exact_project_read_seen(
         sid,f".opencode-v2/work/{did}.progress.md"
     )
+
+
+def implementation_repair_authoritative_read_targets(did):
+    """Bounded local reads explicitly authorized by the materialized correction."""
+    if not did or not PROJECT:
+        return []
+    path=(
+        Path(PROJECT)/".opencode-v2"/"query"/"leaves"/f"{did}-context.json"
+    )
+    try:
+        payload=json.loads(path.read_text(errors="replace"))
+    except Exception:
+        return []
+    if not isinstance(payload,dict):
+        return []
+    targets=[]
+    project_root=Path(PROJECT).resolve()
+    for key in (
+        "parent_supervisor_execution_correction",
+        "supervisor_execution_correction",
+    ):
+        correction=payload.get(key)
+        if not isinstance(correction,dict):
+            continue
+        sources=correction.get("authoritative_sources")
+        if not isinstance(sources,list) or len(sources)>8:
+            continue
+        for item in sources:
+            if not isinstance(item,str):
+                continue
+            rel=item.strip().replace("\\","/")
+            if (
+                not rel
+                or rel.startswith("/")
+                or rel.startswith(".opencode-v2/")
+                or rel.startswith("http://")
+                or rel.startswith("https://")
+            ):
+                continue
+            candidate=Path(rel)
+            if ".." in candidate.parts:
+                continue
+            full=(Path(PROJECT)/candidate)
+            try:
+                resolved=full.resolve()
+                if not resolved.is_relative_to(project_root) or not full.is_file():
+                    continue
+            except OSError:
+                continue
+            targets.append(rel)
+    return list(dict.fromkeys(targets))
 
 
 def implementation_prewrite_read_targets(leaf):
@@ -8567,9 +13310,106 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
         return "allow",f"implementation_direct_write completed_tool_turns={turns} required=1"
     if ready_info(did):
         return "satisfied","implementation leaf-ready"
+
+    exact_failures=plan_contract_session_exact_verify_failure_count(sid,leaf)
+    if exact_failures>=2:
+        return "implementation-contract-challenge-required",(
+            f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} "
+            f"exact_verify_failures={exact_failures} "
+            "next_action=return-single-line-CONTRACT_CHALLENGE "
+            "reason_must=name-verify_command-and-contract-authority-and-assert-conflict-or-cannot-pass "
+            "no_more_tools=true"
+        )
+
     changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)
+
+    continuation_reverify=implementation_max_step_continuation_session_pending(
+        sid,did,attempt
+    )
+    reverify=plan_contract_reverify_pending(did,leaf) or continuation_reverify
+    if reverify:
+        exact_state=plan_contract_session_exact_verify_state(sid,leaf)
+        current_session_mutated=session_owned_mutation_seen(sid,did)
+        if exact_state=="passed":
+            return "implementation-return-required",(
+                f"PLAN_CONTRACT_EXACT_VERIFY_PASSED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                "next_action=return-without-tools do_not_mutate=true"
+            )
+        if current_session_mutated:
+            if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
+                return "implementation-exact-verify",(
+                    f"PLAN_CONTRACT_POST_WRITE_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                    "command=current-canonical-verify"
+                )
+            # Reverify/continuation repair is intentionally one owned mutation
+            # per failed-Verify cycle. Forcing feedback before another write
+            # prevents a short continuation from spending its remaining turns
+            # on speculative edit batches without observing the first repair.
+            return "implementation-exact-verify-required",(
+                f"PLAN_CONTRACT_POST_WRITE_VERIFY_REQUIRED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                "next_tool=exact-packet-verify one_repair_per_verify_cycle=true "
+                "no_dependency_reread=true"
+            )
+        if exact_state=="not-attempted":
+            if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
+                return "implementation-exact-verify",(
+                    f"PLAN_CONTRACT_EXACT_VERIFY deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                    "command=current-canonical-verify"
+                )
+            return "implementation-exact-verify-required",(
+                f"PLAN_CONTRACT_EXACT_VERIFY_REQUIRED deliverable={did} mode={'max-step-continuation' if continuation_reverify else 'plan-contract'} "
+                "next_tool=exact-packet-verify do_not_mutate=true"
+            )
+        # The exact revised Verify already failed in this session. Before
+        # the first owned repair in this session, allow only the explicitly
+        # authorized local correction sources, each at most once.
+        if tool=="read":
+            for target_rel in implementation_repair_authoritative_read_targets(did):
+                if (
+                    _tool_targets_exact_project_path(tool,args,target_rel)
+                    and not persisted_exact_project_read_seen(sid,target_rel)
+                ):
+                    return "implementation-authoritative-read-once",(
+                        f"PLAN_CONTRACT_REPAIR_SOURCE_READ deliverable={did} "
+                        f"allowed_once=read {target_rel} next_tool=repair-source-read-or-owned-write"
+                    )
+        if _current_tool_directly_mutates_owned_artifact(did,tool,args):
+            return "implementation-write-only",(
+                f"PLAN_CONTRACT_OWNED_REPAIR deliverable={did} "
+                "next_tool=owned-write-or-exact-verify"
+            )
+        return "implementation-write-required",(
+            f"PLAN_CONTRACT_REPAIR_WRITE_REQUIRED deliverable={did} "
+            "next_tool=authorized-source-read-or-direct-owned-artifact-write"
+        )
+
+    current_session_mutated=session_owned_mutation_seen(sid,did)
+    if current_session_mutated:
+        exact_state=plan_contract_session_exact_verify_state(sid,leaf)
+        if exact_state=="passed":
+            return "implementation-return-required",(
+                f"IMPLEMENTATION_POST_WRITE_EXACT_VERIFY_PASSED deliverable={did} "
+                "next_action=return-without-tools do_not_mutate=true"
+            )
+        if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
+            return "implementation-exact-verify",(
+                f"IMPLEMENTATION_POST_WRITE_VERIFY deliverable={did} "
+                "command=current-canonical-verify"
+            )
+        if _current_tool_directly_mutates_owned_artifact(did,tool,args):
+            return "implementation-write-only",(
+                f"IMPLEMENTATION_OWNED_WRITE_BATCH_CONTINUE deliverable={did} "
+                "next_tool=owned-write-or-exact-verify no_discovery=true"
+            )
+        return "implementation-exact-verify-required",(
+            f"IMPLEMENTATION_POST_WRITE_VERIFY_REQUIRED deliverable={did} "
+            f"verify_state={exact_state} "
+            "next_tool=owned-write-or-exact-packet-verify no_discovery=true"
+        )
+
     if changed:
         return "satisfied",f"implementation owned-artifact-delta attempt={attempt}"
+
     if _current_tool_directly_mutates_owned_artifact(did,tool,args):
         return "implementation-write-only",(
             f"implementation_direct_write completed_tool_turns={turns} "
@@ -8595,7 +13435,7 @@ def enforce_early_write_gate(sid,tool="",args=None):
     if implementation_state=="implementation-write-required":
         did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
         leaf=(load_manifest().get("leaves") or {}).get(did,{})
-        turns=persisted_completed_tool_turns(sid)
+        turns=persisted_effective_tool_turns(sid)
         deadline=early_write_completed_turn_limit(leaf)
         attempt=attempt_sequence_for_session(sid,did) if did else 0
         if not attempt and did:
@@ -8612,7 +13452,7 @@ def enforce_early_write_gate(sid,tool="",args=None):
             agent=_session_agent_db(sid)
             reason=(
                 "implementation_direct_write_noncompliance "
-                f"completed_tool_turns={turns} deadline={deadline} "
+                f"effective_tool_turns={turns} deadline={deadline} "
                 f"deliverable={did}"
             )
             set_abort_intent(sid,reason,agent,"requested")
@@ -8629,6 +13469,11 @@ def enforce_early_write_gate(sid,tool="",args=None):
         "implementation-write-only",
         "implementation-progress-read-once",
         "implementation-bounded-read-once",
+        "implementation-authoritative-read-once",
+        "implementation-exact-verify",
+        "implementation-exact-verify-required",
+        "implementation-return-required",
+        "implementation-contract-challenge-required",
         "satisfied",
     }:
         return implementation_state,implementation_detail
@@ -8684,6 +13529,659 @@ def confirm_plugin_interrupt(sid):
         "confirmed",
     )
     return True,"confirmed"
+
+
+def planner_repair_read_refresh_allowed(sid,target,structured_rel):
+    """Allow a canonical repair-file reread only after a structured edit attempt."""
+    records=session_completed_tool_records(sid)
+    last_read=-1
+    last_edit=-1
+    for index,record in enumerate(records):
+        name=str(record.get("tool") or "")
+        inp=record.get("input") if isinstance(record.get("input"),dict) else {}
+        if name=="read" and _tool_targets_exact_project_path(name,inp,target):
+            last_read=index
+        if (
+            name in {"edit","apply_patch","patch","multiedit"}
+            and _tool_targets_exact_project_path(name,inp,structured_rel)
+        ):
+            last_edit=index
+    return last_read < 0 or last_edit > last_read
+
+
+def planner_structured_reread_deadlock_evidence(sid,structured_rel):
+    """Prove the narrow partial-repair deadlock caused by the old reread guard."""
+    records=session_completed_tool_records(sid)
+    mutation_indexes=[]
+    for index,record in enumerate(records):
+        name=str(record.get("tool") or "")
+        inp=record.get("input") if isinstance(record.get("input"),dict) else {}
+        if name not in {"write","edit","apply_patch","patch","multiedit"}:
+            continue
+        if not _tool_targets_exact_project_path(name,inp,structured_rel):
+            return False
+        mutation_indexes.append(index)
+    if not mutation_indexes:
+        return False
+    last_mutation=max(mutation_indexes)
+    for record in records[last_mutation+1:]:
+        name=str(record.get("tool") or "")
+        inp=record.get("input") if isinstance(record.get("input"),dict) else {}
+        if (
+            name=="read"
+            and _tool_targets_exact_project_path(name,inp,structured_rel)
+            and record.get("status")=="error"
+            and "PLANNER_REPAIR_READ_ALREADY_COMPLETE" in str(record.get("error") or "")
+        ):
+            return True
+    return False
+
+
+def planner_repair_packet_lifecycle_deadlock_evidence(sid,structured_rel):
+    """Prove repair-packet disappearance after successful structured progress."""
+    records=session_completed_tool_records(sid)
+    completed_mutations=[]
+    for index,record in enumerate(records):
+        name=str(record.get("tool") or "")
+        inp=record.get("input") if isinstance(record.get("input"),dict) else {}
+        if name in {"write","edit","apply_patch","patch","multiedit"}:
+            if not _tool_targets_exact_project_path(name,inp,structured_rel):
+                return False
+            if record.get("status")=="completed":
+                completed_mutations.append(index)
+    if not completed_mutations:
+        return False
+    last_completed=max(completed_mutations)
+    for record in records[last_completed+1:]:
+        name=str(record.get("tool") or "")
+        inp=record.get("input") if isinstance(record.get("input"),dict) else {}
+        if name not in {"read","edit","apply_patch","patch","multiedit"}:
+            continue
+        if not _tool_targets_exact_project_path(name,inp,structured_rel):
+            return False
+        if (
+            record.get("status")=="error"
+            and "PLANNER_REPAIR_PACKET_INVALID StateCorruptionError"
+            in str(record.get("error") or "")
+        ):
+            return True
+    return False
+
+
+def planner_repair_allowed_artifact_reads(repair):
+    """Return existing concrete files owned by currently affected repair leaves."""
+    affected={
+        str(item) for item in (repair.get("affected_keys") or [])
+        if isinstance(item,str) and item
+    }
+    if not affected:
+        return set()
+    try:
+        raw=load_json_object(
+            Path(PROJECT)/".opencode-v2/IMPLEMENTATION_PLAN.structured.json",
+            label="structured implementation plan",
+        )
+    except Exception:
+        return set()
+    leaves=raw.get("leaves") if isinstance(raw,dict) else None
+    if not isinstance(leaves,list):
+        return set()
+    root=Path(PROJECT).resolve()
+    result=set()
+    for leaf in leaves:
+        if not isinstance(leaf,dict) or str(leaf.get("key") or "") not in affected:
+            continue
+        paths=leaf.get("owned_artifacts")
+        if not isinstance(paths,list):
+            continue
+        for raw_path in paths:
+            if not isinstance(raw_path,str) or not raw_path:
+                continue
+            rel=Path(raw_path)
+            if (
+                rel.is_absolute()
+                or ".." in rel.parts
+                or any(mark in raw_path for mark in ("*","?","[","]","{","}"))
+                or raw_path.startswith(".opencode-v2/")
+            ):
+                continue
+            candidate=(root/rel).resolve(strict=False)
+            try:
+                candidate.relative_to(root)
+            except ValueError:
+                continue
+            if candidate.is_file():
+                result.add(rel.as_posix())
+    return result
+
+
+def _reference_validation_expected_item():
+    if not PROJECT:
+        return ""
+    ctrl=Path(PROJECT)/".opencode-v2"
+    evidence=load_json_object(
+        ctrl/"acceptance/reference-evidence.json",
+        default_missing={},label="reference validation evidence",
+    )
+    missing=evidence.get("missing") if isinstance(evidence,dict) else None
+    if isinstance(missing,list):
+        for raw in missing:
+            if not isinstance(raw,str) or not raw.strip():
+                continue
+            candidate=raw.split(":",1)[0].strip()
+            if re.fullmatch(r"[A-Za-z0-9._-]+",candidate):
+                return candidate
+    work=load_json_object(
+        ctrl/"acceptance/reference-work.json",
+        default_missing={},label="reference validation work",
+    )
+    candidate=str(work.get("next_item") or "").strip()
+    return candidate if re.fullmatch(r"[A-Za-z0-9._-]+",candidate) else ""
+
+
+def _reference_validation_checkpoint_state():
+    if not PROJECT:
+        return "",False,{}
+    ctrl=Path(PROJECT)/".opencode-v2"
+    work=load_json_object(
+        ctrl/"acceptance/reference-work.json",
+        default_missing={},label="reference validation work",
+    )
+    expected=_reference_validation_expected_item()
+    current=str(work.get("current_item") or "").strip()
+    evidence=load_json_object(
+        ctrl/"acceptance/reference-evidence.json",
+        default_missing={},label="reference validation evidence",
+    )
+    resolved=evidence.get("resolved_items") if isinstance(evidence,dict) else {}
+    resolved=resolved if isinstance(resolved,dict) else {}
+    checkpoint_ok=bool(
+        work.get("mode")=="validation"
+        and work.get("status") in {"in_progress","partial","blocked"}
+        and current
+        and (
+            current==expected
+            if expected
+            else current in resolved
+        )
+    )
+    return expected,checkpoint_ok,work
+
+
+def reference_validation_postcheckpoint_progress(sid,expected):
+    work_rel=".opencode-v2/acceptance/reference-work.json"
+    evidence_rel=".opencode-v2/acceptance/reference-evidence.json"
+    item_rel=(
+        f".opencode-v2/acceptance/reference-items/{expected}.json"
+        if re.fullmatch(r"[A-Za-z0-9._-]+",str(expected or "")) else ""
+    )
+    records=session_completed_tool_records(sid)
+    checkpoint_index=None
+    mutation_tools={"write","edit","apply_patch","patch","multiedit"}
+    for index,record in enumerate(records):
+        if (
+            record.get("status")=="completed"
+            and str(record.get("tool") or "") in mutation_tools
+            and _tool_targets_exact_project_path(
+                str(record.get("tool") or ""),
+                record.get("input") if isinstance(record.get("input"),dict) else {},
+                work_rel,
+            )
+        ):
+            checkpoint_index=index
+            break
+    if checkpoint_index is None:
+        return False,False,0
+
+    local_tools={"read","glob","grep","list","search","find"}
+    external_tools={"webfetch","web_fetch","websearch","web_search"}
+    local_count=0
+    durable_progress=False
+    for record in records[checkpoint_index+1:]:
+        if record.get("status")!="completed":
+            continue
+        record_tool=str(record.get("tool") or "")
+        record_args=(
+            record.get("input") if isinstance(record.get("input"),dict) else {}
+        )
+        if record_tool in local_tools:
+            local_count+=1
+        if record_tool in external_tools:
+            durable_progress=True
+            continue
+        if record_tool in mutation_tools and (
+            _tool_targets_exact_project_path(
+                record_tool,record_args,evidence_rel
+            )
+            or (
+                item_rel
+                and _tool_targets_exact_project_path(
+                    record_tool,record_args,item_rel
+                )
+            )
+        ):
+            durable_progress=True
+    return True,durable_progress,local_count
+
+
+def reference_validation_web_call_count(sid):
+    external_tools={"webfetch","web_fetch","websearch","web_search"}
+    count=0
+    for record in session_completed_tool_records(sid):
+        if str(record.get("tool") or "") not in external_tools:
+            continue
+        status=record.get("status")
+        if status not in {"completed","error"}:
+            continue
+        error_text=str(record.get("error") or "")
+        if (
+            status=="error"
+            and "REFERENCE_VALIDATION_TOOL_DENY" in error_text
+        ):
+            continue
+        count+=1
+    return count
+
+
+def reference_foundation_web_call_count(sid):
+    external_tools={"webfetch","web_fetch","websearch","web_search"}
+    count=0
+    for record in session_completed_tool_records(sid):
+        if str(record.get("tool") or "") not in external_tools:
+            continue
+        status=record.get("status")
+        if status not in {"completed","error"}:
+            continue
+        error_text=str(record.get("error") or "")
+        if status=="error" and (
+            "REFERENCE_VALIDATION_TOOL_DENY" in error_text
+            or "REFERENCE_FOUNDATION_TOOL_DENY" in error_text
+        ):
+            continue
+        count+=1
+    return count
+
+
+def reference_foundation_web_calls_since_checkpoint(sid):
+    external_tools={"webfetch","web_fetch","websearch","web_search"}
+    mutation_tools={"write","edit","apply_patch","patch","multiedit"}
+    durable_targets=(
+        ".opencode-v2/acceptance/reference-work.json",
+        ".opencode-v2/acceptance/reference-evidence.json",
+        ".opencode-v2/REFERENCE_FOUNDATION.md",
+    )
+    count=0
+    for record in session_completed_tool_records(sid):
+        status=record.get("status")
+        record_tool=str(record.get("tool") or "")
+        record_args=(
+            record.get("input") if isinstance(record.get("input"),dict) else {}
+        )
+        if status=="completed" and record_tool in mutation_tools and any(
+            _tool_targets_exact_project_path(record_tool,record_args,target)
+            for target in durable_targets
+        ):
+            count=0
+            continue
+        if record_tool not in external_tools or status not in {"completed","error"}:
+            continue
+        error_text=str(record.get("error") or "")
+        if status=="error" and (
+            "REFERENCE_VALIDATION_TOOL_DENY" in error_text
+            or "REFERENCE_FOUNDATION_TOOL_DENY" in error_text
+        ):
+            continue
+        count+=1
+    return count
+
+
+def reference_foundation_tool_state(sid,tool,args):
+    """Enforce the FOUNDATION mode's declared narrow local evidence surface."""
+    allowed_reads=[
+        ".opencode-v2/ACCEPTANCE.md",
+        ".opencode-v2/acceptance/reference-evidence.json",
+        ".opencode-v2/acceptance/reference-work.json",
+        ".opencode-v2/REFERENCE_FOUNDATION.md",
+    ]
+    work_rel=".opencode-v2/acceptance/reference-work.json"
+    evidence_rel=".opencode-v2/acceptance/reference-evidence.json"
+    foundation_rel=".opencode-v2/REFERENCE_FOUNDATION.md"
+    mutation_tools={"write","edit","apply_patch","patch","multiedit"}
+    external_tools={"webfetch","web_fetch","websearch","web_search"}
+    web_calls_used=reference_foundation_web_call_count(sid)
+    calls_since_checkpoint=reference_foundation_web_calls_since_checkpoint(sid)
+
+    if tool in external_tools and web_calls_used>=MAX_REFERENCE_FOUNDATION_WEB_CALLS:
+        return "deny",(
+            "REFERENCE_FOUNDATION_WEB_BUDGET_EXHAUSTED "
+            f"web_calls={web_calls_used}/{MAX_REFERENCE_FOUNDATION_WEB_CALLS} "
+            "next_tool=write-evidence-or-work-result"
+        )
+    if calls_since_checkpoint>=2 and tool not in mutation_tools:
+        return "deny",(
+            "REFERENCE_FOUNDATION_PROGRESS_CHECKPOINT_REQUIRED "
+            f"web_calls_since_checkpoint={calls_since_checkpoint} "
+            f"next_tool=write {work_rel} or {evidence_rel}"
+        )
+
+    if tool=="read":
+        for target in allowed_reads:
+            if not _tool_targets_exact_project_path(tool,args,target):
+                continue
+            if persisted_exact_project_read_seen(sid,target):
+                return "deny",(
+                    "REFERENCE_FOUNDATION_REPEAT_READ_DENY "
+                    f"path={target} next_tool=checkpoint-or-web"
+                )
+            return "allow",f"reference-foundation-control-read path={target}"
+        return "deny",(
+            "REFERENCE_FOUNDATION_LOCAL_READ_DENY "
+            "allowed="+",".join(allowed_reads)
+        )
+
+    if tool in mutation_tools:
+        for target in (work_rel,evidence_rel,foundation_rel):
+            if _tool_targets_exact_project_path(tool,args,target):
+                return "allow",f"reference-foundation-durable-write path={target}"
+        return "deny","REFERENCE_FOUNDATION_WRITE_DENY control-files-only"
+
+    if tool in external_tools:
+        work=load_json_object(
+            Path(PROJECT)/work_rel,
+            default_missing={},label="reference foundation work",
+        )
+        if not (
+            work.get("mode")=="foundation"
+            and work.get("status")=="in_progress"
+            and str(work.get("current_item") or "").strip()
+        ):
+            return "deny",(
+                "REFERENCE_FOUNDATION_CHECKPOINT_REQUIRED "
+                f"next_tool=write {work_rel} mode=foundation status=in_progress"
+            )
+        return "allow",(
+            "reference-foundation-external-action "
+            f"item={work.get('current_item')} "
+            f"web_calls={web_calls_used}/{MAX_REFERENCE_FOUNDATION_WEB_CALLS}"
+        )
+
+    return "deny",(
+        "REFERENCE_FOUNDATION_TOOL_DENY "
+        f"tool={tool or 'unknown'} local-discovery-not-allowed"
+    )
+
+
+def reference_validation_tool_state(sid,tool,args):
+    if _session_agent_db(sid)!="reference-researcher":
+        return "na","not-reference-researcher"
+    mode=reference_session_mode(sid)
+    if mode=="foundation":
+        state,detail=reference_foundation_tool_state(sid,tool,args)
+        if state=="deny" and not detail.startswith("REFERENCE_FOUNDATION_"):
+            detail="REFERENCE_FOUNDATION_TOOL_DENY "+detail
+        return state,detail
+    if mode!="validation":
+        return "na","not-reference-validation"
+
+    expected,checkpoint_ok,work=_reference_validation_checkpoint_state()
+    if checkpoint_ok:
+        checkpoint_in_session,progressed,local_count=(
+            reference_validation_postcheckpoint_progress(sid,expected)
+        )
+        mutation_tools={"write","edit","apply_patch","patch","multiedit"}
+        external_tools={"webfetch","web_fetch","websearch","web_search"}
+        work_rel=".opencode-v2/acceptance/reference-work.json"
+        evidence_rel=".opencode-v2/acceptance/reference-evidence.json"
+        item_rel=(
+            f".opencode-v2/acceptance/reference-items/{expected}.json"
+            if re.fullmatch(r"[A-Za-z0-9._-]+",str(expected or "")) else ""
+        )
+        existing_item_requires_read=bool(
+            not checkpoint_in_session
+            and item_rel
+            and (Path(PROJECT)/item_rel).is_file()
+            and not persisted_exact_project_read_seen(sid,item_rel)
+        )
+        if existing_item_requires_read and (
+            tool in external_tools or tool in mutation_tools
+        ):
+            return "deny",(
+                "REFERENCE_VALIDATION_CURRENT_ITEM_READ_REQUIRED "
+                f"item={expected} next_tool=read {item_rel}"
+            )
+        budget=work.get("budget") if isinstance(work.get("budget"),dict) else {}
+        try:
+            configured_calls=int(
+                budget.get("web_calls_allowed")
+                or MAX_REFERENCE_VALIDATION_WEB_CALLS
+            )
+        except (TypeError,ValueError):
+            configured_calls=MAX_REFERENCE_VALIDATION_WEB_CALLS
+        allowed_calls=max(
+            1,min(MAX_REFERENCE_VALIDATION_WEB_CALLS,configured_calls)
+        )
+        web_calls_used=reference_validation_web_call_count(sid)
+        durable_write=bool(
+            tool in mutation_tools and (
+                _tool_targets_exact_project_path(tool,args,work_rel)
+                or _tool_targets_exact_project_path(tool,args,evidence_rel)
+                or (
+                    item_rel
+                    and _tool_targets_exact_project_path(tool,args,item_rel)
+                )
+            )
+        )
+
+        if web_calls_used>=allowed_calls:
+            if durable_write:
+                return "allow",(
+                    "reference-validation-web-budget-durable-write "
+                    f"item={work.get('current_item')} "
+                    f"web_calls={web_calls_used}/{allowed_calls}"
+                )
+            return "deny",(
+                "REFERENCE_VALIDATION_WEB_BUDGET_EXHAUSTED "
+                f"item={work.get('current_item')} "
+                f"web_calls={web_calls_used}/{allowed_calls} "
+                "next_tool=write-evidence-or-work-result"
+            )
+        if tool in external_tools:
+            return "allow",(
+                "reference-validation-external-action "
+                f"item={work.get('current_item')} "
+                f"web_calls={web_calls_used}/{allowed_calls}"
+            )
+        if durable_write:
+            return "allow",(
+                "reference-validation-durable-progress-write "
+                f"item={work.get('current_item')}"
+            )
+        if progressed:
+            return "allow",(
+                "reference-validation-postcheckpoint-progress "
+                f"item={work.get('current_item')}"
+            )
+
+        if not checkpoint_in_session:
+            allowed_reads=[
+                ".opencode-v2/ACCEPTANCE.md",
+                ".opencode-v2/REFERENCE_FOUNDATION.md",
+                ".opencode-v2/acceptance/reference-evidence.json",
+                work_rel,
+            ]
+            last_completed=str(work.get("last_completed_item") or "").strip()
+            for item in (last_completed,expected):
+                if not re.fullmatch(r"[A-Za-z0-9._-]+",item):
+                    continue
+                rel=f".opencode-v2/acceptance/reference-items/{item}.json"
+                if (Path(PROJECT)/rel).is_file():
+                    allowed_reads.append(rel)
+            if tool=="read":
+                for target in dict.fromkeys(allowed_reads):
+                    if not _tool_targets_exact_project_path(tool,args,target):
+                        continue
+                    if persisted_exact_project_read_seen(sid,target):
+                        return "deny",(
+                            "REFERENCE_VALIDATION_RESUME_EXTERNAL_ACTION_REQUIRED "
+                            f"item={expected} repeated_read={target} "
+                            "next_tool=webfetch-or-write-evidence"
+                        )
+                    return "allow",(
+                        "reference-validation-resume-control-read "
+                        f"path={target}"
+                    )
+            return "deny",(
+                "REFERENCE_VALIDATION_RESUME_EXTERNAL_ACTION_REQUIRED "
+                f"item={expected} next_tool=webfetch-or-write-evidence"
+            )
+        if local_count < MAX_REFERENCE_POSTCHECKPOINT_LOCAL_TOOLS:
+            return "allow",(
+                "reference-validation-checkpoint-present "
+                f"item={work.get('current_item')} "
+                f"local_tools={local_count}/"
+                f"{MAX_REFERENCE_POSTCHECKPOINT_LOCAL_TOOLS}"
+            )
+        return "deny",(
+            "REFERENCE_VALIDATION_EXTERNAL_ACTION_REQUIRED "
+            f"item={work.get('current_item')} "
+            f"local_tools={local_count}/"
+            f"{MAX_REFERENCE_POSTCHECKPOINT_LOCAL_TOOLS} "
+            "next_tool=webfetch-or-write-evidence"
+        )
+    if not expected:
+        return "deny","REFERENCE_VALIDATION_ITEM_UNKNOWN"
+
+    work_rel=".opencode-v2/acceptance/reference-work.json"
+    if (
+        tool in {"write","edit","apply_patch","patch","multiedit"}
+        and _tool_targets_exact_project_path(tool,args,work_rel)
+    ):
+        return "allow",(
+            "reference-validation-checkpoint-write "
+            f"required_item={expected}"
+        )
+
+    allowed_reads=[
+        ".opencode-v2/ACCEPTANCE.md",
+        ".opencode-v2/REFERENCE_FOUNDATION.md",
+        ".opencode-v2/acceptance/reference-evidence.json",
+        work_rel,
+    ]
+    last_completed=str(work.get("last_completed_item") or "").strip()
+    for item in (last_completed,expected):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+",item):
+            continue
+        rel=f".opencode-v2/acceptance/reference-items/{item}.json"
+        if (Path(PROJECT)/rel).is_file():
+            allowed_reads.append(rel)
+
+    if tool=="read":
+        for target in dict.fromkeys(allowed_reads):
+            if not _tool_targets_exact_project_path(tool,args,target):
+                continue
+            if persisted_exact_project_read_seen(sid,target):
+                return "deny",(
+                    "REFERENCE_VALIDATION_CHECKPOINT_REQUIRED "
+                    f"item={expected} repeated_read={target} "
+                    f"next_tool=write {work_rel}"
+                )
+            return "allow",f"reference-validation-control-read path={target}"
+
+    return "deny",(
+        "REFERENCE_VALIDATION_CHECKPOINT_REQUIRED "
+        f"item={expected} next_tool=write {work_rel} status=in_progress"
+    )
+
+
+def planner_tool_boundary_state(sid,tool,args):
+    """Mechanically bound targeted implementation-plan repair tool use."""
+    if _session_agent_db(sid)!="implementation-planner":
+        return "na","not-implementation-planner"
+    first=first_user_text_db(sid)
+    if "Repair structured implementation planning for this project." not in first:
+        return "na","not-targeted-repair"
+
+    ctrl=Path(PROJECT)/".opencode-v2"
+    repair_path=ctrl/"IMPLEMENTATION_PLAN.repair.json"
+    try:
+        repair=load_json_object(
+            repair_path,label="implementation plan repair packet"
+        )
+    except Exception as exc:
+        return "deny",f"PLANNER_REPAIR_PACKET_INVALID {type(exc).__name__}"
+    if repair.get("whole_plan") is not False:
+        return "na","not-targeted-repair"
+
+    repair_rel=".opencode-v2/IMPLEMENTATION_PLAN.repair.json"
+    structured_rel=".opencode-v2/IMPLEMENTATION_PLAN.structured.json"
+    required=(repair_rel,structured_rel)
+
+    if tool=="read":
+        for target in required:
+            if _tool_targets_exact_project_path(tool,args,target):
+                if planner_repair_read_refresh_allowed(sid,target,structured_rel):
+                    return "allow",f"targeted-repair-required-read path={target}"
+                return "deny",(
+                    f"PLANNER_REPAIR_READ_ALREADY_COMPLETE path={target} "
+                    f"next_tool=edit {structured_rel}"
+                )
+
+        messages=" ".join(
+            str(item.get("message") or "")
+            for item in (repair.get("errors") or [])
+            if isinstance(item,dict)
+        )
+        acceptance_rel=".opencode-v2/ACCEPTANCE.md"
+        acceptance_needed=bool(
+            re.search(r"(?i)\bacceptance\b|\bA\d{3}\b|\bMUST\b",messages)
+        )
+        if (
+            acceptance_needed
+            and _tool_targets_exact_project_path(tool,args,acceptance_rel)
+            and not persisted_exact_project_read_seen(sid,acceptance_rel)
+        ):
+            return "allow","targeted-repair-acceptance-read-once"
+
+        for artifact in sorted(planner_repair_allowed_artifact_reads(repair)):
+            if _tool_targets_exact_project_path(tool,args,artifact):
+                if persisted_exact_project_read_seen(sid,artifact):
+                    return "deny",(
+                        f"PLANNER_REPAIR_ARTIFACT_READ_ALREADY_COMPLETE path={artifact} "
+                        f"next_tool=edit {structured_rel}"
+                    )
+                return "allow",f"targeted-repair-owned-artifact-read-once path={artifact}"
+
+        return "deny",(
+            "PLANNER_REPAIR_READ_DENY "
+            f"allowed={','.join(required)} plus affected-owned-files "
+            f"next_tool=edit {structured_rel}"
+        )
+
+    required_seen=all(
+        persisted_exact_project_read_seen(sid,target) for target in required
+    )
+    if not required_seen:
+        return "deny",(
+            "PLANNER_REPAIR_CONTEXT_REQUIRED "
+            f"read={','.join(required)}"
+        )
+
+    if tool in {"edit","apply_patch","patch","multiedit"}:
+        if _tool_targets_exact_project_path(tool,args,structured_rel):
+            return "allow","targeted-repair-structured-edit"
+        return "deny",(
+            "PLANNER_REPAIR_EDIT_DENY "
+            f"target={structured_rel}"
+        )
+    if tool=="write":
+        return "deny",(
+            "PLANNER_REPAIR_WRITE_DENY whole_plan=false "
+            f"next_tool=edit {structured_rel}"
+        )
+    return "deny",(
+        f"PLANNER_REPAIR_TOOL_DENY tool={tool or 'unknown'} "
+        f"next_tool=edit {structured_rel}"
+    )
 
 
 def splitter_tool_boundary_state(sid,tool,args):
@@ -8771,13 +14269,19 @@ def supervisor_finalize_ready(did, verified_command=""):
 
         path=Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready"
         path.parent.mkdir(parents=True,exist_ok=True)
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        command=(verified_command or str(leaf.get("verify_command") or ""))
+        provenance=state_ready_provenance(PROJECT,did,leaf)
         body=(
             "status=complete\n"
             f"deliverable={did}\n"
             f"attempt={count}\n"
             "verified=true\n"
             "owner=supervisor\n"
-            f"verify_sha256={hashlib.sha256((verified_command or str((load_manifest().get('leaves') or {}).get(did,{}).get('verify_command') or '')).encode()).hexdigest()}\n"
+            f"verify_sha256={hashlib.sha256(command.encode()).hexdigest()}\n"
+            f"provenance_protocol={provenance['provenance_protocol']}\n"
+            f"project_sha256={provenance['project_sha256']}\n"
+            f"artifact_sha256={provenance['artifact_sha256']}\n"
             f"protocol={LEAF_READY_PROTOCOL}\n"
         )
         tmp=path.with_suffix(".tmp")
@@ -8847,6 +14351,18 @@ def post_session_finalize(did,sid="",runner=subprocess.run,verify_command_overri
         return False,"verify-deps-pending:"+",".join(missing)
 
     command=(verify_command_override or leaf.get("verify_command") or "").strip()
+    adequacy_errors=(
+        []
+        if handoff_only
+        else validate_verify_adequacy(leaf.get("done_when",""), command)
+    )
+    if adequacy_errors:
+        detail="verify-inadequate:"+adequacy_errors[0]
+        persist_supervisor_verify_evidence(
+            did,sid,command,None,detail,error=adequacy_errors[0]
+        )
+        clear_verify_wait(did)
+        return False,detail
     command_errors=validate_verify_command(command)
     if command_errors:
         detail="verify-command-unsafe:"+command_errors[0]
@@ -9071,11 +14587,68 @@ def reconcile_split_parent_completions():
             )
             _split_parent_finalize_next[did]=time.monotonic()+10.0
 
+def _reclassify_late_infrastructure_failure(
+    entry,attempt,sid,reason,timestamp
+):
+    """Atomically convert one already-recorded genuine outcome to infrastructure.
+
+    Late runtime evidence can arrive after post-session Verify has already
+    written a genuine failure row.  A refunded attempt must never remain both
+    semantically genuine and infrastructure-funded.  Preserve the original
+    classification/reason as audit fields while changing the effective row.
+    """
+    history=entry.get("failure_history") or []
+    if not isinstance(history,list):
+        return False,"failure-history-invalid",False
+    rows=[
+        row for row in history
+        if isinstance(row,dict)
+        and int(row.get("attempt") or 0)==int(attempt)
+    ]
+    if len(rows)>1:
+        return False,"multiple-failure-rows",False
+    if not rows:
+        return True,"no-failure-row",False
+    row=rows[0]
+    if row.get("session") not in (None,sid):
+        return False,"failure-session-mismatch",False
+    if row.get("classification")=="infrastructure":
+        if str(row.get("reason") or "")!=str(reason or ""):
+            return False,"infrastructure-reason-mismatch",False
+        row.setdefault("session",sid)
+        return True,"already-infrastructure",False
+    if row.get("classification")!="genuine":
+        return False,"failure-classification-mismatch",False
+    if row.get("source") not in (None,"supervisor"):
+        return False,"failure-source-mismatch",False
+
+    row["original_classification"]="genuine"
+    row["original_reason"]=str(row.get("reason") or "")
+    row["classification"]="infrastructure"
+    row["reason"]=reason
+    row["session"]=sid
+    row["reclassified_by"]="late-infrastructure-abort-reconciliation-v1"
+    row["reclassified_at"]=timestamp
+    entry.setdefault("late_infrastructure_reclassifications",[]).append({
+        "protocol":"v2-late-infrastructure-reclassification-v1",
+        "attempt":int(attempt),
+        "session":sid,
+        "original_reason":row["original_reason"],
+        "reason":reason,
+        "source":"supervisor",
+        "timestamp":timestamp,
+    })
+    return True,"reclassified",True
+
+
 def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
-    """Record one bounded infrastructure recovery without rewriting history.
+    """Record one bounded infrastructure recovery with atomic late reclassification.
 
     A supervisor/runtime cancellation is infrastructure even when useful
     partial state already exists. Preserve that state and resume from it.
+    If post-session reconciliation already wrote one genuine failure for this
+    exact attempt/session, preserve its original fields but reclassify it
+    atomically so the same attempt is never both genuine and refunded.
 
     If a successor dispatch placeholder was preclaimed before this terminal
     session was reconciled, the ordinary ledger projection can be temporarily
@@ -9091,6 +14664,8 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
     # durable progress.
     durable_present=bool(durable_worker_execution(did,sid))
     race_recovered=False
+    late_reclassified=False
+    late_attempt=0
     timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())
     with dispatch_lock:
         with attempt_lock():
@@ -9102,24 +14677,63 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
             failures=entry.setdefault("infrastructure_failures",[])
             if not isinstance(failures,list):
                 return False,"attempt-ledger-invalid"
-            if any(isinstance(item,dict) and item.get("session")==sid for item in failures):
+            existing_infra=[
+                item for item in failures
+                if isinstance(item,dict) and item.get("session")==sid
+            ]
+            if existing_infra:
+                if len(existing_infra)!=1:
+                    return False,"already-recorded-infrastructure-ambiguous"
+                infra=existing_infra[0]
+                if (
+                    str(infra.get("reason") or "")!=str(reason or "")
+                    or str(infra.get("kind") or "")!=str(kind or "")
+                ):
+                    return False,"already-recorded-infrastructure-mismatch"
+                matches=[i+1 for i,value in enumerate(sessions) if value==sid]
+                if len(matches)!=1:
+                    return False,"already-recorded-infrastructure-session-ambiguous"
+                ok,reclass_detail,reclassified=(
+                    _reclassify_late_infrastructure_failure(
+                        entry,matches[0],sid,reason,timestamp
+                    )
+                )
+                if not ok:
+                    return False,"late-infrastructure-reclassification-"+reclass_detail
                 normalized=normalize_operator_attempt_after_infrastructure_abort(
                     entry,sid,reason,timestamp
                 )
-                if normalized:
+                if reclassified or normalized:
                     projected=attempt_state(entry)
                     if not projected.get("valid"):
-                        return False,"attempt-ledger-invalid-after-operator-infrastructure-normalization"
+                        return False,(
+                            "attempt-ledger-invalid-after-late-infrastructure-"
+                            "normalization"
+                        )
                     save_attempts(data)
-                    log(
-                        f"OPERATOR_RETRY_INFRASTRUCTURE_NORMALIZED session={sid} "
-                        f"deliverable={did} reason={reason}"
+                    if reclassified:
+                        log(
+                            f"LATE_INFRASTRUCTURE_RECLASSIFICATION session={sid} "
+                            f"deliverable={did} attempt={matches[0]} reason={reason}"
+                        )
+                        csv(
+                            "LATE_INFRASTRUCTURE_RECLASSIFICATION",sid,"supervisor",
+                            f"{did} attempt={matches[0]} reason={reason}",
+                        )
+                    if normalized:
+                        log(
+                            f"OPERATOR_RETRY_INFRASTRUCTURE_NORMALIZED session={sid} "
+                            f"deliverable={did} reason={reason}"
+                        )
+                        csv(
+                            "OPERATOR_RETRY_INFRASTRUCTURE_NORMALIZED",sid,"supervisor",
+                            f"{did} reason={reason}",
+                        )
+                    return True,(
+                        "already-recorded-late-reclassified"
+                        if reclassified else
+                        "already-recorded-operator-normalized"
                     )
-                    csv(
-                        "OPERATOR_RETRY_INFRASTRUCTURE_NORMALIZED",sid,"supervisor",
-                        f"{did} reason={reason}",
-                    )
-                    return True,"already-recorded-operator-normalized"
                 return False,"already-recorded"
 
             state=attempt_state(entry)
@@ -9156,14 +14770,19 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
                 if len(rows)>1:
                     return False,"attempt-ledger-invalid"
                 if rows:
-                    row=rows[0]
-                    if (
-                        row.get("classification")!="infrastructure"
-                        or row.get("session") not in (None,sid)
-                        or str(row.get("reason") or "")!=str(reason or "")
-                    ):
-                        return False,"attempt-ledger-invalid"
-                    row.setdefault("session",sid)
+                    ok,reclass_detail,reclassified=(
+                        _reclassify_late_infrastructure_failure(
+                            trial,attempt,sid,reason,timestamp
+                        )
+                    )
+                    if not ok:
+                        return False,(
+                            "attempt-ledger-invalid-late-infrastructure-"
+                            + reclass_detail
+                        )
+                    if reclassified:
+                        late_reclassified=True
+                        late_attempt=attempt
                 else:
                     history.append({
                         "attempt":attempt,
@@ -9201,6 +14820,19 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
             else:
                 if state["infrastructure_retry_grants"] >= MAX_INFRASTRUCTURE_RETRY_GRANTS:
                     return False,"infrastructure-retry-limit"
+                matches=[i+1 for i,value in enumerate(sessions) if value==sid]
+                if len(matches)!=1:
+                    return False,"infrastructure-session-ambiguous"
+                ok,reclass_detail,reclassified=(
+                    _reclassify_late_infrastructure_failure(
+                        entry,matches[0],sid,reason,timestamp
+                    )
+                )
+                if not ok:
+                    return False,"late-infrastructure-reclassification-"+reclass_detail
+                if reclassified:
+                    late_reclassified=True
+                    late_attempt=matches[0]
                 failures.append({
                     "timestamp":timestamp,
                     "grant":1,
@@ -9219,6 +14851,15 @@ def record_infrastructure_abort(sid,did,reason,kind="runtime-cancel"):
                 if not projected.get("valid"):
                     return False,"attempt-ledger-invalid-after-infrastructure-grant"
                 save_attempts(data)
+    if late_reclassified:
+        log(
+            f"LATE_INFRASTRUCTURE_RECLASSIFICATION session={sid} "
+            f"deliverable={did} attempt={late_attempt} reason={reason}"
+        )
+        csv(
+            "LATE_INFRASTRUCTURE_RECLASSIFICATION",sid,"supervisor",
+            f"{did} attempt={late_attempt} reason={reason}",
+        )
     if race_recovered:
         log(
             f"INFRASTRUCTURE_PRECLAIM_RACE_RECOVERY session={sid} "
@@ -9483,7 +15124,8 @@ def v1_active_session_ids_from_env(strict=False):
 
 def active_implementation_sessions(strict=False):
     """Return live implementation children; scheduler decisions fail closed."""
-    if not PROJECT:
+    project=runtime_project()
+    if not project:
         return []
     try:
         if v1_runtime_enabled():
@@ -9504,7 +15146,7 @@ def active_implementation_sessions(strict=False):
             rows=con.execute(
                 "SELECT id,coalesce(agent,'') FROM session "
                 "WHERE parent_id IS NOT NULL AND directory=?",
-                (PROJECT,),
+                (project,),
             ).fetchall()
             con.close()
             return [
@@ -9516,7 +15158,7 @@ def active_implementation_sessions(strict=False):
         rows=con.execute(
             "SELECT id,coalesce(agent,'') FROM session_v2 "
             "WHERE parent_id IS NOT NULL AND directory=? AND time_idle IS NULL",
-            (PROJECT,),
+            (project,),
         ).fetchall()
         con.close()
         return [(sid,agent) for sid,agent in rows if agent in IMPLEMENTATION_AGENTS]
@@ -9587,6 +15229,50 @@ def unclassified_native_attempt_deliverables(data=None):
             and (Path(PROJECT)/".opencode-v2"/"work"/f"{did}.ready").exists()
         ):
             continue
+        # A supervisor-normalized replacement record is also terminal for the
+        # current sequence. attempt_state() above has already validated that
+        # this exact sequence/session is covered by durable supervisor credit,
+        # so it must not occupy a latent worker slot forever merely because no
+        # failure_history row was written for the replaced attempt.
+        terminal_operator=any(
+            isinstance(item,dict)
+            and int(item.get("sequence") or 0)==count
+            and item.get("session")==current
+            and item.get("state") in {
+                "plan_contract_replacement","bad_plan_replacement",
+                "infrastructure_abort","infrastructure_blocked",
+            }
+            for item in (entry.get("operator_retry_attempts") or [])
+        )
+        if terminal_operator:
+            continue
+
+        # A supervisor-recorded old->new canonical Verify transition on this
+        # exact current attempt also terminates the native session. The failed
+        # attempt was superseded by a new completion contract and receives its
+        # bounded replacement credit from plan_contract_revisions; it must not
+        # occupy a phantom pending-worker slot merely because no failure row is
+        # written for the superseded attempt.
+        terminal_plan_revision=False
+        for row in entry.get("plan_contract_revisions",[]) or []:
+            if not isinstance(row,dict):
+                continue
+            try:
+                revision_attempt=int(row.get("attempt") or 0)
+            except (TypeError,ValueError):
+                continue
+            previous=str(row.get("previous_verify_sha256") or "")
+            current_verify=str(row.get("current_verify_sha256") or "")
+            if (
+                revision_attempt==count
+                and row.get("source")=="supervisor-plan-contract-revision"
+                and previous and current_verify and previous!=current_verify
+            ):
+                terminal_plan_revision=True
+                break
+        if terminal_plan_revision:
+            continue
+
         classified=False
         for item in entry.get("failure_history",[]) or []:
             if not isinstance(item,dict):
@@ -10853,6 +16539,15 @@ def message_shape(messages,session_info):
         "observable":parts_observable,"assistant_completed":completed,
     }
 
+def active_implementation_plan_revocation_reason(agent,did):
+    """Quiesce already-claimed workers when authoritative plan readiness is revoked."""
+    if agent not in IMPLEMENTATION_AGENTS or not did:
+        return ""
+    if plan_ready():
+        return ""
+    return "dispatch_protocol_violation plan_not_ready"
+
+
 def enforce_assignment(sid,agent,first_user):
     normalized=strip_subagent_prefix(first_user or first_user_text_db(sid)).strip()
     planned=agent in IMPLEMENTATION_AGENTS or bool(parse_deliverable(normalized))
@@ -10910,26 +16605,117 @@ def materialize_dispatch_child(sid,agent):
 
 
 def normalize_supervisor_replacement_record(did):
-    """Keep a stale replacement reservation, but record its true authority."""
+    """Record when a supervisor credit, not a human grant, owns a retry slot.
+
+    A plan/bad-plan credit can be added after an operator-funded dispatch was
+    already durably consumed. Derive the credit ranges directly from the
+    append-only ledger so this normalization can repair that circular invalid
+    state without first requiring attempt_state() to be valid.
+    """
+    changed=False
     with dispatch_lock:
         with attempt_lock():
             data=load_attempts(); entry=(data.get("deliverables") or {}).get(did)
-            if not isinstance(entry,dict): return False
-            state=attempt_state(entry)
-            plan=int(state.get("plan_contract_retry_grants") or 0)
-            bad=int(state.get("bad_plan_retry_grants") or 0)
-            ceiling=(int(state.get("automatic_limit") or 0)+int(state.get("infrastructure_retry_grants") or 0)+plan+bad)
-            changed=False
+            if not isinstance(entry,dict):
+                return False
+            try:
+                count=int(entry.get("count") or 0)
+                automatic=int(
+                    entry.get("automatic_limit",AUTOMATIC_ATTEMPT_LIMIT)
+                )
+                infrastructure=int(
+                    entry.get("infrastructure_retry_grants") or 0
+                )
+            except (TypeError,ValueError):
+                return False
+            plan=_plan_contract_revision_credit_count(entry,count)
+            bad=_parent_contract_repair_credit_count(entry,count)
+            base=automatic+infrastructure
+            plan_ceiling=base+plan
+            bad_ceiling=plan_ceiling+bad
+            if not (plan or bad):
+                return False
+
             for item in entry.get("operator_retry_attempts",[]):
-                if not isinstance(item,dict): continue
-                try: sequence=int(item.get("sequence") or 0)
-                except (TypeError,ValueError): continue
-                if sequence <= int(state.get("automatic_limit") or 0) or sequence>ceiling:
+                if not isinstance(item,dict):
                     continue
-                label="plan_contract_replacement" if plan else "bad_plan_replacement"
-                item.update({"state":label,"outcome":label,"consumes_operator_grant":False,"normalized_by":"supervisor-credit-authority-v1","normalized_at":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime())})
+                try:
+                    sequence=int(item.get("sequence") or 0)
+                except (TypeError,ValueError):
+                    continue
+                label=""
+                if base < sequence <= plan_ceiling:
+                    label="plan_contract_replacement"
+                elif plan_ceiling < sequence <= bad_ceiling:
+                    label="bad_plan_replacement"
+                if not label:
+                    if (
+                        item.get("source")=="supervisor"
+                        and item.get("state") in {
+                            "plan_contract_replacement","bad_plan_replacement",
+                        }
+                        and item.get("normalized_by")==
+                            "supervisor-credit-authority-v1"
+                    ):
+                        prior_state=str(
+                            item.get("normalized_from_state") or ""
+                        )
+                        if prior_state not in {"reserved","consumed"}:
+                            prior_state=(
+                                "consumed"
+                                if item.get("consumed_at") and item.get("evidence")
+                                else "reserved"
+                            )
+                        prior_outcome=str(
+                            item.get("normalized_from_outcome") or ""
+                        )
+                        item["state"]=prior_state
+                        if prior_state=="consumed":
+                            item["consumes_operator_grant"]=True
+                            item["outcome"]=(
+                                prior_outcome or "meaningful_execution"
+                            )
+                        else:
+                            item["consumes_operator_grant"]=False
+                            item.pop("outcome",None)
+                        item.pop("normalized_by",None)
+                        item.pop("normalized_at",None)
+                        item.pop("normalized_from_state",None)
+                        item.pop("normalized_from_outcome",None)
+                        changed=True
+                    continue
+                if item.get("source")!="supervisor":
+                    continue
+                if item.get("state") not in {
+                    "reserved","consumed",
+                    "plan_contract_replacement","bad_plan_replacement",
+                }:
+                    continue
+                if (
+                    item.get("state")==label
+                    and item.get("outcome")==label
+                    and item.get("consumes_operator_grant") is False
+                    and item.get("normalized_by")==
+                        "supervisor-credit-authority-v1"
+                ):
+                    continue
+                prior_state=str(item.get("state") or "")
+                prior_outcome=str(item.get("outcome") or "")
+                item.update({
+                    "state":label,
+                    "outcome":label,
+                    "consumes_operator_grant":False,
+                    "normalized_by":"supervisor-credit-authority-v1",
+                    "normalized_at":time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
+                    ),
+                    "normalized_from_state":prior_state,
+                })
+                if prior_outcome:
+                    item["normalized_from_outcome"]=prior_outcome
                 changed=True
-            if changed: save_attempts(data)
+            if changed:
+                save_attempts(data)
     if changed:
         log(f"SUPERVISOR_REPLACEMENT_NORMALIZED deliverable={did}")
         csv("SUPERVISOR_REPLACEMENT_NORMALIZED",detail=did)
@@ -11081,6 +16867,32 @@ def _valid_root_session(sid):
         return False
 
 
+def _root_session_from_controller_ledger():
+    path=Path(PROJECT)/".opencode-v2/work/stage-a-controller-executions.json"
+    if not path.exists():
+        return ""
+    data=load_json_object(path,label="stage-a controller execution ledger")
+    if (
+        data.get("owner")!="stage-a-controller"
+        or data.get("protocol")!="v2-stage-a-controller-execution-ledger-v1"
+        or not isinstance(data.get("executions"),dict)
+    ):
+        raise StateCorruptionError("stage-a controller execution ledger is invalid")
+    roots={
+        str(item.get("root_session") or "")
+        for item in data["executions"].values()
+        if isinstance(item,dict) and str(item.get("root_session") or "")
+    }
+    if not roots:
+        return ""
+    if len(roots)!=1:
+        raise StateCorruptionError(
+            "stage-a controller execution ledger has conflicting root sessions"
+        )
+    sid=next(iter(roots))
+    return sid if _valid_root_session(sid) else ""
+
+
 def root_orchestrator_id():
     if not PROJECT:
         return ""
@@ -11106,7 +16918,13 @@ def root_orchestrator_id():
             or data.get("protocol")!=ROOT_SESSION_PROTOCOL
         ):
             raise StateCorruptionError("root session tracker is invalid")
-        return sid if sid and _valid_root_session(sid) else ""
+        if sid and _valid_root_session(sid):
+            return sid
+        sid=_root_session_from_controller_ledger()
+        if sid:
+            record_root_session(sid)
+            return sid
+        return ""
     except StateCorruptionError:
         raise
     except Exception:
@@ -11374,9 +17192,55 @@ def _reference_sessions(mode):
 
 
 
+def _reference_infrastructure_retry_sessions(mode):
+    """Return reference sessions explicitly superseded by audited infra retries."""
+    if not PROJECT:
+        return set()
+    path=Path(PROJECT)/".opencode-v2/work/stage-a-controller-executions.json"
+    if not path.exists():
+        return set()
+    try:
+        obj=json.loads(path.read_text(errors="replace"))
+        executions=obj.get("executions") if isinstance(obj,dict) else None
+        if not isinstance(executions,dict):
+            raise ValueError("executions is not an object")
+        result=set()
+        for intent in executions.values():
+            if not isinstance(intent,dict):
+                continue
+            action=intent.get("action") if isinstance(intent.get("action"),dict) else {}
+            if (
+                action.get("agent")!="reference-researcher"
+                or action.get("mode")!=mode
+            ):
+                continue
+            grant=intent.get("semantic_infrastructure_retry")
+            if not isinstance(grant,dict):
+                continue
+            if (
+                grant.get("protocol")!=REFERENCE_SEMANTIC_RETRY_PROTOCOL
+                or grant.get("source")!="operator-controller"
+            ):
+                continue
+            sessions=grant.get("child_sessions")
+            if not isinstance(sessions,list) or not all(
+                isinstance(sid,str) and sid for sid in sessions
+            ):
+                continue
+            result.update(sessions)
+        return result
+    except Exception as exc:
+        log(f"REFERENCE_INFRA_RETRY_LEDGER_ERROR {exc!r}")
+        return set()
+
+
 def _reference_progress_stats(mode):
     rows=_reference_sessions(mode)
-    completed=[sid for sid,time_idle in rows if time_idle]
+    infrastructure=_reference_infrastructure_retry_sessions(mode)
+    completed=[
+        sid for sid,time_idle in rows
+        if time_idle and sid not in infrastructure
+    ]
     active=[sid for sid,time_idle in rows if not time_idle]
     flags=[(sid,reference_session_made_progress(sid)) for sid in completed]
     productive=sum(1 for _,ok in flags if ok)
@@ -11385,7 +17249,7 @@ def _reference_progress_stats(mode):
         if ok:
             break
         stagnant+=1
-    return completed,active,productive,stagnant
+    return completed,active,productive,stagnant,sorted(infrastructure)
 
 
 def reference_gate_snapshot():
@@ -11404,7 +17268,7 @@ def reference_gate_snapshot():
     foundation_text=foundation.read_text(errors="replace") if foundation.exists() else ""
     foundation_result=str(evidence.get("foundation_result") or "").upper()
 
-    completed,active,productive,stagnant=_reference_progress_stats("foundation")
+    completed,active,productive,stagnant,infrastructure=_reference_progress_stats("foundation")
     ready=(
         foundation.exists()
         and reference_foundation_marker_complete(foundation_text)
@@ -11424,6 +17288,7 @@ def reference_gate_snapshot():
         "foundation_result":foundation_result or parse_state,
         "foundation_present":foundation.exists(),
         "session_ids":completed[-MAX_REFERENCE_FOUNDATION_SESSIONS:],
+        "infrastructure_sessions":infrastructure,
     }
 
 
@@ -11440,7 +17305,7 @@ def reference_validation_gate_snapshot():
 
     evidence,parse_state=_reference_evidence()
     result=str(evidence.get("result") or "").upper()
-    completed,active,productive,stagnant=_reference_progress_stats("validation")
+    completed,active,productive,stagnant,infrastructure=_reference_progress_stats("validation")
     ready=(result=="READY")
     hard=len(completed)>=MAX_REFERENCE_VALIDATION_SESSIONS
     stalled=stagnant>=MAX_REFERENCE_STAGNANT_SESSIONS
@@ -11455,6 +17320,7 @@ def reference_validation_gate_snapshot():
         "active_sessions":active,
         "evidence_result":result or parse_state,
         "session_ids":completed[-MAX_REFERENCE_VALIDATION_SESSIONS:],
+        "infrastructure_sessions":infrastructure,
     }
 
 
@@ -11686,6 +17552,18 @@ def compile_structured_plan():
         log(f"STRUCTURED_PLAN_COMPILE_ERROR error={e!r}")
         return False
 
+def control_candidate_contains_marker(path,marker):
+    try:
+        lines=[
+            line.strip()
+            for line in Path(path).read_text(errors="replace").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return False
+    return marker in lines
+
+
 def control_guard_loop():
     sigs={}
     while True:
@@ -11711,8 +17589,7 @@ def control_guard_loop():
                     sig=(file.stat().st_mtime_ns,file.stat().st_size)
                     if sigs.get(name)==sig:
                         continue
-                    lines=[x.strip() for x in file.read_text(errors="replace").splitlines() if x.strip()]
-                    if not lines or lines[-1]!=marker:
+                    if not control_candidate_contains_marker(file,marker):
                         continue
                     sigs[name]=sig
                     if control_guard(kind):
@@ -11787,6 +17664,9 @@ def persist_live_status(payload):
 
 def api_poll_loop():
     while True:
+        if not ensure_running_control_policy_current():
+            time.sleep(POLL)
+            continue
         try:
             statuses=http.get_status()
             active=set(statuses)
@@ -11868,6 +17748,20 @@ def api_poll_loop():
                     enforce_assignment(sid,agent,shape["first_user"])
 
                 did,attempt=session_task.get(sid,("",0))
+                plan_revocation=active_implementation_plan_revocation_reason(
+                    agent,did
+                )
+                if parent and plan_revocation:
+                    if abort_session(sid,plan_revocation,agent):
+                        log(
+                            f"PLAN_REVOKED_ACTIVE_WORKER_ABORT session={sid} "
+                            f"deliverable={did}"
+                        )
+                        csv(
+                            "PLAN_REVOKED_ACTIVE_WORKER_ABORT",
+                            sid,agent,did,
+                        )
+                    continue
                 execution=meaningful_worker_execution(sid,did) if did else ""
                 if execution:
                     consume_operator_reservation(sid,did,execution)
@@ -11923,7 +17817,7 @@ def api_poll_loop():
                         checkpoint["aborted"]=True
                         if candidate_outcome=="invalid":
                             reason="planner_fresh_candidate_invalid"
-                            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                            if planner_restart_count()<planner_restart_limit():
                                 record_planner_restart(sid,reason)
                         else:
                             reason="planner_fresh_candidate_ready"
@@ -11948,7 +17842,7 @@ def api_poll_loop():
                     )
                     if progress_reason and not checkpoint.get("aborted"):
                         checkpoint["aborted"]=True
-                        if planner_restart_count()<MAX_PLANNER_RESTARTS:
+                        if planner_restart_count()<planner_restart_limit():
                             record_planner_restart(sid,progress_reason)
                         abort_session(sid,progress_reason,agent)
                         planner_retired=True
@@ -11980,8 +17874,8 @@ def api_poll_loop():
                     if reason:
                         st["aborted_key"]=key
                         if agent=="implementation-planner":
-                            if planner_restart_count()>=MAX_PLANNER_RESTARTS:
-                                reason=f"planner_restart_limit={MAX_PLANNER_RESTARTS} {reason}"
+                            if planner_restart_count()>=planner_restart_limit():
+                                reason=f"planner_restart_limit={planner_restart_limit()} {reason}"
                             else:
                                 record_planner_restart(sid,reason)
                         if abort_session(
@@ -12128,7 +18022,7 @@ def reconcile_planner_completion(sid):
                 if repair.exists()
                 else "planner_completed_before_structured_plan_finalization"
             )
-            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+            if planner_restart_count()<planner_restart_limit():
                 record_planner_restart(sid,reason)
             log(
                 f"PLANNER_COMPLETED_INVALID session={sid} "
@@ -12139,7 +18033,7 @@ def reconcile_planner_completion(sid):
                 f"reason={reason} restart_count={planner_restart_count()}",
             )
         else:
-            if planner_restart_count()<MAX_PLANNER_RESTARTS:
+            if planner_restart_count()<planner_restart_limit():
                 record_planner_restart(
                     sid,
                     "planner_completed_without_meaningful_structured_plan",
@@ -12183,6 +18077,152 @@ def classify_post_session_failure(did,detail,execution):
     return "genuine"
 
 
+
+def recover_max_step_contract_challenge_reason(sid,did):
+    """Recover only an evidenced, terminal-preempted worker contract challenge.
+
+    The guard must have denied the last tool with the precise deliverable and
+    required a single-line challenge; no subsequent tool may have executed.
+    The contradiction must come from that worker's persisted terminal prose.
+    """
+    summary=max_step_terminal_summary_db(sid)
+    if not summary or not MAX_STEP_TERMINAL_RE.search(summary):
+        return ""
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    command=str(leaf.get("verify_command") or "").strip()
+    if not command or command not in summary:
+        return ""
+    if not v1_runtime_enabled():
+        return ""
+    try:
+        con=db_connect()
+        rows=con.execute(
+            "SELECT data FROM part WHERE session_id=? ORDER BY time_created,id",
+            (sid,),
+        ).fetchall()
+        con.close()
+    except Exception:
+        return ""
+    saw_guard=False
+    for (raw,) in rows:
+        try:
+            part=json.loads(raw)
+        except (TypeError,ValueError):
+            continue
+        if not isinstance(part,dict) or part.get("type")!="tool":
+            continue
+        state=part.get("state") if isinstance(part.get("state"),dict) else {}
+        error=str(state.get("error") or "")
+        if not saw_guard:
+            if (
+                state.get("status")=="error"
+                and error.startswith(
+                    "EARLY_WRITE_IMPLEMENTATION_CONTRACT_CHALLENGE_REQUIRED"
+                )
+                and f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} " in error
+                and "next_action=return-single-line-CONTRACT_CHALLENGE" in error
+                and "no_more_tools=true" in error
+            ):
+                saw_guard=True
+            continue
+        # Do not reinterpret an earlier denial if any later tool was attempted.
+        return ""
+    if not saw_guard:
+        return ""
+    # Extract the worker's own positive reasoning. Do not manufacture a
+    # contradiction from guard text or from a supervisor diagnostic alone.
+    conflict=re.search(
+        r"Therefore,\s*([^\n]*?)(?=\s*This is a conflict|\n)",
+        summary,re.IGNORECASE,
+    )
+    if not conflict:
+        return ""
+    reason=f"verify_command {command} conflicts with contract authority: "+(
+        "Therefore, "+conflict.group(1).strip()
+    )
+    reason=" ".join(reason.replace("**","").split())
+    return reason if not validate_contract_challenge_reason(reason) else ""
+
+
+def handle_leaf_contract_challenge(sid,agent,did):
+    """Turn one supervisor-confirmed worker challenge into targeted plan repair."""
+    reason=parse_contract_challenge(last_assistant_text_db(sid))
+    recovered_max_step=False
+    if not reason:
+        reason=recover_max_step_contract_challenge_reason(sid,did)
+        recovered_max_step=bool(reason)
+    if not reason:
+        return False
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    if plan_contract_session_exact_verify_state(sid,leaf)!="failed":
+        log(
+            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+            "reason=exact-verify-not-failed"
+        )
+        csv(
+            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+            f"{did} exact-verify-not-failed",
+        )
+        return False
+    if not durable_worker_execution(did,sid):
+        log(
+            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+            "reason=no-durable-owned-work"
+        )
+        csv(
+            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+            f"{did} no-durable-owned-work",
+        )
+        return False
+
+    verified,detail=post_session_finalize(did,sid=sid)
+    if verified or not str(detail).startswith("verify-failed-"):
+        log(
+            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+            f"reason=supervisor-recheck-{detail}"
+        )
+        csv(
+            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+            f"{did} supervisor-recheck-{detail}",
+        )
+        return False
+
+    requested,request_detail=request_leaf_contract_challenge_repair(
+        did,sid,reason
+    )
+    if not requested:
+        log(
+            f"LEAF_CONTRACT_CHALLENGE_REJECTED session={sid} deliverable={did} "
+            f"reason={request_detail}"
+        )
+        csv(
+            "LEAF_CONTRACT_CHALLENGE_REJECTED",sid,agent,
+            f"{did} {request_detail}",
+        )
+        return False
+
+    if recovered_max_step:
+        log(
+            f"LEAF_CONTRACT_CHALLENGE_MAX_STEP_RECOVERED session={sid} "
+            f"deliverable={did}"
+        )
+        csv("LEAF_CONTRACT_CHALLENGE_MAX_STEP_RECOVERED",sid,agent,did)
+    execution=meaningful_worker_execution(sid,did)
+    if execution:
+        consume_operator_reservation(sid,did,execution)
+    worker_sandbox_cleanup_session(sid)
+    post_finalize_seen.add(sid)
+    log(
+        f"LEAF_CONTRACT_CHALLENGE_ACCEPTED session={sid} deliverable={did} "
+        f"repair={request_detail}"
+    )
+    csv(
+        "LEAF_CONTRACT_CHALLENGE_ACCEPTED",sid,agent,
+        f"{did} repair={request_detail}",
+    )
+    return True
+
+
 def reconcile_idle_implementation_session(sid,agent):
     if sid in post_finalize_seen:
         return
@@ -12192,6 +18232,16 @@ def reconcile_idle_implementation_session(sid,agent):
     if not did:
         worker_sandbox_cleanup_session(sid)
         post_finalize_seen.add(sid)
+        return
+
+    # Plan repair deliberately removes IMPLEMENTATION_PLAN.ready and the guard
+    # manifest. Historical workers cannot be attributed or finalized safely
+    # without that authoritative contract. Defer them without mutating ledger
+    # state; they can be reconsidered after a valid plan is restored.
+    if not plan_ready():
+        return
+
+    if handle_leaf_contract_challenge(sid,agent,did):
         return
 
     abort_reason=immediate_runtime_abort(sid)
@@ -12495,7 +18545,12 @@ def persisted_reconcile_loop():
     while not DB.exists():
         time.sleep(0.5)
     while True:
+        if not ensure_running_control_policy_current():
+            time.sleep(POLL)
+            continue
         try:
+            reconcile_invalid_leaf_contract_challenge_repair()
+            reconcile_nested_contract_challenge_repairs()
             reconcile_split_proposals()
             reconcile_split_parent_completions()
             sync_control_status_snapshot()
@@ -12513,31 +18568,38 @@ def persisted_reconcile_loop():
                 con.close()
 
                 for sid,agent,time_created in rows:
-                    if int(time_created or 0)<START_MS and sid not in pending_sessions:
+                    if not restart_reconcile_session_allowed(
+                        sid,time_created,active,pending_sessions
+                    ):
                         continue
                     prompt=first_user_text_db(sid)
+                    effective_agent=effective_implementation_agent(
+                        sid,agent,prompt
+                    )
                     if (
-                        agent in IMPLEMENTATION_AGENTS
+                        effective_agent in IMPLEMENTATION_AGENTS
                         or parse_deliverable(strip_subagent_prefix(prompt))
                     ) and sid not in dispatch_seen:
-                        enforce_assignment(sid,agent,prompt)
+                        enforce_assignment(sid,effective_agent,prompt)
 
                     terminal=_v1_session_terminal(sid,active)
                     if agent=="implementation-planner" and terminal:
                         reconcile_planner_completion(sid)
 
                     comps=_v1_compaction_count(sid)
-                    reconcile_compaction_event(sid,agent,comps)
+                    reconcile_compaction_event(sid,effective_agent,comps)
 
-                    if agent in IMPLEMENTATION_AGENTS and terminal:
-                        reconcile_idle_implementation_session(sid,agent)
+                    if effective_agent in IMPLEMENTATION_AGENTS and terminal:
+                        reconcile_idle_implementation_session(sid,effective_agent)
                     elif (
-                        agent in IMPLEMENTATION_AGENTS
+                        effective_agent in IMPLEMENTATION_AGENTS
                         and restart_orphan_candidate(
                             sid, active, pending_sessions, time_created
                         )
                     ):
-                        reconcile_restart_orphaned_implementation_session(sid,agent)
+                        reconcile_restart_orphaned_implementation_session(
+                            sid,effective_agent
+                        )
             else:
                 con=db_connect()
                 rows=con.execute(
@@ -12554,19 +18616,71 @@ def persisted_reconcile_loop():
                     if int(time_created or 0)<START_MS and sid not in pending_sessions:
                         continue
                     prompt=first_user_text_db(sid)
+                    effective_agent=effective_implementation_agent(
+                        sid,agent,prompt
+                    )
                     if (
-                        agent in IMPLEMENTATION_AGENTS
+                        effective_agent in IMPLEMENTATION_AGENTS
                         or parse_deliverable(strip_subagent_prefix(prompt))
                     ) and sid not in dispatch_seen:
-                        enforce_assignment(sid,agent,prompt)
+                        enforce_assignment(sid,effective_agent,prompt)
                     if agent=="implementation-planner" and time_idle:
                         reconcile_planner_completion(sid)
-                    reconcile_compaction_event(sid,agent,comps)
-                    if agent in IMPLEMENTATION_AGENTS and time_idle:
-                        reconcile_idle_implementation_session(sid,agent)
+                    reconcile_compaction_event(sid,effective_agent,comps)
+                    if effective_agent in IMPLEMENTATION_AGENTS and time_idle:
+                        reconcile_idle_implementation_session(sid,effective_agent)
         except Exception as exc:
             log(f"PERSISTED_RECONCILE_ERROR {exc!r}")
         time.sleep(0.5)
+
+
+def discover_runtime_base_url(project):
+    resolved=str(Path(project).resolve())
+    candidates=[]
+    runtime_dir=ROOT/"runtime"
+    if not runtime_dir.is_dir():
+        return ""
+    for path in sorted(runtime_dir.glob("a2-server-*.json")):
+        try:
+            data=json.loads(path.read_text())
+            base=str(data.get("base_url") or "").rstrip("/")
+            if str(data.get("project") or "")!=resolved or not base:
+                continue
+            verify_runtime_state(ROOT,Path(resolved),base)
+        except Exception:
+            continue
+        candidates.append(base)
+    unique=sorted(set(candidates))
+    if len(unique)>1:
+        raise RuntimeError(
+            "ambiguous live OpenCode runtime markers for project: "
+            + ",".join(unique)
+        )
+    return unique[0] if unique else ""
+
+
+def configure_cli_runtime(project="",base_url=""):
+    global PROJECT
+    if project:
+        PROJECT=str(Path(project).resolve())
+        os.environ["V2_PROJECT"]=PROJECT
+    if base_url:
+        os.environ["V2_OPENCODE_BASE_URL"]=str(base_url).rstrip("/")
+    elif PROJECT and not str(os.environ.get("V2_OPENCODE_BASE_URL") or "").strip():
+        discovered=discover_runtime_base_url(PROJECT)
+        if discovered:
+            os.environ["V2_OPENCODE_BASE_URL"]=discovered
+    if not str(os.environ.get("V2_OPENCODE_DB") or "").strip():
+        candidate=ROOT/"xdg"/"data-v11831-a2"/"opencode"/"opencode.db"
+        if candidate.is_file():
+            os.environ["V2_OPENCODE_DB"]=str(candidate)
+            os.environ.setdefault("V2_OPENCODE_SESSION_TABLE","session")
+    return {
+        "project":runtime_project(),
+        "db":str(runtime_db_path()),
+        "session_table":session_table_name(),
+        "base_url":str(os.environ.get("V2_OPENCODE_BASE_URL") or "").rstrip("/"),
+    }
 
 
 def main():
@@ -12574,12 +18688,18 @@ def main():
     ap=argparse.ArgumentParser(add_help=False)
     ap.add_argument("--claim-dispatch"); ap.add_argument("--claim-splitter"); ap.add_argument("--claim-corrective-splitter"); ap.add_argument("--complete-splitter"); ap.add_argument("--recover-splitter-output-limit"); ap.add_argument("--recover-splitter-profile-change"); ap.add_argument("--prior-splitter-model"); ap.add_argument("--recover-splitter-execution-contract"); ap.add_argument("--prior-splitter-steps"); ap.add_argument("--recover-splitter-direct-context-contract"); ap.add_argument("--recover-historical-splitter-corrective"); ap.add_argument("--recover-exhausted-splitter-fallback"); ap.add_argument("--recover-denied-tool-finalize"); ap.add_argument("--recover-false-ownership-finalize"); ap.add_argument("--recover-version-skew-zero-work-dispatch"); ap.add_argument("--recover-sandbox-wrapper-history-poison"); ap.add_argument("--recover-context-delivery-failure"); ap.add_argument("--recover-ownership-prefix-firewall"); ap.add_argument("--recover-external-execution-contract"); ap.add_argument("--correction-file"); ap.add_argument("--recover-historical-parent-contract-repair-resolution"); ap.add_argument("--recover-legacy-handoff-writer-verify"); ap.add_argument("--recover-nested-handoff-writer-verify"); ap.add_argument("--recover-stale-split-parent-contract"); ap.add_argument("--recover-false-parent-contract-repair"); ap.add_argument("--resolve-false-parent-contract-repair")
     ap.add_argument("--reconcile-splits-once",action="store_true")
+    ap.add_argument("--recover-planner-infrastructure")
+    ap.add_argument("--reason",default="")
     ap.add_argument("--render-runtime-prompt")
     ap.add_argument("--render-dispatch-prompt")
     ap.add_argument("--root-read-check")
     ap.add_argument("--early-write-check")
     ap.add_argument("--tool-name",default="")
     ap.add_argument("--tool-args-b64",default="")
+    ap.add_argument("--reference-validation-tool-check")
+    ap.add_argument("--acceptance-validator-tool-check")
+    ap.add_argument("--reconcile-terminal-acceptance-validator")
+    ap.add_argument("--planner-tool-check")
     ap.add_argument("--splitter-tool-check")
     ap.add_argument("--progress-handoff-tool-check")
     ap.add_argument("--confirm-plugin-interrupt")
@@ -12589,11 +18709,24 @@ def main():
     ap.add_argument("--dispatch-token"); ap.add_argument("--splitter-output-b64")
     ap.add_argument("--opencode-base-url",default="")
     args,unknown=ap.parse_known_args()
-    if args.opencode_base_url:
-        # The plugin completion hook runs in a short-lived child process.  Pass
-        # its known native server identity explicitly so a bounded corrective
-        # continuation does not depend on inherited discovery state.
-        os.environ["V2_OPENCODE_BASE_URL"]=args.opencode_base_url.rstrip("/")
+    configure_cli_runtime(args.project or "",args.opencode_base_url or "")
+    if args.recover_planner_infrastructure:
+        if unknown or not args.project:
+            raise SystemExit("planner infrastructure recovery requires --project")
+        PROJECT=args.project
+        ok,detail=recover_planner_infrastructure_failure(
+            args.recover_planner_infrastructure,args.reason
+        )
+        if not ok:
+            raise SystemExit(
+                f"PLANNER_INFRASTRUCTURE_RECOVERY_DENY "
+                f"session={args.recover_planner_infrastructure} reason={detail}"
+            )
+        print(
+            f"PLANNER_INFRASTRUCTURE_RECOVERY_OK "
+            f"session={args.recover_planner_infrastructure} result={detail}"
+        )
+        return
     if args.materialize_dispatch_child:
         if unknown or not args.project or not args.agent:
             raise SystemExit(
@@ -12634,6 +18767,63 @@ def main():
         print(
             f"ROOT_READ_{state.upper()} "
             f"session={args.root_read_check} {detail}"
+        )
+        return
+    if args.reconcile_terminal_acceptance_validator:
+        if unknown or not args.project:
+            raise SystemExit(
+                "terminal acceptance reconciliation requires --project"
+            )
+        PROJECT=args.project
+        ok,detail=reconcile_terminal_acceptance_validator(
+            args.reconcile_terminal_acceptance_validator
+        )
+        if not ok:
+            raise SystemExit(
+                "ACCEPTANCE_VALIDATOR_TERMINAL_DENY "
+                f"session={args.reconcile_terminal_acceptance_validator} "
+                f"reason={detail}"
+            )
+        if detail in {"pass-ok","max-step-valid-report-recovered"}:
+            print(
+                "ACCEPTANCE_VALIDATOR_TERMINAL_PASS_OK "
+                f"session={args.reconcile_terminal_acceptance_validator} "
+                f"result={detail}"
+            )
+        else:
+            print(
+                "ACCEPTANCE_VALIDATOR_TERMINAL_FAIL_RECOVERED "
+                f"session={args.reconcile_terminal_acceptance_validator} "
+                f"result={detail}"
+            )
+        return
+    if args.acceptance_validator_tool_check:
+        if unknown or not args.project:
+            raise SystemExit(
+                "acceptance validator tool check requires --project"
+            )
+        PROJECT=args.project
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(
+                    args.tool_args_b64
+                ).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=acceptance_validator_tool_state(
+            args.acceptance_validator_tool_check,args.tool_name,tool_args
+        )
+        if state=="deny":
+            raise SystemExit(
+                "ACCEPTANCE_VALIDATOR_TOOL_DENY "
+                f"session={args.acceptance_validator_tool_check} {detail}"
+            )
+        print(
+            "ACCEPTANCE_VALIDATOR_TOOL_"
+            f"{state.upper().replace('-','_')} "
+            f"session={args.acceptance_validator_tool_check} {detail}"
         )
         return
     if args.confirm_plugin_interrupt:
@@ -12687,6 +18877,57 @@ def main():
         print(
             f"PROGRESS_HANDOFF_{state.upper()} "
             f"session={args.progress_handoff_tool_check} {detail}"
+        )
+        return
+    if args.reference_validation_tool_check:
+        if unknown or not args.project:
+            raise SystemExit(
+                "reference validation tool check requires --project"
+            )
+        PROJECT=args.project
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(
+                    args.tool_args_b64
+                ).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=reference_validation_tool_state(
+            args.reference_validation_tool_check,args.tool_name,tool_args
+        )
+        if state=="deny":
+            raise SystemExit(
+                "REFERENCE_VALIDATION_TOOL_DENY "
+                f"session={args.reference_validation_tool_check} {detail}"
+            )
+        print(
+            f"REFERENCE_VALIDATION_TOOL_{state.upper()} "
+            f"session={args.reference_validation_tool_check} {detail}"
+        )
+        return
+    if args.planner_tool_check:
+        if unknown or not args.project:
+            raise SystemExit("planner tool check requires --project")
+        PROJECT=args.project
+        tool_args={}
+        if args.tool_args_b64:
+            try:
+                decoded=base64.b64decode(args.tool_args_b64).decode("utf-8")
+                tool_args=json.loads(decoded)
+            except Exception as exc:
+                raise SystemExit(f"invalid --tool-args-b64: {exc}")
+        state,detail=planner_tool_boundary_state(
+            args.planner_tool_check,args.tool_name,tool_args
+        )
+        if state=="deny":
+            raise SystemExit(
+                f"PLANNER_TOOL_DENY session={args.planner_tool_check} {detail}"
+            )
+        print(
+            f"PLANNER_TOOL_{state.upper()} "
+            f"session={args.planner_tool_check} {detail}"
         )
         return
     if args.splitter_tool_check:

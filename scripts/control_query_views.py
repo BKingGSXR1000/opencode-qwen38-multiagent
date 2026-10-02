@@ -11,11 +11,12 @@ import re
 from pathlib import Path
 
 from state_io import atomic_write_text
+from control_policy import control_policy_epoch
 from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
-CONTROL_POLICY_EPOCH = "v2-control-policy-20260925-internal-negation-v7"
+CONTROL_POLICY_EPOCH = control_policy_epoch()
 MAX_DECISION_CHARS = 6000
 MAX_PROGRESS_CHARS = 4000
 DID_RE = re.compile(r"^D\d{3}(?:-[AB](?:[12])?)?$")
@@ -29,6 +30,10 @@ def _scheduler(raw):
         "reserved_workers": int(raw.get("reserved_workers") or 0),
         "available_worker_slots": int(raw.get("available_worker_slots") or 0),
         "active_deliverables": sorted(raw.get("active_deliverables") or []),
+        "reserved_deliverables": sorted(raw.get("reserved_deliverables") or []),
+        "replayable_reserved_deliverables": sorted(
+            raw.get("replayable_reserved_deliverables") or []
+        ),
         "error": str(raw.get("error") or ""),
     }
 
@@ -41,6 +46,105 @@ def _bounded_progress(text: str) -> str:
     head = 1800
     tail = MAX_PROGRESS_CHARS - head - len("\n\n[...progress truncated...]\n\n")
     return text[:head] + "\n\n[...progress truncated...]\n\n" + text[-tail:]
+
+
+MAX_PARENT_EVIDENCE_TEXT_CHARS = 1400
+MAX_PARENT_VERIFY_EVIDENCE_ROWS = 2
+
+
+def _bounded_evidence_text(value):
+    text=str(value or "")
+    if len(text)<=MAX_PARENT_EVIDENCE_TEXT_CHARS:
+        return text
+    keep=MAX_PARENT_EVIDENCE_TEXT_CHARS-len("\n[...evidence truncated...]")
+    return text[:max(0,keep)]+"\n[...evidence truncated...]"
+
+
+def _compact_evidence_row(raw):
+    if not isinstance(raw,dict):
+        return {}
+    row={}
+    for key in (
+        "protocol","deliverable","contract_source_deliverable","session",
+        "timestamp","command","executed","exit_code","result","error",
+        "stdout","stderr",
+    ):
+        if key not in raw:
+            continue
+        value=raw.get(key)
+        if key in {"command","error","stdout","stderr","result"}:
+            value=_bounded_evidence_text(value)
+        row[key]=value
+    return row
+
+
+def _load_json_object_file(path):
+    try:
+        data=json.loads(Path(path).read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data,dict) else {}
+
+
+def _parent_verify_evidence(project,parent_id):
+    if not parent_id:
+        return []
+    path=(
+        Path(project)/".opencode-v2"/"work"/
+        f"{parent_id}.verify-evidence.json"
+    )
+    data=_load_json_object_file(path)
+    rows=data.get("entries") if isinstance(data.get("entries"),list) else []
+    compact=[_compact_evidence_row(row) for row in rows if isinstance(row,dict)]
+    compact=[row for row in compact if row]
+    return compact[-MAX_PARENT_VERIFY_EVIDENCE_ROWS:]
+
+
+def _parent_functional_evidence(project,parent_id):
+    if not parent_id:
+        return {}
+    path=(
+        Path(project)/".opencode-v2"/"work"/
+        f"{parent_id}.functional-diagnostic-evidence.json"
+    )
+    return _compact_evidence_row(_load_json_object_file(path))
+
+
+def _split_child_evidence_authority(parent_id):
+    return {
+        "authoritative": [
+            "this leaf context packet",
+            "preserved parent contract fields in this packet",
+            "parent_supervisor_verify_evidence",
+            "parent_supervisor_functional_diagnostic_evidence",
+            "current parent-owned artifacts",
+        ],
+        "non_authoritative": [
+            f"rejected splitter/model outputs for {parent_id}",
+            "split-proposal.failed-*",
+            "split-proposal.corrective-rejected-*",
+            "splitter-primary-response-*",
+            "current_progress claims not corroborated by authoritative evidence",
+        ],
+        "rules": [
+            (
+                "Rejected splitter/model outputs are diagnostic history only; "
+                "never use them to decide that the parent contract is invalid "
+                "or to override supervisor evidence."
+            ),
+            (
+                "current_progress is provisional continuity scratch, not authority; "
+                "on retry, discard or rewrite any claim that conflicts with or is "
+                "unsupported by inline supervisor evidence/current artifacts."
+            ),
+            (
+                "Use inline supervisor evidence before discovery. If it names "
+                "a helper/log/path and a bounded current read confirms that path "
+                "is absent, that absence is conclusive evidence; checkpoint the "
+                "smallest writer delta instead of searching alternate locations."
+            ),
+        ],
+    }
 
 
 def _blockers(raw):
@@ -259,6 +363,10 @@ def build_leaf_contexts(project, manifest):
         parent_acceptance_ids = _as_string_list(
             parent_leaf.get("acceptance_ids") if isinstance(parent_leaf, dict) else []
         )
+        parent_owned_artifact_paths = _as_string_list(
+            parent_leaf.get("owned_artifact_paths")
+            if isinstance(parent_leaf, dict) else []
+        )
         progress_path = project / ".opencode-v2" / "work" / f"{did}.progress.md"
         try:
             current_progress = _bounded_progress(
@@ -287,6 +395,7 @@ def build_leaf_contexts(project, manifest):
                 for aid in acceptance_ids
             ],
             "parent_acceptance_ids": parent_acceptance_ids,
+            "parent_owned_artifact_paths": parent_owned_artifact_paths,
             "parent_acceptance_musts": [
                 {"id": aid, "text": acceptance["musts"].get(aid, "")}
                 for aid in parent_acceptance_ids
@@ -305,6 +414,18 @@ def build_leaf_contexts(project, manifest):
                 _execution_contract_correction(project,did),
             "parent_supervisor_execution_correction":(
                 _execution_contract_correction(project,parent_id)
+                if parent_id else {}
+            ),
+            "parent_supervisor_verify_evidence":(
+                _parent_verify_evidence(project,parent_id)
+                if parent_id else []
+            ),
+            "parent_supervisor_functional_diagnostic_evidence":(
+                _parent_functional_evidence(project,parent_id)
+                if parent_id else {}
+            ),
+            "evidence_authority":(
+                _split_child_evidence_authority(parent_id)
                 if parent_id else {}
             ),
         }
@@ -370,6 +491,7 @@ def build_query_views(snapshot, manifest, source_rendered, project=None):
                 "deliverable": did,
                 "split_state": str(leaf.get("split_state") or "split-required"),
                 "split_generation": int(leaf.get("split_generation") or 0),
+                "split_claim_count": int(leaf.get("split_claim_count") or 0),
             }
             for did, leaf in leaves.items()
             if isinstance(leaf, dict) and leaf.get("split_required") is True
@@ -642,7 +764,7 @@ def _selftest():
             "- [ ] A001: first required behavior that wraps\n"
             "  across a second physical line and preserves the whole criterion.\n"
             "- [ ] A002: second required behavior with behind-\n"
-            "  Jupiter geometry.\n"
+            "  object geometry.\n"
             "## SHOULD Checks\n"
             "- [ ] S001: optional behavior must not leak into A002.\n"
             "<!-- ACCEPTANCE_COMPLETE -->\n"
@@ -703,7 +825,7 @@ def _selftest():
             }
         ]
         assert contexts["D004-A"]["acceptance_musts"] == [
-            {"id": "A002", "text": "second required behavior with behind-Jupiter geometry."}
+            {"id": "A002", "text": "second required behavior with behind-object geometry."}
         ]
         assert contexts["D004-A"]["source_kind"] == "split-child"
         assert "bounded child work" in contexts["D004-A"]["split_scope"]

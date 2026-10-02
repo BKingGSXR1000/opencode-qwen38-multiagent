@@ -11,10 +11,17 @@ PORT="${2:-57042}"
 
 CANONICAL_CONFIG_HOME="$ROOT/xdg/config"
 OVERLAY_CONFIG_HOME="$(mktemp -d /tmp/stage-a-opencode-config.XXXXXX)"
-cleanup_overlay(){
+RUNTIME_STATE="$ROOT/runtime/a2-server-${PORT}.json"
+SERVER_PID=""
+cleanup_runtime(){
+  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
   rm -rf -- "$OVERLAY_CONFIG_HOME"
+  rm -f -- "$RUNTIME_STATE"
 }
-trap cleanup_overlay EXIT
+trap cleanup_runtime EXIT
 python3 "$ROOT/scripts/stage_a_path_permissions.py" \
   --project "$PROJECT" --config-home "$CANONICAL_CONFIG_HOME" \
   --overlay-root "$OVERLAY_CONFIG_HOME" >/dev/null
@@ -47,4 +54,11 @@ echo "Semantic models      : syv/qwen38-*"
 echo
 "$BIN" serve --hostname 127.0.0.1 --port "$PORT" &
 SERVER_PID=$!
+python3 "$ROOT/scripts/runtime_contract.py" \
+  --root "$ROOT" \
+  --project "$PROJECT" \
+  --base-url "$V2_OPENCODE_BASE_URL" \
+  --write \
+  --server-pid "$SERVER_PID" \
+  --overlay "$OVERLAY_CONFIG_HOME" >/dev/null
 wait "$SERVER_PID"

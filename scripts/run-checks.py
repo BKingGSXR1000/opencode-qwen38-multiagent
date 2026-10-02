@@ -11,6 +11,12 @@ HARNESS_ROOT=Path(__file__).resolve().parents[1]
 def atomic_write(path,text): atomic_write_text(path,text)
 def slug(s): return re.sub(r"[^A-Za-z0-9._-]+","-",s).strip("-") or "check"
 
+def bounded_failure_diagnostic(stdout,stderr,limit=2000):
+    def clip(value):
+        text=str(value or "")
+        return text if len(text)<=limit else text[:limit]+"\n...[truncated]"
+    return {"stdout":clip(stdout),"stderr":clip(stderr)}
+
 def validate_schema(value,schema,path="manifest"):
     kind=schema.get("type")
     if kind=="object":
@@ -144,7 +150,10 @@ def run_checks(project: Path, persist=True):
         log=logs/f"{i:02d}-{slug(name)}.log"
         if persist:
             atomic_write(log,f"$ {cmd}\nexit={rc} timeout={timed_out}\n\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}\n")
-        results.append({"name":name,"command":cmd,"exit_code":rc,"timed_out":timed_out,"duration_seconds":round(time.time()-start,3),"log":str(log.relative_to(project))})
+        result={"name":name,"command":cmd,"exit_code":rc,"timed_out":timed_out,"duration_seconds":round(time.time()-start,3),"log":str(log.relative_to(project))}
+        if rc!=0 or timed_out:
+            result["diagnostic"]=bounded_failure_diagnostic(stdout,stderr)
+        results.append(result)
     passed=not missing and all(x["exit_code"]==0 and not x["timed_out"] for x in results)
     report={"protocol":"v2-test-report-v1","status":"pass" if passed else "fail","checks_run":len(results),"checks_passed":sum(1 for x in results if x["exit_code"]==0 and not x["timed_out"]),"missing_required_files":missing,"checks":results}
     if persist:
@@ -161,6 +170,7 @@ def selftest():
         (project/".opencode-v2/TEST_CHECKS.json").write_text(json.dumps({"checks":[{"name":"masked","command":"false; true"}],"required_files":["ok.txt"]}))
         report,rc=run_checks(project)
         assert rc!=0 and report["status"]=="fail" and report["checks"][0]["exit_code"]!=0, report
+        assert "unsafe test command:" in report["checks"][0]["diagnostic"]["stderr"], report
         (project/".opencode-v2/TEST_CHECKS.json").write_text(json.dumps({"checks":[{"name":"ok","command":"test -s ok.txt"}],"required_files":["ok.txt"]}))
         report,rc=run_checks(project)
         assert rc==0 and report["checks_passed"]==1, report

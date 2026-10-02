@@ -1,19 +1,17 @@
 ---
 description: Obtains independent authoritative reference evidence for acceptance checks. Research only; cannot modify product code.
 mode: subagent
-model: syv/qwen38-reasoning-48k
+model: syv/qwen38-reference-nothink
 steps: 24
 permission:
-  read:
-    "*": deny
-    ".opencode-v2/**": allow
+  read: allow
   edit:
     "*": deny
     ".opencode-v2/acceptance/**": allow
     ".opencode-v2/REFERENCE_FOUNDATION.md": allow
-  glob: deny
-  grep: deny
-  list: deny
+  glob: allow
+  grep: allow
+  list: allow
   bash: deny
   task: deny
   todowrite: deny
@@ -38,6 +36,12 @@ explicit modes supplied by the parent prompt. Never infer the mode.
 - Before a web call that advances an unresolved item, write/update
   `.opencode-v2/acceptance/reference-work.json` with the exact `current_item`,
   source/request you are about to use, and status `in_progress`.
+- When the external tool uses a normal HTTP(S) URL and that URL contains NO
+  credential, API key, token, signature, password, or other secret, persist the
+  exact planned URL as `next_external_request_url`. After a successful call,
+  persist that URL as `last_successful_external_request_url`; if another call
+  is required for the same item, update `next_external_request_url`.
+  Never persist a secret-bearing URL in either field.
 - After the call, persist the verified result before beginning another item.
   If interrupted during the call, the next researcher repeats exactly that
   `in_progress` item; it does NOT restart the whole research project.
@@ -127,12 +131,18 @@ resumes that exact VALID item.
 # REFERENCE_MODE: VALIDATION
 This mode runs AFTER implementation/testing, before final acceptance.
 
-Read:
+Read first:
 - `.opencode-v2/ACCEPTANCE.md`
 - `.opencode-v2/REFERENCE_FOUNDATION.md`
 - `.opencode-v2/acceptance/reference-evidence.json`
 - `.opencode-v2/acceptance/reference-work.json` if present
 - ONLY the single small item file relevant to the current work, if it exists
+
+After those control inputs, you MAY read/search/list the smallest set of project
+artifacts needed to determine whether the current validation item already has
+the required frozen fixtures or evidence. This is inspection only: never edit
+product/application artifacts. Do NOT perform broad repository discovery when
+the current item can be decided from the control contract alone.
 
 Do NOT read a monolithic `reference-fixtures.json`. Do NOT recreate a giant
 fixture document.

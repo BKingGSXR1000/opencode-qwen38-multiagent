@@ -7,6 +7,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -17,7 +19,9 @@ import urllib.request
 from pathlib import Path
 
 from acceptance_contract import must_acceptance_ids
+from control_state import _plan_contract_revision_credit_count
 from deterministic_dispatch import select_actions
+from runtime_contract import verify_state as verify_runtime_server_state
 
 POLL_DEFAULT = 0.5
 SEMANTIC_TERMINAL_GRACE_SECONDS = 10.0
@@ -28,6 +32,7 @@ ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
 EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
 ACCEPTANCE_CONTEXT_PROTOCOL = "v2-acceptance-validator-context-v1"
+ACCEPTANCE_REMEDIATION_PROTOCOL = "v2-final-acceptance-remediation-v1"
 ACCEPTANCE_CONTEXT_MAX_FILE_BYTES = 16 * 1024
 ACCEPTANCE_CONTEXT_MAX_ARTIFACT_BYTES = 64 * 1024
 ACCEPTANCE_CONTEXT_MAX_AUX_BYTES = 32 * 1024
@@ -38,6 +43,11 @@ FIRST read .opencode-v2/ORIGINAL_TASK.md, .opencode-v2/ACCEPTANCE.md, and
 .opencode-v2/CONTROL_CONTRACT.md. Inspect only project files needed to create a
 concrete, dependency-aware plan.
 
+Verify commands must test the Done-when behavior, not incidental presentation
+text from a test runner. Use a runner's exit status plus behavioral assertions;
+do not parse human-readable summaries such as unittest/pytest/npm-test wording
+unless Done-when explicitly requires that output format.
+
 Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Follow the
 implementation-planner protocol exactly. Do not create readiness markers,
 generated IMPLEMENTATION_PLAN.md, test reports, or supervisor-owned runtime
@@ -47,7 +57,10 @@ state. Stop after the durable structured plan edit.""",
 This is a bounded repair, not a request to rewrite the plan. FIRST read
 .opencode-v2/IMPLEMENTATION_PLAN.repair.json and
 .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Read the acceptance contract
-only if an exact acceptance constraint is unclear.
+only when the repair packet itself explicitly names an acceptance/Axxx/MUST
+error. After the two canonical reads, you may inspect an existing concrete file
+already owned by an affected leaf, once, when its current interface is needed
+to repair that leaf. Do not read unrelated repository files.
 
 Edit only .opencode-v2/IMPLEMENTATION_PLAN.structured.json. Preserve every
 existing leaf key and list order: deliverable IDs and historical attempt
@@ -58,6 +71,20 @@ Repair only those leaves and the dependency references they name. Where a
 consumer lacks prerequisites, assign ownership and fail-closed verification to
 its existing direct producers; retain each leaf key and all unrelated plan
 contracts. Do not fabricate data merely to satisfy a check.
+
+For every affected behavioral Done-when, the repaired verify_command MUST
+actually execute the relevant behavior. Syntax checks, file existence, grep,
+or static source inspection alone are not sufficient for a behavioral
+completion contract. Prefer invoking an existing owned helper/test artifact or
+a small runtime command that fails closed on the required behavior. When a
+one-line Python Verify must prove a specific exception type, prefer a stdlib
+call such as unittest.TestCase().assertRaises(ExpectedError, callable, *args)
+instead of multiline or semicolon-compressed try/except syntax. Treat a test
+runner's human-readable summary as presentation, not contract data: use its exit
+status and behavioral assertions unless Done-when explicitly requires that
+summary/output format. Never reference a new verifier/helper path unless that
+path is explicitly added to the affected leaf's owned_artifacts or is owned by
+a declared dependency.
 
 Preserve acceptance requirements and all unrelated valid durable work. Never
 edit generated IMPLEMENTATION_PLAN.md or supervisor-owned runtime state.""",
@@ -78,9 +105,11 @@ Follow the acceptance-planner protocol, preserve the original user goal, and do
 not create supervisor-owned readiness state. Stop after the durable contract edit.""",
     ("acceptance-planner", "repair"): """Repair the acceptance contract for this project.
 
-FIRST read .opencode-v2/ORIGINAL_TASK.md, .opencode-v2/ACCEPTANCE.md, and any
-guard-error artifact. Edit only .opencode-v2/ACCEPTANCE.md. Follow the
-acceptance-planner protocol and do not create supervisor-owned readiness state.""",
+FIRST read .opencode-v2/ORIGINAL_TASK.md, .opencode-v2/ACCEPTANCE.md, and the
+canonical guard error file .opencode-v2/ACCEPTANCE.guard-errors.txt. Do not list
+or probe the control directory and do not guess alternate guard-error names.
+Edit only .opencode-v2/ACCEPTANCE.md. Follow the acceptance-planner protocol and
+do not create supervisor-owned readiness state.""",
     ("reference-researcher", "foundation"): """REFERENCE_MODE: FOUNDATION
 Build or resume only the compact external-reference foundation. Read
 .opencode-v2/acceptance/reference-work.json if present and follow the
@@ -89,7 +118,18 @@ reference-researcher protocol. Do not expand scope beyond durable requirements."
 Resolve exactly one durable validation item. Resume
 .opencode-v2/acceptance/reference-work.json if an item is in progress;
 otherwise resolve only the first missing external-reference item. Follow the
-reference-researcher protocol and persist its required durable evidence.""",
+reference-researcher protocol and persist its required durable evidence.
+
+CHECKPOINT FIRST: after the protocol's required initial control/evidence reads,
+do not spend another long planning turn or perform extra project discovery.
+Within the NEXT tool-bearing response, write
+.opencode-v2/acceptance/reference-work.json with mode=validation,
+status=in_progress, current_item set to the exact item being resolved, and the
+authoritative source/request you intend to use. Keep reasoning before this
+checkpoint under 500 words. Only after that durable checkpoint may you inspect
+the minimum additional project artifacts or make web calls. If external work
+cannot be completed, persist the exact blocker/result for this same item before
+returning REFERENCE_PARTIAL.""",
     ("acceptance-validator", "final"): """Run final acceptance validation from the
 controller-supplied canonical evidence packet below. The packet is the complete
 evidence surface for this run. Do not discover or execute anything else.
@@ -103,6 +143,16 @@ acceptance-validator report schema exactly; model prose alone is never success."
 
 class ControllerError(RuntimeError):
     pass
+
+
+def require_current_runtime_contract(project: Path, base_url: str) -> dict:
+    try:
+        return verify_runtime_server_state(HARNESS_ROOT, project, base_url)
+    except ValueError as exc:
+        raise ControllerError(
+            "OPENCODE_RUNTIME_CONTRACT_STALE; restart the integration server "
+            f"with the current harness before dispatch: {exc}"
+        ) from exc
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -229,11 +279,17 @@ def canonical_execution_action(action: dict) -> dict:
     if normalized["agent"] == "task-splitter":
         try:
             generation = int(action.get("generation"))
+            claim = int(action.get("claim") or 1)
         except (TypeError, ValueError) as exc:
-            raise ControllerError("task-splitter launch lacks a valid generation") from exc
+            raise ControllerError(
+                "task-splitter launch lacks a valid generation/claim"
+            ) from exc
         if generation < 1:
             raise ControllerError("task-splitter launch generation must be positive")
+        if claim < 1:
+            raise ControllerError("task-splitter launch claim must be positive")
         normalized["generation"] = generation
+        normalized["claim"] = claim
     return normalized
 
 
@@ -242,6 +298,8 @@ def execution_action_id(
     root_session: str,
     action: dict,
     dispatch_generation: int | None = None,
+    semantic_work_token: str = "",
+    semantic_attempt_slot: int | None = None,
 ) -> str:
     payload = {
         "state_version": str(state_version),
@@ -250,6 +308,13 @@ def execution_action_id(
     }
     if dispatch_generation is not None:
         payload["dispatch_generation"] = int(dispatch_generation)
+    if semantic_work_token:
+        payload["semantic_work_token"] = str(semantic_work_token)
+    if semantic_attempt_slot is not None:
+        slot=int(semantic_attempt_slot)
+        if slot < 1:
+            raise ControllerError("semantic attempt slot must be positive")
+        payload["semantic_attempt_slot"] = slot
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -260,6 +325,7 @@ def prior_logical_implementation_intents(
     root_session: str,
     action: dict,
     dispatch_generation: int,
+    current_attempt_count: int,
 ) -> list[dict]:
     """Return prior intents for the same logical implementation attempt.
 
@@ -284,6 +350,14 @@ def prior_logical_implementation_intents(
             continue
         if generation != int(dispatch_generation):
             continue
+        baseline=int(
+            (intent.get("baseline_attempt") or {}).get("count") or 0
+        )
+        if baseline not in {
+            int(current_attempt_count),
+            max(0,int(current_attempt_count)-1),
+        }:
+            continue
         if not intent.get("transport_may_have_been_attempted"):
             continue
         matches.append(intent)
@@ -294,7 +368,80 @@ def prior_logical_implementation_intents(
     return matches
 
 
+def prior_logical_task_splitter_intents(
+    executions: dict,
+    current_execution_id: str,
+    root_session: str,
+    action: dict,
+) -> list[dict]:
+    """Return prior intents for the same logical split generation.
+
+    A task-splitter action already carries its split generation. Projection
+    state may advance while that native child/corrective lifecycle is still
+    materializing; state-version churn must not create a second primary
+    splitter for the same generation.
+    """
+    canonical=canonical_execution_action(action)
+    matches=[]
+    for execution_id,intent in executions.items():
+        if execution_id==current_execution_id or not isinstance(intent,dict):
+            continue
+        if str(intent.get("root_session") or "")!=str(root_session):
+            continue
+        if intent.get("action")!=canonical:
+            continue
+        if not intent.get("transport_may_have_been_attempted"):
+            continue
+        matches.append(intent)
+    matches.sort(
+        key=lambda item:int(item.get("created_at_ms") or 0),
+        reverse=True,
+    )
+    return matches
+
+
+def planner_dispatch_generation(project: Path) -> int:
+    """Monotonic planner dispatch generation across audited failure refunds."""
+    path = project / ".opencode-v2" / "work" / "planner-restarts.json"
+    if not path.exists():
+        return 0
+    data = load_json(path, "planner restart ledger")
+    if data.get("owner") not in (None, "supervisor"):
+        raise ControllerError("planner restart ledger owner is not supervisor")
+    try:
+        count = int(data.get("count") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ControllerError("planner restart ledger count is invalid") from exc
+    if count < 0:
+        raise ControllerError("planner restart ledger count is negative")
+    recoveries = data.get("infrastructure_recoveries") or []
+    if not isinstance(recoveries, list):
+        raise ControllerError("planner infrastructure recoveries are invalid")
+    seen=set()
+    for item in recoveries:
+        if not isinstance(item, dict):
+            raise ControllerError("planner infrastructure recovery entry is invalid")
+        sid=str(item.get("session") or "")
+        if (
+            not sid or sid in seen
+            or item.get("source") != "operator-controller"
+            or not str(item.get("reason") or "").strip()
+            or not item.get("timestamp")
+        ):
+            raise ControllerError("planner infrastructure recovery entry is invalid")
+        seen.add(sid)
+    return count + len(recoveries)
+
+
 def attempt_failure_generation(project: Path, did: str) -> int:
+    """Monotonic logical-dispatch generation after durable terminal outcomes.
+
+    Normal/infrastructure terminal outcomes are represented in failure_history.
+    A plan-contract revision is different: it supersedes a completed attempt and
+    grants a replacement slot without adding another failure row. Count those
+    audited contract transitions too so the replacement cannot collide with the
+    pre-repair execution intent.
+    """
     path = project / ".opencode-v2" / "work" / "attempts.json"
     if not path.exists():
         return 0
@@ -307,7 +454,53 @@ def attempt_failure_generation(project: Path, did: str) -> int:
     history = entry.get("failure_history") or []
     if not isinstance(history, list) or not all(isinstance(item, dict) for item in history):
         raise ControllerError(f"attempt ledger failure history invalid for {did}")
-    return len(history)
+    try:
+        count=int(entry.get("count") or 0)
+    except (TypeError,ValueError) as exc:
+        raise ControllerError(f"attempt ledger count invalid for {did}") from exc
+    return len(history) + _plan_contract_revision_credit_count(entry,count)
+
+
+def current_attempt_is_terminal(project: Path, did: str) -> bool:
+    """Return true only when the current sequence has durable terminal state."""
+    path=project/".opencode-v2"/"work"/"attempts.json"
+    if not path.exists():
+        return False
+    data=load_json(path,"attempt ledger")
+    entry=(data.get("deliverables") or {}).get(did) or {}
+    if not isinstance(entry,dict):
+        return False
+    try:
+        count=int(entry.get("count") or 0)
+    except (TypeError,ValueError):
+        return False
+    if count<1:
+        return False
+    for row in entry.get("failure_history") or []:
+        if not isinstance(row,dict):
+            continue
+        try:
+            if int(row.get("attempt") or 0)==count:
+                return True
+        except (TypeError,ValueError):
+            continue
+    for row in entry.get("operator_retry_attempts") or []:
+        if not isinstance(row,dict):
+            continue
+        try:
+            sequence=int(row.get("sequence") or 0)
+        except (TypeError,ValueError):
+            continue
+        if (
+            sequence==count
+            and row.get("state") in {
+                "plan_contract_replacement","bad_plan_replacement",
+                "infrastructure_abort","infrastructure_blocked",
+            }
+        ):
+            return True
+    ready=project/".opencode-v2"/"work"/f"{did}.ready"
+    return ready.is_file()
 
 
 def attempt_snapshot(project: Path, did: str) -> dict:
@@ -334,6 +527,39 @@ def unwrap_http_data(value):
     if isinstance(value, dict) and "data" in value:
         return value.get("data")
     return value
+
+
+def superseded_attempt_session_ids(project: Path, did: str) -> set[str]:
+    """Sessions explicitly replaced by a supervisor-owned same-attempt recovery."""
+    path=project/".opencode-v2"/"work"/"attempts.json"
+    if not path.exists():
+        return set()
+    data=load_json(path,"attempt ledger")
+    if data.get("owner") not in (None,"supervisor"):
+        raise ControllerError("attempt ledger owner is not supervisor")
+    entry=(data.get("deliverables") or {}).get(did) or {}
+    if not isinstance(entry,dict):
+        raise ControllerError(f"attempt ledger entry is not an object for {did}")
+    history=entry.get("unmaterialized_dispatch_history") or []
+    if not isinstance(history,list):
+        raise ControllerError(
+            f"unmaterialized dispatch history invalid for {did}"
+        )
+    result=set()
+    for row in history:
+        if not isinstance(row,dict):
+            raise ControllerError(
+                f"unmaterialized dispatch history row invalid for {did}"
+            )
+        sid=row.get("replaced")
+        replacement=row.get("replacement")
+        if (
+            isinstance(sid,str) and sid
+            and isinstance(replacement,str)
+            and replacement.startswith("dispatch:")
+        ):
+            result.add(sid)
+    return result
 
 
 def child_snapshot(project: Path, base_url: str, root: str) -> list[dict]:
@@ -533,11 +759,20 @@ def evaluate(project: Path) -> dict:
     actions = select_actions(decision)
     if not isinstance(actions, list) or not actions:
         raise ControllerError("selector returned no actions")
+    scheduler=(
+        decision.get("scheduler")
+        if isinstance(decision.get("scheduler"),dict)
+        else {}
+    )
     return {
         "protocol": "v2-stage-a-controller-shadow-v1",
         "state_version": state_version,
         "resume_phase": phase,
         "actions": actions,
+        # Keep replay-specific scheduler evidence attached to the exact
+        # decision generation used for action selection. The controller must
+        # not reread a newer decision later merely to recover this evidence.
+        "scheduler": dict(scheduler),
     }
 
 
@@ -562,7 +797,7 @@ def compare_supervisor_shadow(project: Path, result: dict) -> tuple[bool, str]:
 def one_pass(
     project: Path,
     require_shadow: bool,
-    shadow_attempts: int = 8,
+    shadow_attempts: int = 100,
     shadow_poll_seconds: float = 0.05,
 ) -> dict:
     attempts=max(1,int(shadow_attempts)) if require_shadow else 1
@@ -614,18 +849,41 @@ def workspace_url(base_url: str, path: str, project: Path) -> str:
     return f"{base_url.rstrip('/')}{path}?{query}"
 
 
+def root_session_from_execution_ledger(project: Path) -> str:
+    ledger=load_execution_ledger(project)
+    executions=ledger.get("executions") or {}
+    roots={
+        str(item.get("root_session") or "")
+        for item in executions.values()
+        if isinstance(item,dict) and str(item.get("root_session") or "")
+    }
+    if not roots:
+        return ""
+    if len(roots)!=1:
+        raise ControllerError(
+            "execution ledger contains conflicting root_session values"
+        )
+    return next(iter(roots))
+
+
 def resolve_root_session(project: Path, base_url: str, explicit_session: str = "") -> str:
     if explicit_session:
         sid = explicit_session
     else:
-        tracker = load_json(root_session_path(project), "root session tracker")
-        if tracker.get("owner") != "supervisor":
-            raise ControllerError("root session tracker owner is not supervisor")
-        if tracker.get("protocol") != ROOT_SESSION_PROTOCOL:
-            raise ControllerError(f"root session tracker protocol is not {ROOT_SESSION_PROTOCOL}")
-        sid = str(tracker.get("session") or "")
-        if not sid:
-            raise ControllerError("root session tracker has no session")
+        path=root_session_path(project)
+        if path.exists():
+            tracker = load_json(path, "root session tracker")
+            if tracker.get("owner") != "supervisor":
+                raise ControllerError("root session tracker owner is not supervisor")
+            if tracker.get("protocol") != ROOT_SESSION_PROTOCOL:
+                raise ControllerError(f"root session tracker protocol is not {ROOT_SESSION_PROTOCOL}")
+            sid = str(tracker.get("session") or "")
+            if not sid:
+                raise ControllerError("root session tracker has no session")
+        else:
+            sid=root_session_from_execution_ledger(project)
+            if not sid:
+                raise ControllerError(f"root session tracker missing: {path}")
 
     status, info = http_json(
         "GET",
@@ -1030,12 +1288,123 @@ def build_acceptance_validation_packet(project: Path) -> dict:
     return packet
 
 
+def _safe_reference_resume_url(raw) -> str:
+    """Return a durable HTTP(S) resume URL only when it is safe to replay."""
+    url=str(raw or "").strip()
+    if not url or len(url)>2048 or any(ord(ch)<32 for ch in url):
+        return ""
+    try:
+        parsed=urllib.parse.urlsplit(url)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.lower() not in {"http","https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return ""
+    sensitive=re.compile(
+        r"(^|[_-])(?:api[_-]?key|key|token|secret|password|passwd|auth|"
+        r"authorization|signature|sig)(?:$|[_-])",
+        re.I,
+    )
+    try:
+        query=urllib.parse.parse_qsl(parsed.query,keep_blank_values=True)
+    except ValueError:
+        return ""
+    if any(sensitive.search(str(key)) for key,_ in query):
+        return ""
+    return url
+
+
+def reference_resume_external_request_urls(
+    project: Path,
+    limit: int = 2,
+) -> list[str]:
+    """Read explicit, sanitized resume URLs from durable reference work state."""
+    if limit < 1:
+        return []
+    path=project/".opencode-v2"/"acceptance"/"reference-work.json"
+    if not path.is_file():
+        return []
+    try:
+        work=load_json(path,"reference validation work")
+    except ControllerError:
+        return []
+    result=[]
+    seen=set()
+    for field in (
+        "last_successful_external_request_url",
+        "next_external_request_url",
+    ):
+        url=_safe_reference_resume_url(work.get(field))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        result.append(url)
+        if len(result)>=limit:
+            break
+    return result
+
+
 def build_semantic_subtask(action: dict, project: Path | None = None) -> dict:
     canonical = canonical_execution_action(action)
     key = (canonical.get("agent"), canonical.get("mode"))
     prompt = SEMANTIC_PROMPTS.get(key)
     if not prompt:
         raise ControllerError(f"unsupported semantic action: {canonical!r}")
+    if key == ("reference-researcher", "validation") and project is not None:
+        work_path=project/".opencode-v2"/"acceptance"/"reference-work.json"
+        if work_path.exists():
+            work=load_json(work_path,"reference validation work")
+            current=str(work.get("current_item") or "").strip()
+            if (
+                work.get("mode")=="validation"
+                and work.get("status")=="in_progress"
+                and current
+            ):
+                next_action=str(work.get("next_action") or "").strip()
+                authoritative=str(work.get("authoritative_source") or "").strip()
+                prompt+=(
+                    "\n\nRESUME CHECKPOINT ALREADY EXISTS:\n"
+                    f"- current_item={current}\n"
+                    "- Do NOT rewrite the initial checkpoint and do NOT repeat repository "
+                    "discovery already summarized there.\n"
+                    "- After the required control/evidence reads, the first non-control "
+                    "action MUST be an authoritative web call or a durable evidence/result "
+                    "write for this current_item.\n"
+                    "- If the external step cannot be completed, persist the exact blocker "
+                    "for this same current_item before returning REFERENCE_PARTIAL."
+                )
+                item_path=(
+                    project/".opencode-v2"/"acceptance"/"reference-items"/
+                    f"{current}.json"
+                )
+                if item_path.is_file():
+                    prompt+=(
+                        "\n- Existing current-item evidence exists at "
+                        f".opencode-v2/acceptance/reference-items/{current}.json. "
+                        "Read it during the control/evidence phase and reconcile "
+                        "its IDs/names/claims against REFERENCE_FOUNDATION.md before "
+                        "adding new external evidence."
+                    )
+                resume_urls=reference_resume_external_request_urls(
+                    project,limit=2
+                )
+                if resume_urls:
+                    prompt+=(
+                        "\n- Durable external-request resume hints were explicitly "
+                        "persisted by the prior researcher. Reuse them only when "
+                        "they still match the current item and verified interface "
+                        "contract:"
+                    )
+                    for index,url in enumerate(resume_urls,1):
+                        prompt+=f"\n  - resume_request_{index}={url}"
+                if authoritative:
+                    prompt+=f"\n- authoritative_source={authoritative}"
+                if next_action:
+                    prompt+=f"\n- recorded_next_action={next_action}"
     if key == ("acceptance-validator", "final"):
         if project is None:
             raise ControllerError("final acceptance semantic subtask requires project")
@@ -1077,9 +1446,26 @@ def planner_reconcile_evidence(intent: dict, children: list[dict]) -> dict | Non
 
 
 def semantic_reconcile_evidence(intent: dict, children: list[dict]) -> dict | None:
-    for sid in native_child_ids(intent, children):
-        return {"kind": "native-semantic-child", "sessions": [sid]}
-    return None
+    ids=native_child_ids(intent, children)
+    if not ids:
+        return None
+    by_id={
+        str(child.get("id") or ""):child
+        for child in children
+        if isinstance(child,dict)
+    }
+    sid=ids[0]
+    child=by_id.get(sid) or {}
+    time_info=child.get("time") if isinstance(child.get("time"),dict) else {}
+    updated=time_info.get("updated")
+    evidence={"kind":"native-semantic-child","sessions":[sid]}
+    try:
+        updated_ms=int(updated)
+    except (TypeError,ValueError):
+        updated_ms=0
+    if updated_ms>0:
+        evidence["child_updated_at_ms"]=updated_ms
+    return evidence
 
 
 def session_is_active(project: Path, base_url: str, sid: str) -> bool:
@@ -1089,6 +1475,111 @@ def session_is_active(project: Path, base_url: str, sid: str) -> bool:
     return sid in body
 
 
+def native_child_is_zero_work(child: dict) -> bool:
+    """Require zero-token and zero-file evidence for a terminal child."""
+    if not isinstance(child, dict):
+        return False
+    tokens=child.get("tokens") if isinstance(child.get("tokens"),dict) else {}
+    summary=child.get("summary") if isinstance(child.get("summary"),dict) else {}
+    try:
+        token_total=sum(
+            int(tokens.get(key) or 0)
+            for key in ("input","output","reasoning")
+        )
+        file_total=sum(
+            int(summary.get(key) or 0)
+            for key in ("additions","deletions","files")
+        )
+    except (TypeError,ValueError):
+        return False
+    return token_total==0 and file_total==0
+
+
+def replayable_superseded_orphans(
+    project: Path,
+    base_url: str,
+    result: dict,
+    intent: dict,
+    children: list[dict],
+    did: str,
+) -> list[str]:
+    """Return terminal native children explicitly superseded by recovery audit."""
+    scheduler=(
+        result.get("scheduler")
+        if isinstance(result.get("scheduler"),dict)
+        else {}
+    )
+    replayable=set(
+        scheduler.get("replayable_reserved_deliverables") or []
+    )
+    if did not in replayable:
+        return []
+    superseded=superseded_attempt_session_ids(project,did)
+    if not superseded:
+        return []
+    result_ids=[]
+    for sid in native_child_ids(intent,children):
+        if sid not in superseded:
+            continue
+        if session_is_active(project,base_url,sid):
+            continue
+        result_ids.append(sid)
+    return sorted(set(result_ids))
+
+
+def replayable_zero_work_orphans(
+    project: Path,
+    base_url: str,
+    result: dict,
+    intent: dict,
+    attempts: dict,
+    children: list[dict],
+    did: str,
+) -> list[str]:
+    scheduler=(
+        result.get("scheduler")
+        if isinstance(result.get("scheduler"),dict)
+        else {}
+    )
+    replayable=set(
+        scheduler.get("replayable_reserved_deliverables") or []
+    )
+    if did not in replayable:
+        return []
+    sessions=(
+        attempts.get("sessions")
+        if isinstance(attempts,dict)
+        else None
+    )
+    if not (
+        isinstance(sessions,list)
+        and sessions
+        and isinstance(sessions[-1],str)
+        and sessions[-1].startswith("dispatch:")
+    ):
+        return []
+    current=set(str(s) for s in sessions)
+    unbound=[
+        sid for sid in native_child_ids(intent,children)
+        if sid not in current
+    ]
+    if not unbound:
+        return []
+    by_id={
+        str(child.get("id") or ""):child
+        for child in children
+        if isinstance(child,dict)
+    }
+    for sid in unbound:
+        child=by_id.get(sid)
+        if (
+            not native_child_is_zero_work(child)
+            or session_is_active(project,base_url,sid)
+        ):
+            return []
+    return sorted(unbound)
+
+
 def semantic_child_may_still_transition(
     project: Path, base_url: str, intent: dict, evidence: dict
 ) -> bool:
@@ -1096,25 +1587,309 @@ def semantic_child_may_still_transition(
     sid = str(sessions[0]) if isinstance(sessions, list) and sessions else ""
     if sid and session_is_active(project, base_url, sid):
         return True
-    created = intent.get("created_at_ms")
+    anchor=(
+        evidence.get("child_updated_at_ms")
+        if isinstance(evidence,dict)
+        else None
+    )
+    if anchor is None:
+        anchor=intent.get("created_at_ms")
     try:
-        age = time.time() - (int(created) / 1000.0)
-    except (TypeError, ValueError):
+        age=time.time()-(int(anchor)/1000.0)
+    except (TypeError,ValueError):
         return False
     return age < SEMANTIC_TERMINAL_GRACE_SECONDS
 
 
-def finalize_terminal_acceptance_report(project: Path, intent: dict) -> dict | None:
-    """Finalize a fresh durable PASS report after its validator is terminal.
+def _atomic_write_json_path(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True,exist_ok=True)
+    payload=json.dumps(data,sort_keys=True,indent=2)+"\n"
+    tmp=path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w",encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp,path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+
+def _unique_verified_acceptance_failure_owner(
+    ctrl: Path, leaves: dict, candidate_ids: list[str], check: dict
+) -> str:
+    """Resolve an ambiguous MUST only through one exact supervisor-verified command.
+
+    A shared acceptance ID is never by itself permission to pick a worker.
+    The failing check must reference an executable command that exactly
+    matches one terminal executable leaf's independently completed Verify.
+    """
+    if len(candidate_ids)==1:
+        return candidate_ids[0]
+    if check.get("required_executable") is not True:
+        return ""
+    command=str(check.get("command") or "").strip()
+    if not command:
+        return ""
+    owners=[]
+    for did in candidate_ids:
+        leaf=leaves.get(did)
+        if not isinstance(leaf,dict):
+            continue
+        if leaf.get("split_children") or str(leaf.get("verify_command") or "").strip()!=command:
+            continue
+        path=ctrl/"work"/f"{did}.verify-evidence.json"
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            observed=load_json(path,"supervisor leaf Verify evidence")
+        except ControllerError:
+            continue
+        latest=observed.get("latest")
+        if not isinstance(latest,dict):
+            continue
+        if (
+            latest.get("command")==command
+            and latest.get("result")=="verified"
+            and latest.get("executed") is True
+            and latest.get("exit_code")==0
+        ):
+            owners.append(did)
+    return owners[0] if len(owners)==1 else ""
+
+
+def finalize_terminal_acceptance_failure_repair(
+    project: Path, report: Path, report_data: dict
+) -> dict:
+    """Reopen uniquely owning READY leaves for a terminal acceptance FAIL."""
+    ctrl=project/".opencode-v2"
+    if report_data.get("protocol")!="v2-acceptance-report-v1":
+        raise ControllerError("acceptance FAIL report protocol is invalid")
+    if report_data.get("result")!="FAIL":
+        raise ControllerError("acceptance remediation requires report.result=FAIL")
+    try:
+        must=acceptance_must_ids(
+            (ctrl/"ACCEPTANCE.md").read_text(errors="replace")
+        )
+    except OSError as exc:
+        raise ControllerError(
+            f"acceptance remediation contract unavailable: {exc}"
+        ) from exc
+
+    checks=report_data.get("checks")
+    if not isinstance(checks,list):
+        raise ControllerError("acceptance FAIL report checks must be an array")
+    by_id={}
+    for item in checks:
+        if not isinstance(item,dict):
+            raise ControllerError("acceptance FAIL report contains invalid check")
+        cid=str(item.get("id") or "")
+        if cid in by_id:
+            raise ControllerError(f"duplicate acceptance FAIL check {cid}")
+        status=item.get("status")
+        evidence=str(item.get("evidence") or "").strip()
+        if status not in {"PASS","FAIL"} or len(evidence)<8:
+            raise ControllerError(f"acceptance FAIL report invalid check {cid}")
+        by_id[cid]=item
+    if set(by_id)!=set(must):
+        raise ControllerError(
+            "acceptance FAIL report IDs do not exactly match MUST IDs"
+        )
+    failed=[cid for cid in must if by_id[cid].get("status")=="FAIL"]
+    if not failed:
+        raise ControllerError("acceptance FAIL report contains no failed MUST")
+
+    manifest=load_json(
+        ctrl/"IMPLEMENTATION_PLAN.guard.json","implementation manifest"
+    )
+    leaves=manifest.get("leaves")
+    if not isinstance(leaves,dict):
+        raise ControllerError("implementation manifest leaves are invalid")
+    owners={}
+    for cid in failed:
+        matches=[
+            did for did,leaf in leaves.items()
+            if isinstance(leaf,dict)
+            and cid in (leaf.get("acceptance_ids") or [])
+        ]
+        selected=_unique_verified_acceptance_failure_owner(
+            ctrl,leaves,matches,by_id[cid]
+        )
+        if not selected:
+            raise ControllerError(
+                f"acceptance remediation owner must be unique for {cid}; "
+                f"owners={matches}"
+            )
+        owners.setdefault(selected,[]).append(cid)
+
+    attempts=load_json(ctrl/"work"/"attempts.json","attempt ledger")
+    deliverables=attempts.get("deliverables")
+    if (
+        attempts.get("owner") not in (None,"supervisor")
+        or not isinstance(deliverables,dict)
+    ):
+        raise ControllerError("acceptance remediation attempt ledger is invalid")
+
+    for did in owners:
+        entry=deliverables.get(did)
+        if not isinstance(entry,dict):
+            raise ControllerError(
+                f"acceptance remediation missing attempt entry for {did}"
+            )
+        try:
+            count=int(entry.get("count") or 0)
+            automatic_limit=int(entry.get("automatic_limit") or 0)
+        except (TypeError,ValueError) as exc:
+            raise ControllerError(
+                f"acceptance remediation invalid attempt counters for {did}"
+            ) from exc
+        if count<1 or automatic_limit<1 or count>=automatic_limit:
+            raise ControllerError(
+                f"ACCEPTANCE_REMEDIATION_NO_AUTOMATIC_ATTEMPT "
+                f"deliverable={did} count={count} "
+                f"automatic_limit={automatic_limit}"
+            )
+        ready=ctrl/"work"/f"{did}.ready"
+        if not ready.is_file() or ready.is_symlink():
+            raise ControllerError(
+                f"acceptance remediation requires current READY leaf: {did}"
+            )
+
+    report_sha=hashlib.sha256(report.read_bytes()).hexdigest()
+    history={
+        "owner":"stage-a-controller",
+        "protocol":ACCEPTANCE_REMEDIATION_PROTOCOL,
+        "report_sha256":report_sha,
+        "failed_acceptance_ids":failed,
+        "leaf_repairs":{},
+        "created_at_ms":int(time.time()*1000),
+    }
+    for did,ids in sorted(owners.items()):
+        leaf=leaves[did]
+        evidence=[
+            {
+                "id":cid,
+                "evidence":str(by_id[cid].get("evidence") or "").strip(),
+            }
+            for cid in ids
+        ]
+        history["leaf_repairs"][did]={
+            "acceptance_ids":ids,
+            "owned_artifact_paths":list(
+                leaf.get("owned_artifact_paths") or []
+            ),
+            "evidence":evidence,
+        }
+        progress=ctrl/"work"/f"{did}.progress.md"
+        lines=[
+            "# Supervisor final-acceptance repair handoff",
+            f"deliverable: {did}",
+            f"source_protocol: {ACCEPTANCE_REMEDIATION_PROTOCOL}",
+            f"acceptance_report_sha256: {report_sha}",
+            "failed_acceptance_ids: "+",".join(ids),
+            "",
+            "Final acceptance found the following concrete contract miss(es).",
+            "Repair only this leaf's owned artifacts; do not weaken Acceptance.",
+        ]
+        for item in evidence:
+            lines.append(f"- {item['id']}: {item['evidence']}")
+        lines.extend([
+            "",
+            "After the owned repair, run the exact packet Verify and return normally.",
+            "",
+        ])
+        progress.write_text("\n".join(lines),encoding="utf-8")
+
+    archive=(
+        ctrl/"work"/"acceptance-remediation-history"/f"{report_sha}.json"
+    )
+    _atomic_write_json_path(archive,history)
+    for did in owners:
+        (ctrl/"work"/f"{did}.ready").unlink()
+    (ctrl/"acceptance-pass.json").unlink(missing_ok=True)
+    return {
+        "kind":"terminal-acceptance-fail-remediation",
+        "report_sha256":report_sha,
+        "failed_acceptance_ids":failed,
+        "reopened_deliverables":sorted(owners),
+        "remediation_sha256":hashlib.sha256(archive.read_bytes()).hexdigest(),
+    }
+
+
+def reconcile_terminal_acceptance_with_supervisor(
+    project: Path, base_url: str, sid: str
+) -> str:
+    """Bind terminal validator verdict/report history through supervisor state."""
+    supervisor_path=Path(__file__).with_name("supervisor.py")
+    env=dict(os.environ)
+    root=supervisor_path.parent.parent
+    env["V2_ROOT"]=str(root)
+    env["V2_PROJECT"]=str(project)
+    env["V2_OPENCODE_BASE_URL"]=base_url.rstrip("/")
+    env["V2_OPENCODE_SESSION_TABLE"]="session"
+    default_db=root/"xdg"/"data-v11831-a2"/"opencode"/"opencode.db"
+    if not default_db.is_file():
+        raise ControllerError(
+            f"canonical Stage-A database is missing: {default_db}"
+        )
+    env["V2_OPENCODE_DB"]=str(default_db)
+    proc=subprocess.run(
+        [
+            sys.executable,str(supervisor_path),
+            "--project",str(project),
+            "--reconcile-terminal-acceptance-validator",sid,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        timeout=30,
+    )
+    output=proc.stdout.strip()
+    if proc.returncode:
+        raise ControllerError(
+            "ACCEPTANCE_TERMINAL_RECONCILE_FAILED "
+            + (output.replace("\n"," ")[:1600] or f"rc={proc.returncode}")
+        )
+    if "ACCEPTANCE_VALIDATOR_TERMINAL_PASS_OK" in output:
+        return "pass"
+    if "ACCEPTANCE_VALIDATOR_TERMINAL_FAIL_RECOVERED" in output:
+        return "fail-recovered"
+    raise ControllerError(
+        "ACCEPTANCE_TERMINAL_RECONCILE_INVALID "
+        + output.replace("\n"," ")[:1600]
+    )
+
+
+def finalize_terminal_acceptance_report(
+    project: Path, base_url: str, intent: dict, evidence: dict
+) -> dict | None:
+    """Reconcile terminal validator evidence, finalizing only an exact PASS.
 
     The bounded-subagent plugin clears acceptance artifacts immediately before
-    every validator launch.  This recovery path additionally requires the
-    report mtime to post-date this exact execution intent, then delegates all
-    trust decisions to finalize-acceptance.py.  Model prose is never sufficient.
+    every validator launch. Terminal recovery additionally binds the durable
+    report to the child session's exact terminal verdict/tool history through
+    supervisor.py before finalize-acceptance.py may mint a pass marker.
     """
     action = intent.get("action") if isinstance(intent, dict) else {}
     if action != {"kind": "launch", "agent": "acceptance-validator", "mode": "final"}:
         return None
+    sessions=evidence.get("sessions") if isinstance(evidence,dict) else None
+    if not isinstance(sessions,list) or len(sessions)!=1:
+        raise ControllerError(
+            "acceptance terminal recovery requires exactly one validator child"
+        )
+    sid=str(sessions[0] or "")
+    if not sid:
+        raise ControllerError("acceptance terminal recovery child id is empty")
+    terminal_state=reconcile_terminal_acceptance_with_supervisor(
+        project,base_url,sid
+    )
+    if terminal_state not in {"pass","fail-recovered"}:
+        raise ControllerError(
+            f"unexpected terminal acceptance state: {terminal_state}"
+        )
 
     report = project / ".opencode-v2" / "acceptance-report.json"
     if not report.is_file() or report.is_symlink():
@@ -1126,6 +1901,17 @@ def finalize_terminal_acceptance_report(project: Path, intent: dict) -> dict | N
         return None
     if created_ms <= 0 or report_ms < created_ms:
         return None
+
+    report_data=load_json(report,"acceptance report")
+    result=str(report_data.get("result") or "")
+    if result=="FAIL":
+        return finalize_terminal_acceptance_failure_repair(
+            project,report,report_data
+        )
+    if result!="PASS":
+        raise ControllerError(
+            f"acceptance report result must be PASS or FAIL, got {result!r}"
+        )
 
     finalizer = HARNESS_ROOT / "scripts" / "finalize-acceptance.py"
     if not finalizer.is_file():
@@ -1157,8 +1943,104 @@ def finalize_terminal_acceptance_report(project: Path, intent: dict) -> dict | N
     }
 
 
+def semantic_prompt_work_token(
+    canonical_action: dict, semantic_prompt_sha256: str
+) -> str:
+    """Bind final acceptance idempotency to its canonical evidence packet."""
+    if canonical_action != {
+        "kind":"launch","agent":"acceptance-validator","mode":"final"
+    }:
+        return ""
+    digest=str(semantic_prompt_sha256 or "")
+    if not re.fullmatch(r"[0-9a-f]{64}",digest):
+        raise ControllerError(
+            "final acceptance semantic prompt hash is invalid"
+        )
+    return f"acceptance-final:{digest}"
+
+
+def semantic_work_item_token(project: Path, canonical_action: dict) -> str:
+    """Return stable durable work identity for sequential semantic validation."""
+    if canonical_action != {
+        "kind": "launch",
+        "agent": "reference-researcher",
+        "mode": "validation",
+    }:
+        return ""
+    path=project/".opencode-v2"/"acceptance"/"reference-work.json"
+    if not path.exists():
+        return "reference-validation:initial"
+    data=load_json(path,"reference work")
+    status=str(data.get("status") or "")
+    if status=="in_progress":
+        item=str(data.get("current_item") or "")
+    elif status=="complete":
+        item=str(data.get("next_item") or "")
+        if not item:
+            item="complete"
+    else:
+        item=str(
+            data.get("current_item")
+            or data.get("next_item")
+            or status
+            or "initial"
+        )
+    return f"reference-validation:{item or 'initial'}"
+
+
+def current_semantic_work_token(project: Path, canonical_action: dict) -> str:
+    """Reconstruct the durable identity for the current semantic work item."""
+    if canonical_action == {
+        "kind":"launch","agent":"acceptance-validator","mode":"final"
+    }:
+        part=build_semantic_subtask(canonical_action,project)
+        prompt_sha=hashlib.sha256(
+            str(part.get("prompt") or "").encode("utf-8")
+        ).hexdigest()
+        return semantic_prompt_work_token(canonical_action,prompt_sha)
+    return semantic_work_item_token(project,canonical_action)
+
+
+def semantic_validation_attempt_slot(
+    project: Path,
+    canonical_action: dict,
+) -> int | None:
+    """Return the next durable validation-session ordinal for reference validation."""
+    if canonical_action != {
+        "kind":"launch",
+        "agent":"reference-researcher",
+        "mode":"validation",
+    }:
+        return None
+    path=project/".opencode-v2"/"reference-validation-gate.json"
+    if not path.exists():
+        return 1
+    gate=load_json(path,"reference validation gate")
+    if gate.get("owner")!="supervisor" or gate.get("phase")!="validation":
+        raise ControllerError("reference validation gate identity is invalid")
+    try:
+        attempts=int(gate.get("attempts"))
+        max_attempts=int(gate.get("max_attempts"))
+    except (TypeError,ValueError) as exc:
+        raise ControllerError("reference validation gate counters are invalid") from exc
+    if attempts < 0 or max_attempts < 1 or attempts >= max_attempts:
+        raise ControllerError(
+            "reference validation gate has no remaining semantic attempt slot"
+        )
+    if str(gate.get("state") or "")!="pending":
+        raise ControllerError(
+            "reference validation semantic dispatch requires a pending gate"
+        )
+    return attempts+1
+
+
 def semantic_execution_slot(
-    ledger: dict, state_version: str, root: str, canonical_action: dict
+    ledger: dict,
+    state_version: str,
+    root: str,
+    canonical_action: dict,
+    semantic_work_token: str = "",
+    semantic_attempt_slot: int | None = None,
 ) -> tuple[int, str]:
     """Return the current semantic execution generation and its idempotency key."""
     executions = ledger.get("executions") if isinstance(ledger, dict) else {}
@@ -1171,6 +2053,8 @@ def semantic_execution_slot(
             root,
             canonical_action,
             None if generation == 0 else generation,
+            semantic_work_token,
+            semantic_attempt_slot,
         )
         intent = executions.get(execution_id)
         if intent is None:
@@ -1181,8 +2065,15 @@ def semantic_execution_slot(
             intent.get("action") != canonical_action
             or str(intent.get("state_version") or "") != str(state_version)
             or str(intent.get("root_session") or "") != str(root)
+            or str(intent.get("semantic_work_token") or "") != str(semantic_work_token)
         ):
             raise ControllerError(f"semantic execution ledger mismatch: {execution_id}")
+        recorded_slot=int(intent.get("semantic_attempt_slot") or 0)
+        expected_slot=int(semantic_attempt_slot or 0)
+        if recorded_slot != expected_slot:
+            raise ControllerError(
+                f"semantic execution attempt slot mismatch: {execution_id}"
+            )
         try:
             recorded_generation = int(intent.get("semantic_generation") or 0)
         except (TypeError, ValueError) as exc:
@@ -1207,6 +2098,54 @@ def semantic_execution_slot(
         if next_generation > MAX_SEMANTIC_INFRASTRUCTURE_RETRIES:
             raise ControllerError("semantic infrastructure retry limit exceeded")
         generation = next_generation
+
+
+def blocked_reference_validation_refund_allowed(
+    project: Path,
+    current: dict,
+    canonical_action: dict,
+    intent_work_token: str,
+    evidence: dict,
+) -> bool:
+    """Allow refund of the terminal session that itself caused a stagnant-tail block."""
+    if canonical_action != {
+        "kind":"launch",
+        "agent":"reference-researcher",
+        "mode":"validation",
+    }:
+        return False
+    if (
+        current.get("resume_phase")!="acceptance-validation"
+        or current.get("actions")!=[
+            {"kind":"blocked","reason":"reference-validation-blocked"}
+        ]
+        or semantic_work_item_token(project,canonical_action)!=intent_work_token
+    ):
+        return False
+    path=project/".opencode-v2"/"reference-validation-gate.json"
+    if not path.exists():
+        return False
+    try:
+        gate=load_json(path,"reference validation gate")
+        attempts=int(gate.get("attempts"))
+        max_attempts=int(gate.get("max_attempts"))
+        stagnant=int(gate.get("stagnant_tail"))
+    except (ControllerError,TypeError,ValueError):
+        return False
+    completed=gate.get("session_ids")
+    active=gate.get("active_sessions")
+    sessions=evidence.get("sessions") if isinstance(evidence,dict) else None
+    return bool(
+        gate.get("owner")=="supervisor"
+        and gate.get("phase")=="validation"
+        and gate.get("state")=="blocked"
+        and 1 <= attempts <= max_attempts
+        and stagnant==2
+        and isinstance(completed,list) and completed
+        and isinstance(active,list) and not active
+        and isinstance(sessions,list) and len(sessions)==1
+        and completed[-1]==sessions[0]
+    )
 
 
 def authorize_semantic_infrastructure_retry(
@@ -1248,12 +2187,22 @@ def authorize_semantic_infrastructure_retry(
             )
 
         current = evaluate(project)
-        if (
-            current.get("state_version") != intent.get("state_version")
-            or current.get("actions") != [canonical_action]
-        ):
+        intent_work_token=str(intent.get("semantic_work_token") or "")
+        current_work_token=(
+            current_semantic_work_token(project,canonical_action)
+            if intent_work_token else ""
+        )
+        same_current_work=(
+            current.get("state_version") == intent.get("state_version")
+            and current.get("actions") == [canonical_action]
+            and current_work_token == intent_work_token
+        )
+        blocked_gate_recovery=blocked_reference_validation_refund_allowed(
+            project,current,canonical_action,intent_work_token,evidence
+        )
+        if not (same_current_work or blocked_gate_recovery):
             raise ControllerError(
-                "semantic infrastructure retry requires the same current deterministic action"
+                "semantic infrastructure retry requires the same current deterministic work item"
             )
 
         try:
@@ -1279,11 +2228,17 @@ def authorize_semantic_infrastructure_retry(
             raise ControllerError("semantic infrastructure retry already authorized")
 
         next_generation = generation + 1
+        intent_attempt_slot=(
+            int(intent.get("semantic_attempt_slot"))
+            if intent.get("semantic_attempt_slot") is not None else None
+        )
         next_id = execution_action_id(
             str(intent["state_version"]),
             root,
             canonical_action,
             next_generation,
+            intent_work_token,
+            intent_attempt_slot,
         )
         if next_id in ledger["executions"]:
             raise ControllerError("next semantic retry execution already exists")
@@ -1295,6 +2250,7 @@ def authorize_semantic_infrastructure_retry(
             "authorized_at_ms": int(time.time() * 1000),
             "child_sessions": list(evidence.get("sessions") or []),
             "next_generation": next_generation,
+            "blocked_gate_recovery":bool(blocked_gate_recovery),
         }
         save_execution_ledger(project, ledger)
         return {
@@ -1360,7 +2316,6 @@ def execute_first_planner(
         )
     part = build_planner_subtask(canonical_action)
     root = resolve_root_session(project, base_url, explicit_root)
-    execution_id = execution_action_id(result["state_version"], root, canonical_action)
 
     with execution_lock(project):
         current = evaluate(project)
@@ -1371,6 +2326,10 @@ def execute_first_planner(
             )
         if current["actions"] != result["actions"]:
             raise ControllerError("deterministic actions changed before dispatch")
+        dispatch_generation = planner_dispatch_generation(project)
+        execution_id = execution_action_id(
+            result["state_version"], root, canonical_action, dispatch_generation
+        )
         ledger = load_execution_ledger(project)
         executions = ledger["executions"]
         existing = executions.get(execution_id)
@@ -1387,6 +2346,7 @@ def execute_first_planner(
                 f"execution_id={execution_id} replay remains forbidden"
             )
 
+        require_current_runtime_contract(project, base_url)
         ensure_root_idle(project, base_url, root)
         baseline_children = child_snapshot(project, base_url, root)
         intent = {
@@ -1394,6 +2354,7 @@ def execute_first_planner(
             "state_version": result["state_version"],
             "root_session": root,
             "action": canonical_action,
+            "dispatch_generation": dispatch_generation,
             "transport": "prompt_async+SubtaskPart",
             "transport_may_have_been_attempted": True,
             "created_at_ms": int(time.time() * 1000),
@@ -1429,6 +2390,7 @@ def execute_first_planner(
             "root_session": root,
             "action": canonical_action,
             "execution_id": execution_id,
+            "dispatch_generation": dispatch_generation,
             "http_status": status,
             "transport": "prompt_async+SubtaskPart",
             "idempotency_intent_persisted": True,
@@ -1485,8 +2447,22 @@ def execute_first_semantic(
         if current["actions"] != result["actions"]:
             raise ControllerError("deterministic actions changed before dispatch")
         ledger = load_execution_ledger(project)
+        semantic_work_token = (
+            semantic_prompt_work_token(
+                canonical_action,semantic_prompt_sha256
+            )
+            or semantic_work_item_token(project, canonical_action)
+        )
+        semantic_attempt_slot = semantic_validation_attempt_slot(
+            project, canonical_action
+        )
         semantic_generation, execution_id = semantic_execution_slot(
-            ledger, result["state_version"], root, canonical_action
+            ledger,
+            result["state_version"],
+            root,
+            canonical_action,
+            semantic_work_token,
+            semantic_attempt_slot,
         )
         executions = ledger["executions"]
         existing = executions.get(execution_id)
@@ -1505,7 +2481,9 @@ def execute_first_semantic(
                 if not semantic_child_may_still_transition(
                     project, base_url, existing, evidence
                 ):
-                    finalized = finalize_terminal_acceptance_report(project, existing)
+                    finalized = finalize_terminal_acceptance_report(
+                        project, base_url, existing, evidence
+                    )
                     if finalized:
                         existing["terminal_acceptance_finalization"] = {
                             **finalized,
@@ -1524,6 +2502,7 @@ def execute_first_semantic(
                 f"execution_id={execution_id} replay remains forbidden"
             )
 
+        require_current_runtime_contract(project, base_url)
         ensure_root_idle(project, base_url, root)
         baseline_children = child_snapshot(project, base_url, root)
         intent = {
@@ -1532,6 +2511,8 @@ def execute_first_semantic(
             "root_session": root,
             "action": canonical_action,
             "semantic_generation": semantic_generation,
+            "semantic_work_token": semantic_work_token,
+            "semantic_attempt_slot": semantic_attempt_slot,
             "semantic_prompt_sha256": semantic_prompt_sha256,
             "transport": "prompt_async+SubtaskPart",
             "transport_may_have_been_attempted": True,
@@ -1791,6 +2772,8 @@ def execute_first_implementation(
         ledger = load_execution_ledger(project)
         executions = ledger["executions"]
         existing = executions.get(execution_id)
+        same_id_replay_history=[]
+        same_id_superseded_history=[]
         if existing is not None:
             if not isinstance(existing, dict):
                 raise ControllerError(f"execution ledger entry invalid: {execution_id}")
@@ -1798,29 +2781,86 @@ def execute_first_implementation(
                 raise ControllerError(f"execution ledger action mismatch: {execution_id}")
             attempts = attempt_snapshot(project, did)
             children = child_snapshot(project, base_url, root)
-            attempts = bind_unbound_native_child(
-                project, base_url, existing, did, agent, attempts, children
+            orphans=replayable_zero_work_orphans(
+                project,base_url,result,existing,attempts,children,did
             )
-            evidence = reconcile_execution_evidence(existing, attempts, children)
-            if evidence:
-                return replay_receipt(existing, evidence)
-            raise ControllerError(
-                "AMBIGUOUS_EXECUTION replay forbidden: "
-                f"execution_id={execution_id} state_version={result['state_version']} "
-                f"deliverable={did} no preclaim/child evidence observed"
+            superseded=replayable_superseded_orphans(
+                project,base_url,result,existing,children,did
             )
+            if orphans or superseded:
+                now_ms=int(time.time()*1000)
+                if orphans:
+                    existing.setdefault("zero_work_orphan_replays",[]).append({
+                        "deliverable":did,
+                        "sessions":orphans,
+                        "observed_at_ms":now_ms,
+                        "reason":"same-execution-reusable-reservation-terminal-zero-work-child",
+                    })
+                    same_id_replay_history=list(
+                        existing.get("zero_work_orphan_replays") or []
+                    )
+                if superseded:
+                    existing.setdefault("superseded_child_replays",[]).append({
+                        "deliverable":did,
+                        "sessions":superseded,
+                        "observed_at_ms":now_ms,
+                        "reason":"same-execution-reusable-reservation-supervisor-superseded-child",
+                    })
+                    same_id_superseded_history=list(
+                        existing.get("superseded_child_replays") or []
+                    )
+                save_execution_ledger(project,ledger)
+            else:
+                attempts = bind_unbound_native_child(
+                    project, base_url, existing, did, agent, attempts, children
+                )
+                evidence = reconcile_execution_evidence(existing, attempts, children)
+                if evidence:
+                    return replay_receipt(existing, evidence)
+                raise ControllerError(
+                    "AMBIGUOUS_EXECUTION replay forbidden: "
+                    f"execution_id={execution_id} state_version={result['state_version']} "
+                    f"deliverable={did} no preclaim/child evidence observed"
+                )
 
+        current_attempt = attempt_snapshot(project, did)
         prior_intents = prior_logical_implementation_intents(
             executions,
             execution_id,
             root,
             canonical_action,
             dispatch_generation,
+            int(current_attempt.get("count") or 0),
         )
+        if current_attempt_is_terminal(project,did):
+            current_count=int(current_attempt.get("count") or 0)
+            prior_intents=[
+                intent for intent in prior_intents
+                if int(
+                    (intent.get("baseline_attempt") or {}).get("count") or 0
+                )==current_count
+            ]
         if prior_intents:
-            attempts = attempt_snapshot(project, did)
+            attempts = current_attempt
             children = child_snapshot(project, base_url, root)
+            safe_replays=[]
             for prior in prior_intents:
+                orphans=replayable_zero_work_orphans(
+                    project,base_url,result,prior,attempts,children,did
+                )
+                superseded=replayable_superseded_orphans(
+                    project,base_url,result,prior,children,did
+                )
+                if orphans or superseded:
+                    evidence=reconcile_execution_evidence(
+                        prior,attempts,children
+                    )
+                    if (
+                        isinstance(evidence,dict)
+                        and evidence.get("kind")=="preclaim-reservation"
+                    ):
+                        safe_replays.append((prior,orphans,superseded))
+                        continue
                 attempts = bind_unbound_native_child(
                     project, base_url, prior, did, agent, attempts, children
                 )
@@ -1829,12 +2869,35 @@ def execute_first_implementation(
                 )
                 if evidence:
                     return replay_receipt(prior, evidence)
-            raise ControllerError(
-                "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING "
-                f"deliverable={did} generation={dispatch_generation} "
-                f"prior_execution_id={prior_intents[0].get('execution_id','')}"
-            )
+                raise ControllerError(
+                    "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING "
+                    f"deliverable={did} generation={dispatch_generation} "
+                    f"prior_execution_id={prior.get('execution_id','')}"
+                )
+            if not safe_replays:
+                raise ControllerError(
+                    "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING "
+                    f"deliverable={did} generation={dispatch_generation}"
+                )
+            now_ms=int(time.time()*1000)
+            for prior,orphans,superseded in safe_replays:
+                if orphans:
+                    prior.setdefault("zero_work_orphan_replays",[]).append({
+                        "deliverable":did,
+                        "sessions":orphans,
+                        "observed_at_ms":now_ms,
+                        "reason":"reusable-reservation-terminal-zero-work-child",
+                    })
+                if superseded:
+                    prior.setdefault("superseded_child_replays",[]).append({
+                        "deliverable":did,
+                        "sessions":superseded,
+                        "observed_at_ms":now_ms,
+                        "reason":"reusable-reservation-supervisor-superseded-child",
+                    })
+            save_execution_ledger(project,ledger)
 
+        require_current_runtime_contract(project, base_url)
         ensure_root_idle(project, base_url, root)
         baseline_attempt = attempt_snapshot(project, did)
         baseline_children = child_snapshot(project, base_url, root)
@@ -1854,6 +2917,10 @@ def execute_first_implementation(
                 if isinstance(item, dict) and item.get("id")
             ),
         }
+        if same_id_replay_history:
+            intent["zero_work_orphan_replays"]=same_id_replay_history
+        if same_id_superseded_history:
+            intent["superseded_child_replays"]=same_id_superseded_history
         executions[execution_id] = intent
         save_execution_ledger(project, ledger)
 
@@ -1958,6 +3025,22 @@ def execute_first_task_splitter(
                 f"deliverable={did} no child evidence observed"
             )
 
+        prior_intents=prior_logical_task_splitter_intents(
+            executions,execution_id,root,canonical_action
+        )
+        if prior_intents:
+            attempts=attempt_snapshot(project,did)
+            children=child_snapshot(project,base_url,root)
+            for prior in prior_intents:
+                evidence=reconcile_execution_evidence(prior,attempts,children)
+                if evidence:
+                    return replay_receipt(prior,evidence)
+            raise ControllerError(
+                "LOGICAL_TASK_SPLITTER_DISPATCH_SETTLING "
+                f"deliverable={did} generation={canonical_action.get('generation')}"
+            )
+
+        require_current_runtime_contract(project, base_url)
         ensure_root_idle(project, base_url, root)
         request_path = project / ".opencode-v2" / "work" / f"{did}.split-request.json"
         part = build_task_splitter_subtask(

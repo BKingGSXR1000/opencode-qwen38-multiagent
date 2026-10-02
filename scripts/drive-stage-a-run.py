@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import time
 from pathlib import Path
 
+import runtime_contract
 import stage_a_controller as controller
 import stage_a_preflight as preflight
 
@@ -21,11 +23,107 @@ tick = importlib.util.module_from_spec(_tick_spec)
 _tick_spec.loader.exec_module(tick)
 
 
+HARNESS_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ENV_KEYS = (
+    "V2_OPENCODE_BASE_URL",
+    "V2_OPENCODE_DB",
+    "V2_ROOT",
+    "V2_OPENCODE_SESSION_TABLE",
+)
+
+
+def read_process_environment(pid: int) -> dict[str,str]:
+    raw=Path(f"/proc/{int(pid)}/environ").read_bytes()
+    result={}
+    for item in raw.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        key,value=item.split(b"=",1)
+        try:
+            result[key.decode("utf-8")]=value.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+    return result
+
+
+def configure_runtime_environment(project: Path, base_url: str) -> dict[str,str]:
+    project=project.resolve()
+    state=runtime_contract.verify_state(HARNESS_ROOT,project,base_url)
+    try:
+        pid=int(state["server_pid"])
+    except (KeyError,TypeError,ValueError) as exc:
+        raise DriverError("runtime marker missing valid server_pid") from exc
+    try:
+        source=read_process_environment(pid)
+    except OSError as exc:
+        raise DriverError(f"unable to read verified server environment: {exc}") from exc
+
+    missing=[key for key in RUNTIME_ENV_KEYS if not str(source.get(key) or "").strip()]
+    if missing:
+        raise DriverError(
+            "verified server environment missing required keys: "
+            + ",".join(missing)
+        )
+    expected_base=str(base_url).rstrip("/")
+    if str(source["V2_OPENCODE_BASE_URL"]).rstrip("/")!=expected_base:
+        raise DriverError("verified server environment base URL mismatch")
+    if Path(source["V2_ROOT"]).resolve()!=HARNESS_ROOT:
+        raise DriverError("verified server environment root mismatch")
+    if str(source["V2_OPENCODE_SESSION_TABLE"])!="session":
+        raise DriverError("verified server environment session table mismatch")
+    db=Path(source["V2_OPENCODE_DB"])
+    if not db.is_file():
+        raise DriverError(f"verified server database is unavailable: {db}")
+
+    bound={key:str(source[key]) for key in RUNTIME_ENV_KEYS}
+    bound["V2_PROJECT"]=str(project)
+    os.environ.update(bound)
+    return bound
+
+
 class DriverError(RuntimeError):
     pass
 
 
 BLOCKED_STABILITY_OBSERVATIONS = 3
+AUTONOMOUS_SPLIT_RECONCILIATION_STATES = frozenset({
+    "split-required",
+    "splitter-active",
+    "split-retryable",
+    "split-validation-failed",
+})
+
+
+def blocked_split_reconciliation_pending(project: Path, receipt: dict) -> bool:
+    """Do not terminalize an attempt-limit snapshot while split recovery is live."""
+    if receipt.get("outcome") != "no-dispatch":
+        return False
+    actions = receipt.get("actions") if isinstance(receipt.get("actions"), list) else []
+    for action in actions:
+        if not isinstance(action,dict):
+            continue
+        if (
+            action.get("kind")!="blocked"
+            or action.get("reason")!="attempt_limit_reached"
+        ):
+            continue
+        did=str(action.get("deliverable") or "")
+        if not did:
+            continue
+        path=project/".opencode-v2"/"work"/f"{did}.split-status.json"
+        try:
+            status=json.loads(path.read_text())
+        except (OSError,json.JSONDecodeError):
+            continue
+        if not isinstance(status,dict):
+            continue
+        if status.get("owner")!="supervisor":
+            continue
+        if str(status.get("parent_id") or "")!=did:
+            continue
+        if str(status.get("state") or "") in AUTONOMOUS_SPLIT_RECONCILIATION_STATES:
+            return True
+    return False
 
 
 def transient_controller_race(exc: BaseException) -> bool:
@@ -37,6 +135,7 @@ def transient_controller_race(exc: BaseException) -> bool:
             "state changed before dispatch:",
             "deterministic actions changed before dispatch",
             "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING",
+            "LOGICAL_TASK_SPLITTER_DISPATCH_SETTLING",
         )
     )
 
@@ -103,6 +202,11 @@ def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: fl
             if result == 0:
                 return 0
             if result == 2:
+                if blocked_split_reconciliation_pending(project,receipt):
+                    blocked_key=None
+                    blocked_streak=0
+                    time.sleep(poll)
+                    continue
                 current_key = blocked_observation_key(receipt)
                 if current_key == blocked_key:
                     blocked_streak += 1
@@ -148,6 +252,7 @@ def selftest() -> None:
         "state changed before dispatch: selected=a current=b",
         "deterministic actions changed before dispatch",
         "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING deliverable=D001 generation=0",
+        "LOGICAL_TASK_SPLITTER_DISPATCH_SETTLING deliverable=D011 generation=1",
     ):
         if not transient_controller_race(controller.ControllerError(message)):
             raise DriverError(f"transient controller race was not recognized: {message}")
@@ -175,7 +280,9 @@ def main() -> int:
         parser.error("--project, --base-url, --root-session, and --preflight-proof are required unless --selftest is used")
     if ns.poll <= 0 or ns.max_ticks < 0:
         parser.error("--poll must be > 0 and --max-ticks must be >= 0")
-    return drive(ns.project.resolve(), ns.base_url, ns.root_session, ns.preflight_proof, ns.poll, ns.max_ticks)
+    project=ns.project.resolve()
+    configure_runtime_environment(project,ns.base_url)
+    return drive(project, ns.base_url, ns.root_session, ns.preflight_proof, ns.poll, ns.max_ticks)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,9 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import argparse
 import base64
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -867,6 +869,41 @@ def commit_verify_outputs(project: Path, session: str):
     return target
 
 
+def _verify_browser_bwrap_args():
+    """Expose one installed local browser to Verify without exposing host cache."""
+    explicit=str(os.environ.get("V2_CHROME_BIN") or "").strip()
+    candidates=[]
+    if explicit:
+        candidates.append(Path(explicit))
+    cache=Path.home()/".cache/puppeteer/chrome"
+    if cache.is_dir():
+        candidates.extend(sorted(cache.glob("linux-*/chrome-linux64/chrome"),reverse=True))
+    candidates.extend([
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/usr/bin/google-chrome"),
+    ])
+    seen=set()
+    for raw in candidates:
+        try:
+            browser=raw.resolve(strict=True)
+        except OSError:
+            continue
+        key=str(browser)
+        if key in seen or not browser.is_file() or not os.access(browser,os.X_OK):
+            continue
+        seen.add(key)
+        if str(browser).startswith("/usr/"):
+            return ["--setenv","CHROME_BIN",str(browser)]
+        parent=browser.parent
+        return [
+            "--dir","/run/v2-browser",
+            "--ro-bind",str(parent),"/run/v2-browser",
+            "--setenv","CHROME_BIN",f"/run/v2-browser/{browser.name}",
+        ]
+    return []
+
+
 def _resolver_snapshot_bwrap_args(run_dir: Path):
     """Preserve resolver configuration while /run remains private.
 
@@ -961,6 +998,7 @@ def run_bash(project: Path, ctx, command: str):
         "--chdir",str(project.resolve()),
         "--setenv","V2_WORKER_SANDBOX","1",
         "--setenv","PYTHONDONTWRITEBYTECODE","1",
+        "--setenv","PYTHONPYCACHEPREFIX","/tmp/v2-pycache",
         "/bin/bash","-lc",command,
     ])
 
@@ -1012,6 +1050,41 @@ def _prepare_verify_shadow(project: Path, shadow: Path, lower_root: str):
             rel += "/"
         snapshot_paths.append(rel)
     build_shadow(project,shadow,snapshot_paths,lower_root,enforce_no_symlink=False)
+
+    # Keep control inputs read-only, but give canonical run-checks disposable
+    # writable output slots for TEST_REPORT.json and test-logs/. The whole
+    # .opencode-v2 tree cannot remain a single symlink to the read-only lower
+    # mount because run-checks must create these outputs during Verify.
+    ctrl_real=project/".opencode-v2"
+    ctrl_shadow=shadow/".opencode-v2"
+    if ctrl_shadow.is_symlink() or (ctrl_shadow.exists() and not ctrl_shadow.is_dir()):
+        ctrl_shadow.unlink()
+    elif ctrl_shadow.exists():
+        shutil.rmtree(ctrl_shadow)
+    ctrl_shadow.mkdir(parents=True,exist_ok=True)
+    if ctrl_real.is_dir():
+        for child in ctrl_real.iterdir():
+            name=child.name
+            if name in {"TEST_REPORT.json","test-logs"}:
+                continue
+            # Ignore transient atomic-publication files; canonical control
+            # entries remain visible through stable symlinks into lower_root.
+            if name.startswith(".") and ".tmp" in name:
+                continue
+            # TEST_CHECKS.json may legitimately name itself in
+            # required_files. A symlink into lower_root makes Path.resolve()
+            # look outside the disposable project and creates a false escape.
+            # Snapshot this worker-owned manifest as a regular disposable file;
+            # it is never merged back by Verify.
+            if name=="TEST_CHECKS.json" and child.is_file() and not child.is_symlink():
+                shutil.copy2(child,ctrl_shadow/name)
+                continue
+            link=ctrl_shadow/name
+            link.symlink_to(
+                _lower_target(f".opencode-v2/{name}",lower_root),
+                target_is_directory=child.is_dir(),
+            )
+    (ctrl_shadow/"test-logs").mkdir(exist_ok=True)
 
     for rel in EPHEMERAL_DIRS:
         path=shadow/rel
@@ -1066,6 +1139,9 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
         "--tmpfs","/run",
     ]
     args.extend(resolver_args)
+    # Verify keeps worker caches private, but browser smoke tests need one
+    # already-installed local Chromium. Expose only its directory read-only.
+    args.extend(_verify_browser_bwrap_args())
     args.extend([
         "--unsetenv","DBUS_SYSTEM_BUS_ADDRESS",
         "--unsetenv","DBUS_SESSION_BUS_ADDRESS",
@@ -1077,7 +1153,7 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
     for kind,src,dst in _ephemeral_mounts(project,session,lower_root):
         args.extend(["--bind",str(src),str(dst)])
     home_scratch=_ephemeral_scratch(session)/"home"
-    for rel in (".cache",".npm"):
+    for rel in (".cache",".npm",".config"):
         host=home_scratch/rel
         host.mkdir(parents=True,exist_ok=True)
         target=Path.home()/rel
@@ -1088,10 +1164,17 @@ def run_verify_bash(project: Path, session: str, command: str, agent: str="", ti
         "--chdir",str(project.resolve()),
         "--setenv","V2_WORKER_SANDBOX","verify",
         "--setenv","PYTHONDONTWRITEBYTECODE","1",
-        "/bin/bash","-euo","pipefail","-c",command,
+        "--setenv","PYTHONPYCACHEPREFIX","/tmp/v2-pycache",
+        # Execute the canonical Verify with the same shell semantics as the
+        # worker's direct bash tool. Injecting -e/-u/pipefail changes command
+        # meaning (for example kill+wait cleanup can legitimately return 143
+        # before a later final assertion) and therefore is not an exact Verify.
+        "/bin/bash","-lc",command,
     ])
 
-    proc=subprocess.run(args,text=True,timeout=timeout)
+    proc=subprocess.run(
+        args,text=True,capture_output=True,timeout=timeout
+    )
     if proc.returncode==0 and stage_test_report:
         stage_verify_outputs(shadow,session)
     # Verify writes are allowed inside this disposable snapshot. They never
@@ -1206,34 +1289,90 @@ def replacement_command(project: Path, ctx, command: str):
     return " ".join(shell_quote(str(part)) for part in parts)
 
 
+def exact_worker_verify_command(ctx, command: str):
+    expected=str((ctx.get("leaf") or {}).get("verify_command") or "").strip()
+    return bool(expected) and str(command or "").strip()==expected
+
+
+def replacement_worker_verify_command(project: Path, ctx, command: str):
+    encoded=base64.b64encode(command.encode()).decode()
+    parts=[
+        "python3",str(Path(__file__).resolve()),"run-worker-verify",
+        "--project",str(project.resolve()),
+        "--session",ctx["session"],
+        "--agent",ctx.get("agent",""),
+        "--command-b64",encoded,
+    ]
+    return " ".join(shell_quote(str(part)) for part in parts)
+
+
+def run_worker_exact_verify(project: Path, ctx, command: str):
+    if not exact_worker_verify_command(ctx,command):
+        raise SandboxError("worker Verify command does not exactly match packet verify_command")
+    # A progress-only/read-first worker may invoke its exact Verify before any
+    # ordinary bash tool. Trusted Verify still needs the same session-private
+    # sandbox lifetime for disposable outputs and later supervisor replay, so
+    # bootstrap that runtime here instead of requiring a prior run_bash().
+    if not session_runtime_state(ctx["session"]):
+        _mark_runtime_state(project,ctx)
+        _session_tmpdir(ctx["session"])
+    checked,mutations=run_verify_bash(
+        project,ctx["session"],command,agent=ctx.get("agent",""),
+        stage_test_report=(str(command).strip()==".opencode-v2/bin/run-checks"),
+    )
+    if mutations:
+        raise SandboxError(
+            "trusted worker Verify unexpectedly reported project mutations: "
+            + ",".join(str(x) for x in mutations[:8])
+        )
+    # Supervisor Verify needs captured evidence, but an implementation worker
+    # invoking the same trusted path must still see the canonical command's
+    # stdout/stderr in its tool result. Re-emit only the captured child streams;
+    # the wrapper's own exit marker remains separate and authoritative.
+    if checked.stdout:
+        print(checked.stdout,end="")
+    if checked.stderr:
+        print(checked.stderr,end="",file=sys.stderr)
+    return int(checked.returncode)
+
+
 def normalize_worker_bash_command(project: Path, ctx, command: str):
-    """Collapse model-reflected canonical run-bash wrappers back to one layer.
+    """Collapse reflected canonical worker wrappers back to the raw command.
 
     OpenCode persists tool arguments after the plugin's before-hook rewrite.
-    A worker can therefore see the canonical worker_sandbox.py run-bash wrapper
-    in its own previous tool history and imitate it on a later bash call.
-    Re-wrapping that reflected wrapper nests shell quoting and can corrupt the
-    inner command. Only the exact canonical argv for this project/session/agent
-    is unwrapped; the decoded payload still executes through run_bash().
+    Workers can therefore see either the ordinary run-bash wrapper or the
+    trusted exact-Verify run-worker-verify wrapper in their own tool history.
+    Only exact canonical argv for this project/session/agent are unwrapped.
+    Tampered/manual wrappers remain visible to the manual-wrapper deny path.
     """
     current=str(command)
-    prefix=[
-        "python3",str(Path(__file__).resolve()),"run-bash",
+    common=[
         "--project",str(project.resolve()),
         "--session",ctx["session"],
         "--agent",ctx.get("agent",""),
         "--command-b64",
     ]
+    prefixes=[
+        ["python3",str(Path(__file__).resolve()),"run-bash",*common],
+        ["python3",str(Path(__file__).resolve()),"run-worker-verify",*common],
+    ]
+
+    def matching_prefix(parts):
+        for prefix in prefixes:
+            if len(parts)==len(prefix)+1 and parts[:-1]==prefix:
+                return prefix
+        return None
+
     for _ in range(8):
         try:
             parts=shlex.split(current,posix=True)
         except ValueError:
             return current
-        if len(parts)!=len(prefix)+1 or parts[:-1]!=prefix:
+        prefix=matching_prefix(parts)
+        if prefix is None:
             return current
-        token=parts[-1]
         try:
-            raw=base64.b64decode(token,validate=True)
+            raw=base64.b64decode(parts[-1],validate=True)
             current=raw.decode("utf-8")
         except Exception as exc:
             raise SandboxError(
@@ -1244,7 +1383,7 @@ def normalize_worker_bash_command(project: Path, ctx, command: str):
         parts=shlex.split(current,posix=True)
     except ValueError:
         return current
-    if len(parts)==len(prefix)+1 and parts[:-1]==prefix:
+    if matching_prefix(parts) is not None:
         raise SandboxError(
             "WORKER_FIREWALL_DENY excessive canonical sandbox wrapper nesting"
         )
@@ -1259,7 +1398,10 @@ def command_invokes_manual_sandbox_wrapper(command: str):
     except ValueError:
         lowered=text.lower()
         return bool(
-            ("worker_sandbox.py" in lowered and "run-bash" in lowered)
+            (
+                "worker_sandbox.py" in lowered
+                and ("run-bash" in lowered or "run-worker-verify" in lowered)
+            )
             or re.search(r"(^|[;&|()\s])(?:bwrap|bubblewrap)(?=$|[;&|()\s])",lowered)
         )
 
@@ -1272,7 +1414,12 @@ def command_invokes_manual_sandbox_wrapper(command: str):
             continue
         prev=Path(parts[index-1]).name.lower() if index>0 else ""
         following=lowered[index+1:index+5]
-        if index==0 or prev.startswith("python") or "run-bash" in following:
+        if (
+            index==0
+            or prev.startswith("python")
+            or "run-bash" in following
+            or "run-worker-verify" in following
+        ):
             return True
     return False
 
@@ -1359,6 +1506,14 @@ def hook_guard(project: Path, session: str, call_id: str, agent: str, tool: str,
                 f"WORKER_FIREWALL_DENY {ctx['did']} manual sandbox wrapper forbidden; "
                 "call bash with only the intended shell command"
             )
+        if exact_worker_verify_command(ctx,command):
+            return {
+                "action":"replace-bash",
+                "worker":True,
+                "did":ctx["did"],
+                "trusted_verify":True,
+                "command":replacement_worker_verify_command(project,ctx,command),
+            }
         return {
             "action":"replace-bash",
             "worker":True,
@@ -1415,6 +1570,7 @@ def selftest(require_bwrap=False):
 
         (project/"src").mkdir()
         (project/"src/owned.txt").write_text("old\n")
+        (project/"src/compile_probe.py").write_text("VALUE = 1\n")
         (project/"other.txt").write_text("safe\n")
         manifest={
             "leaves":{
@@ -1441,6 +1597,15 @@ def selftest(require_bwrap=False):
         assert normalize_worker_bash_command(project,ctx,raw_cmd)==raw_cmd
         assert normalize_worker_bash_command(project,ctx,wrapped)==raw_cmd
         assert normalize_worker_bash_command(project,ctx,double_wrapped)==raw_cmd
+
+        verify_raw="test -s src/owned.txt"
+        verify_wrapped=replacement_worker_verify_command(project,ctx,verify_raw)
+        verify_double=replacement_worker_verify_command(project,ctx,verify_wrapped)
+        assert normalize_worker_bash_command(project,ctx,verify_wrapped)==verify_raw
+        assert normalize_worker_bash_command(project,ctx,verify_double)==verify_raw
+        assert command_invokes_manual_sandbox_wrapper(
+            verify_wrapped+" ; true"
+        ), "tampered trusted Verify wrapper was not denied"
 
         validator_raw="python3 -m unittest discover -s tests -v"
         validator_wrapped=replacement_validator_command(
@@ -1592,6 +1757,16 @@ def selftest(require_bwrap=False):
             assert not (project/"node_modules").exists()
             assert session_used_sandbox("ses_test")
 
+            # Explicit py_compile must work even when the source directory is
+            # read-only/unowned. Its generated bytecode belongs in session-
+            # private /tmp, never in the host project.
+            rc=run_bash(
+                project,ctx,
+                "python3 -m py_compile src/compile_probe.py"
+            )
+            assert rc==0, f"worker py_compile failed rc={rc}"
+            assert not (project/"src/__pycache__").exists()
+
             # New25 regression: supervisor Verify must still see the exact
             # worker's ephemeral dependency/runtime state after child idle.
             checked,mutations=run_verify_bash(
@@ -1600,6 +1775,44 @@ def selftest(require_bwrap=False):
                 "grep -q '^shell-ok$' src/owned.txt"
             )
             assert checked.returncode==0, checked.returncode
+            assert mutations==[], mutations
+
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "python3 -m py_compile src/compile_probe.py"
+            )
+            assert checked.returncode==0, (
+                f"Verify py_compile failed rc={checked.returncode}"
+            )
+            assert mutations==[], mutations
+            assert not (project/"src/__pycache__").exists()
+
+            # Exact-Verify shell semantics regression: a command may
+            # intentionally kill a temporary background process, observe
+            # wait=143, and then make a final assertion whose status is the
+            # canonical Verify result. Supervisor Verify must not inject
+            # errexit and terminate early at wait.
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "sleep 60 & SP=$!; kill $SP; wait $SP 2>/dev/null; "
+                "test 1 -eq 1"
+            )
+            assert checked.returncode==0, (
+                "Verify shell semantics changed canonical result: "
+                f"{checked.returncode}"
+            )
+            assert mutations==[], mutations
+
+            # Supervisor-side Verify must retain the exact child stdout/stderr
+            # for durable evidence and max-step continuation diagnostics.
+            checked,mutations=run_verify_bash(
+                project,"ses_test",
+                "printf 'verify-capture-out'; "
+                "printf 'verify-capture-err' >&2; false"
+            )
+            assert checked.returncode==1, checked.returncode
+            assert checked.stdout=="verify-capture-out", repr(checked.stdout)
+            assert checked.stderr=="verify-capture-err", repr(checked.stderr)
             assert mutations==[], mutations
 
             # Legitimate Verify/build writes are allowed only inside the
@@ -1710,6 +1923,15 @@ def selftest(require_bwrap=False):
                     "systemctl --no-ask-password daemon-reload >/dev/null 2>&1"
                 )
                 assert rc!=0, "systemctl unexpectedly reached a system manager"
+            browser_args=_verify_browser_bwrap_args()
+            if browser_args:
+                checked,mutations=run_verify_bash(
+                    project,"ses_test",
+                    "test -n \"$CHROME_BIN\" && test -x \"$CHROME_BIN\""
+                )
+                assert checked.returncode==0, "Verify browser bind/CHROME_BIN unavailable"
+                assert mutations==[], mutations
+
             checked,mutations=run_verify_bash(
                 project,"ses_test",
                 "test ! -S /run/systemd/private && "
@@ -1735,7 +1957,25 @@ def selftest(require_bwrap=False):
             assert not session_used_sandbox("ses_test")
             assert not (SANDBOX_ROOT/"scratch"/_safe_session_token("ses_test")).exists()
 
+    # Silent wrapped failures must still communicate the inner exit status to
+    # the model-facing shell result.
+    marker=io.StringIO()
+    with contextlib.redirect_stderr(marker):
+        assert report_worker_command_exit(1)==1
+    assert marker.getvalue().strip()=="V2_WORKER_COMMAND_EXIT=1"
+    marker=io.StringIO()
+    with contextlib.redirect_stderr(marker):
+        assert report_worker_command_exit(0)==0
+    assert marker.getvalue()==""
+
     print("worker-sandbox selftest: OK")
+
+
+def report_worker_command_exit(rc):
+    rc=int(rc)
+    if rc!=0:
+        print(f"V2_WORKER_COMMAND_EXIT={rc}",file=sys.stderr)
+    return rc
 
 
 def main():
@@ -1755,6 +1995,12 @@ def main():
     b.add_argument("--session",required=True)
     b.add_argument("--agent",default="")
     b.add_argument("--command-b64",required=True)
+
+    wv=sub.add_parser("run-worker-verify")
+    wv.add_argument("--project",required=True)
+    wv.add_argument("--session",required=True)
+    wv.add_argument("--agent",default="")
+    wv.add_argument("--command-b64",required=True)
 
     v=sub.add_parser("run-validator-bash")
     v.add_argument("--project",required=True)
@@ -1793,7 +2039,22 @@ def main():
             ctx=resolve_worker(project,ns.session,"",ns.agent)
             if not ctx.get("worker"):
                 raise SandboxError("run-bash session is not a current implementation worker")
-            return run_bash(project,ctx,command)
+            rc=run_bash(project,ctx,command)
+            # OpenCode may persist a silent nonzero wrapped shell as a
+            # completed tool call. Make the inner status explicit to the
+            # model while preserving the real process exit code.
+            return report_worker_command_exit(rc)
+        except SandboxError as exc:
+            print(str(exc),file=sys.stderr)
+            return 73
+    if ns.cmd=="run-worker-verify":
+        try:
+            command=base64.b64decode(ns.command_b64).decode()
+            ctx=resolve_worker(project,ns.session,"",ns.agent)
+            if not ctx.get("worker"):
+                raise SandboxError("run-worker-verify session is not a current implementation worker")
+            rc=run_worker_exact_verify(project,ctx,command)
+            return report_worker_command_exit(rc)
         except SandboxError as exc:
             print(str(exc),file=sys.stderr)
             return 73

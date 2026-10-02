@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import argparse
+import ast
 import hashlib
 import json
 import os
 import re
+import shlex
 import tempfile
 from pathlib import Path
 from acceptance_contract import must_acceptance_ids
+from control_policy import phase_ready_validator_id
 from state_io import atomic_write_text as state_atomic_write_text
 from leaf_contract import (
     WRITE_ROLES as SHARED_WRITE_ROLES,
@@ -15,6 +18,8 @@ from leaf_contract import (
     supervisor_reserved_owned_path as shared_supervisor_reserved_owned_path,
     ownership_overlap_errors as shared_ownership_overlap_errors,
     validate_leaf_contract,
+    validate_verify_adequacy,
+    validate_contract_challenge_reason,
 )
 
 ROOT = Path(os.environ.get("V2_ROOT", str(Path.home() / "AI" / "opencode-qwen38-multiagent-v2")))
@@ -25,7 +30,8 @@ ACC_MARKER = "<!-- ACCEPTANCE_COMPLETE -->"
 PLAN_MAX_LINES = 500
 RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
 PHASE_READY_PROTOCOL = "V2.6.7c"
-PHASE_READY_VALIDATOR = "deterministic-v2.6.7b"
+PHASE_READY_VALIDATOR = phase_ready_validator_id()
+ACCEPTANCE_READY_VALIDATOR = phase_ready_validator_id("ACCEPTANCE.md")
 TASK_SHAPE_OWNED_LIMIT = {"S": 2, "M": 3}
 TASK_SHAPE_ACCEPTANCE_LIMIT = {"S": 2, "M": 4}
 TASK_SHAPE_REPEAT_LIMIT = {"S": 4, "M": 6}
@@ -90,10 +96,13 @@ def internal_external_reference_violation(text: str) -> bool:
             continue
         prefix=clause[:match.start()]
         suffix=clause[match.end():]
-        negatives=list(re.finditer(r"\b(?:no|without)\b",prefix,re.I))
+        negatives=list(re.finditer(r"\b(?:no|without|not|never)\b",prefix,re.I))
         if negatives:
             tail=prefix[negatives[-1].end():]
             crossed_contrast=bool(re.search(r"\b(?:but|however|yet)\b",tail,re.I))
+            direct_negative=bool(re.fullmatch(
+                r"\s*(?:(?:a|an|any|the)\s+)?",tail,re.I
+            ))
             negative_requirement=bool(re.search(
                 r"\b(?:required|needed|used|consulted|relied\s+upon)\b",suffix,re.I
             ))
@@ -101,7 +110,20 @@ def internal_external_reference_violation(text: str) -> bool:
                 r"\b(?:dependence|dependency|reliance|requirement|need)\s+(?:on|for)\b",
                 tail,re.I,
             ))
-            if not crossed_contrast and (negative_requirement or negative_dependency):
+            negative_action=bool(re.search(
+                r"\b(?:require|requires|required\s+to|need|needs|needed\s+to|"
+                r"use|uses|used\s+to|consult|consults|consulted|"
+                r"rely\s+on|relies\s+on|relied\s+on|"
+                r"depend\s+on|depends\s+on|depended\s+on)\s+"
+                r"(?:(?:a|an|any|the)\s+)?$",
+                tail,re.I,
+            ))
+            if not crossed_contrast and (
+                direct_negative
+                or negative_requirement
+                or negative_dependency
+                or negative_action
+            ):
                 continue
         return True
     return False
@@ -160,7 +182,7 @@ def phase_ready_text(artifact_path: Path, artifact: str, marker: str) -> str:
         f"protocol={PHASE_READY_PROTOCOL}\n"
         f"artifact={artifact}\n"
         f"marker={marker}\n"
-        f"validated={PHASE_READY_VALIDATOR}\n"
+        f"validated={phase_ready_validator_id(artifact)}\n"
         f"artifact_sha256={digest}\n"
     )
 
@@ -271,6 +293,186 @@ def referenced_paths(raw: str):
 
 def path_is_within(path: str, owned):
     return any(path==x or path.startswith(x.rstrip("/")+"/") for x in owned)
+
+
+VERIFY_PROJECT_FILE_RE = re.compile(
+    r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\."
+    r"(?:js|mjs|cjs|py|json|html|css|sh|md|txt|yaml|yml|toml)$",
+    re.I,
+)
+VERIFY_PROJECT_GLOB_RE = re.compile(
+    r"(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.*?\[\]-]+\."
+    r"(?:js|mjs|cjs|py|json|html|css|sh|md|txt|yaml|yml|toml)$",
+    re.I,
+)
+
+
+def _normalize_verify_path_candidate(raw: str, *, allow_glob=False):
+    if not isinstance(raw,str) or not raw:
+        return ""
+    value=raw.strip().strip("(),;")
+    if value.startswith("./"):
+        value=value[2:]
+    if (
+        not value
+        or value.startswith(("http://","https://","/","$"))
+        or ".." in Path(value).parts
+        or any(mark in value for mark in ("$(", "${", ">", "<", "|", "&"))
+        or "=" in value
+    ):
+        return ""
+    if value==RUN_CHECKS_COMMAND or value.startswith(".opencode-v2/"):
+        return value
+    pattern=VERIFY_PROJECT_GLOB_RE if allow_glob else VERIFY_PROJECT_FILE_RE
+    return value if pattern.fullmatch(value) else ""
+
+
+def _python_inline_verify_paths(code: str):
+    try:
+        tree=ast.parse(code)
+    except (SyntaxError,ValueError):
+        return []
+    out=[]
+    for node in ast.walk(tree):
+        if not isinstance(node,ast.Call) or not node.args:
+            continue
+        fn=node.func
+        name=""
+        if isinstance(fn,ast.Name):
+            name=fn.id
+        elif isinstance(fn,ast.Attribute):
+            name=fn.attr
+        if name not in {"open","Path","glob","iglob"}:
+            continue
+        arg=node.args[0]
+        if not isinstance(arg,ast.Constant) or not isinstance(arg.value,str):
+            continue
+        candidate=_normalize_verify_path_candidate(
+            arg.value,allow_glob=name in {"glob","iglob"}
+        )
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def verify_referenced_paths(command: str):
+    """Return explicit/literal project-relative file inputs from a shell Verify."""
+    try:
+        tokens=shlex.split(command or "",posix=True)
+    except ValueError:
+        return []
+    out=[]
+    for raw in tokens:
+        if not isinstance(raw,str) or not raw:
+            continue
+        candidate=_normalize_verify_path_candidate(raw)
+        if candidate and candidate not in out:
+            out.append(candidate)
+
+    # Inline Python is common in canonical Verify commands. Inspect only literal
+    # arguments to known file/glob APIs; dynamic paths remain outside this
+    # conservative static provenance check.
+    for index,token in enumerate(tokens[:-2]):
+        exe=Path(token).name.lower()
+        if re.fullmatch(r"python(?:3(?:\.\d+)?)?",exe) and tokens[index+1]=="-c":
+            for candidate in _python_inline_verify_paths(tokens[index+2]):
+                if candidate not in out:
+                    out.append(candidate)
+    return out
+
+
+def _dependency_closure_ids(leaves: dict, did: str):
+    seen=set(); stack=[]
+    leaf=leaves.get(did)
+    if not isinstance(leaf,dict):
+        return seen
+    for kind in ("launch_deps","contract_deps","verify_deps"):
+        values=leaf.get(kind,[])
+        if isinstance(values,list):
+            stack.extend(x for x in values if isinstance(x,str))
+    while stack:
+        dep=stack.pop()
+        if dep in seen or dep not in leaves:
+            continue
+        seen.add(dep)
+        child=leaves.get(dep)
+        if not isinstance(child,dict):
+            continue
+        for kind in ("launch_deps","contract_deps","verify_deps"):
+            values=child.get(kind,[])
+            if isinstance(values,list):
+                stack.extend(x for x in values if isinstance(x,str))
+    return seen
+
+
+def _expanded_verify_paths(project: Path, path: str):
+    if not any(mark in path for mark in ("*", "?", "[")):
+        return [path]
+    try:
+        matches=[
+            candidate.relative_to(project).as_posix()
+            for candidate in sorted(project.glob(path))
+            if candidate.is_file()
+        ]
+    except (OSError,ValueError):
+        matches=[]
+    return matches or [path]
+
+
+def verify_path_provenance_errors(project: Path, leaves: dict):
+    owners={}
+    for owner_id, owner_leaf in (leaves or {}).items():
+        if not isinstance(owner_leaf,dict):
+            continue
+        for path in owner_leaf.get("owned_artifact_paths",[]) or []:
+            if isinstance(path,str) and path:
+                owners.setdefault(path,[]).append(owner_id)
+
+    errors=[]
+    project=project.resolve()
+    for did,leaf in (leaves or {}).items():
+        if not isinstance(leaf,dict):
+            continue
+        own=[x for x in leaf.get("owned_artifact_paths",[]) or [] if isinstance(x,str)]
+        depset=_dependency_closure_ids(leaves,did)
+        for spec in verify_referenced_paths(leaf.get("verify_command","")):
+            for path in _expanded_verify_paths(project,spec):
+                handoff_progress=(
+                    f".opencode-v2/work/{did}.progress.md"
+                    if leaf.get("split_handoff_only") is True else ""
+                )
+                if (
+                    path==RUN_CHECKS_COMMAND
+                    or path_is_within(path,own)
+                    or (handoff_progress and path==handoff_progress)
+                ):
+                    continue
+                matching=[]
+                for owned_path,owner_ids in owners.items():
+                    if path==owned_path or path.startswith(owned_path.rstrip("/")+"/"):
+                        matching.extend(owner_ids)
+                matching=[x for x in matching if x!=did]
+                if matching:
+                    if not any(x in depset for x in matching):
+                        errors.append(
+                            f"{did}: Verify command requires '{path}' owned by "
+                            f"{','.join(sorted(set(matching)))}, but that owner is not a declared dependency"
+                        )
+                    continue
+                candidate=(project/path).resolve(strict=False)
+                try:
+                    candidate.relative_to(project)
+                except ValueError:
+                    errors.append(f"{did}: Verify command path escapes project: '{path}'")
+                    continue
+                if candidate.is_file():
+                    continue
+                errors.append(
+                    f"{did}: Verify command references missing/unowned project artifact '{path}'; "
+                    "assign it to this leaf or a declared dependency"
+                )
+    return errors
+
 
 def parse_waves(text: str):
     # Accept normal and numbered Markdown headings, e.g.
@@ -439,6 +641,10 @@ def parse_plan(text: str):
             leaf["role"], leaf.get("owned_artifact_paths", []), leaf["verify_command"]
         ):
             errors.append(f"{did}: {contract_error}")
+        for adequacy_error in validate_verify_adequacy(
+            leaf.get("done_when",""), leaf["verify_command"]
+        ):
+            errors.append(f"{did}: {adequacy_error}")
         if writes and leaf["role"] in WRITE_ROLES and not role_can_write(leaf["role"]):
             allowed = ", ".join(sorted(WRITE_ROLES))
             errors.append(
@@ -670,6 +876,7 @@ def merge_split_leaf_overlay(project: Path, leaves: dict):
 
 
 PLAN_REPAIR_PROTOCOL = "v2-structured-plan-repair-v1"
+CONTROL_POLICY_REVALIDATION_SOURCE = "control-policy-revalidation"
 
 def _structured_plan_key_map(ctrl: Path):
     path=ctrl/"IMPLEMENTATION_PLAN.structured-map.json"
@@ -679,6 +886,46 @@ def _structured_plan_key_map(ctrl: Path):
         return {}
     mapping=data.get("id_to_key") if isinstance(data,dict) else {}
     return mapping if isinstance(mapping,dict) else {}
+
+def _repair_leaf_baseline(ctrl: Path, affected):
+    path=ctrl/"IMPLEMENTATION_PLAN.structured.json"
+    try:
+        raw=path.read_bytes()
+        data=json.loads(raw)
+    except Exception:
+        return {"source_sha256":"","affected_leaf_sha256":{}}
+    leaves=data.get("leaves") if isinstance(data,dict) else None
+    hashes={}
+    if isinstance(leaves,list):
+        wanted=set(affected)
+        for item in leaves:
+            if not isinstance(item,dict):
+                continue
+            key=item.get("key")
+            if key not in wanted:
+                continue
+            hashes[key]=hashlib.sha256(
+                json.dumps(
+                    item,sort_keys=True,separators=(",",":"),ensure_ascii=True
+                ).encode()
+            ).hexdigest()
+    return {
+        "source_sha256":hashlib.sha256(raw).hexdigest(),
+        "affected_leaf_sha256":hashes,
+    }
+
+
+def _planner_restart_count_for_repair(ctrl: Path):
+    path=ctrl/"work"/"planner-restarts.json"
+    try:
+        data=json.loads(path.read_text())
+        count=int(data.get("count") or 0)
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return 0
+    return max(0,count)
+
 
 def write_plan_repair_packet(ctrl: Path, errors, source="control-guard"):
     mapping=_structured_plan_key_map(ctrl)
@@ -699,19 +946,59 @@ def write_plan_repair_packet(ctrl: Path, errors, source="control-guard"):
             "deliverables":dids,
             "keys":keys,
         })
+
+    # A repair is safely leaf-scoped only when every validation error maps to
+    # at least one concrete structured leaf.  If any error is global (for
+    # example missing MUST acceptance coverage), preserving only the keyed
+    # subset would make the required correction inaccessible to the planner.
+    # Match structured_plan.compile_plan(): global errors force whole-plan
+    # repair while leaf keys/order remain protected by planner validation.
+    if any(not entry["keys"] for entry in entries):
+        affected=[]
+
+    repair_path=ctrl/"IMPLEMENTATION_PLAN.repair.json"
+    existing={}
+    try:
+        candidate=json.loads(repair_path.read_text())
+        if isinstance(candidate,dict):
+            existing=candidate
+    except Exception:
+        pass
+
+    policy_source=(source==CONTROL_POLICY_REVALIDATION_SOURCE)
+    if (
+        not policy_source
+        and affected
+        and existing.get("source")==CONTROL_POLICY_REVALIDATION_SOURCE
+        and set(existing.get("affected_keys") or [])==set(affected)
+    ):
+        source=CONTROL_POLICY_REVALIDATION_SOURCE
+        policy_source=True
+
+    payload={
+        "protocol":PLAN_REPAIR_PROTOCOL,
+        "source":source,
+        "whole_plan":not bool(affected),
+        "affected_keys":affected,
+        "errors":entries,
+    }
+    if policy_source and affected:
+        if existing.get("source")==CONTROL_POLICY_REVALIDATION_SOURCE:
+            baseline=existing.get("baseline")
+            planner_baseline=existing.get("planner_restart_baseline")
+        else:
+            baseline=None
+            planner_baseline=None
+        if not isinstance(baseline,dict):
+            baseline=_repair_leaf_baseline(ctrl,affected)
+        if not isinstance(planner_baseline,int) or planner_baseline<0:
+            planner_baseline=_planner_restart_count_for_repair(ctrl)
+        payload["baseline"]=baseline
+        payload["planner_restart_baseline"]=planner_baseline
+
     atomic_write(
-        ctrl/"IMPLEMENTATION_PLAN.repair.json",
-        json.dumps(
-            {
-                "protocol":PLAN_REPAIR_PROTOCOL,
-                "source":source,
-                "whole_plan":not bool(affected),
-                "affected_keys":affected,
-                "errors":entries,
-            },
-            indent=2,
-            sort_keys=True,
-        )+"\n",
+        repair_path,
+        json.dumps(payload,indent=2,sort_keys=True)+"\n",
     )
 
 def runtime_repair_change_errors(ctrl: Path):
@@ -723,8 +1010,55 @@ def runtime_repair_change_errors(ctrl: Path):
         return []
     except Exception:
         return ["runtime repair packet is not valid JSON"]
-    if not isinstance(repair,dict) or repair.get("source")!="runtime-split-parent-contract":
+    runtime_sources={
+        "runtime-split-parent-contract",
+        "runtime-leaf-contract-challenge",
+        CONTROL_POLICY_REVALIDATION_SOURCE,
+    }
+    if (
+        not isinstance(repair,dict)
+        or repair.get("source") not in runtime_sources
+    ):
         return []
+    if repair.get("source")=="runtime-leaf-contract-challenge":
+        challenge=repair.get("challenge")
+        reason=challenge.get("reason") if isinstance(challenge,dict) else ""
+        challenge_errors=validate_contract_challenge_reason(reason)
+        if challenge_errors:
+            return [
+                "runtime leaf contract challenge invalid: "+challenge_errors[0]
+            ]
+    challenge=repair.get("challenge") if isinstance(repair.get("challenge"),dict) else {}
+    nested=challenge.get("nested_repair")
+    if repair.get("source")=="runtime-leaf-contract-challenge" and isinstance(nested,dict):
+        if (
+            nested.get("protocol")!="v2-split-contract-producer-repair-v1"
+            or repair.get("affected_keys")!=[nested.get("producer_key")]
+        ):
+            return ["nested repair producer key or lineage invalid"]
+        try:
+            raw=json.loads((ctrl/"IMPLEMENTATION_PLAN.structured.json").read_text())
+            by_key={x["key"]:x for x in raw["leaves"]}
+            producer=by_key[nested["producer_key"]]
+            parent=by_key[nested["root_key"]]
+            producer_verify=str(producer.get("verify_command") or "")
+            parent_verify=str(parent.get("verify_command") or "")
+            if hashlib.sha256(producer_verify.encode()).hexdigest()==nested["producer_verify_sha256"]:
+                return ["nested repair must strengthen the upstream producer Verify"]
+            if hashlib.sha256(parent_verify.encode()).hexdigest()!=nested["root_verify_sha256"]:
+                return ["nested repair cannot change the original final Verify"]
+            if (
+                sorted(producer.get("owned_artifacts") or [])!=nested["producer_owned_paths"]
+                or sorted(parent.get("owned_artifacts") or [])!=nested["root_owned_paths"]
+            ):
+                return ["nested repair may not change producer or parent ownership"]
+            # The original final Verify is structurally immutable. An independently
+            # changed upstream exact Verify is positive repair evidence here;
+            # the generic same-leaf baseline check would incorrectly demand a
+            # second edit when salvaging a valid partial planner candidate.
+            return []
+        except (KeyError,TypeError,ValueError):
+            return ["nested repair target structural fields invalid"]
     baseline=repair.get("baseline")
     expected=baseline.get("affected_leaf_sha256") if isinstance(baseline,dict) else None
     if not isinstance(expected,dict) or not expected:
@@ -776,6 +1110,7 @@ def validate_plan(project: Path, finalize=False):
         errors.extend(parse_errors)
         leaves = merge_split_leaf_overlay(project, leaves)
         errors.extend(ownership_overlap_errors(leaves))
+        errors.extend(verify_path_provenance_errors(project, leaves))
         acceptance = ctrl / "ACCEPTANCE.md"
         try:
             acceptance_text = acceptance.read_text(errors="replace")
@@ -799,11 +1134,19 @@ def validate_plan(project: Path, finalize=False):
     runtime_repair_errors=runtime_repair_change_errors(ctrl)
     errors.extend(runtime_repair_errors)
     if errors:
+        was_ready=ready.is_file() and manifest_path.is_file()
         ready.unlink(missing_ok=True)
         manifest_path.unlink(missing_ok=True)
         atomic_write(err, "\n".join(errors) + "\n")
         if not runtime_repair_errors:
-            write_plan_repair_packet(ctrl, errors, source="control-guard")
+            write_plan_repair_packet(
+                ctrl,
+                errors,
+                source=(
+                    CONTROL_POLICY_REVALIDATION_SOURCE
+                    if was_ready else "control-guard"
+                ),
+            )
         return False, errors
 
     if err.exists():

@@ -11,6 +11,7 @@ const DETERMINISTIC_TRANSPORT_PROBE_COMMAND = "v2-native-transport-probe";
 const DETERMINISTIC_TRANSPORT_PROBE_AGENT = "transport-probe";
 const deterministicTransportProbeRoots = new Set();
 const deterministicTransportToolProbeCalls = new Set();
+const acceptanceValidatorAcceptedReportCalls = new Set();
 const DETERMINISTIC_TRANSPORT_TOOL_TARGET = ".opencode-v2/transport-tool-target.txt";
 
 function isDeterministicTransportToolRead(args) {
@@ -342,14 +343,102 @@ async function guardEarlyWrite(directory, event, output, api) {
     throw new Error(detail || `EARLY_WRITE_DENY session=${sessionID}`);
   }
   const earlyWriteResult = String(raw || "").trim();
-  if (/^EARLY_WRITE_(?:PROBE|IMPLEMENTATION)_WRITE_REQUIRED\b/.test(earlyWriteResult)) {
+  if (
+    /^EARLY_WRITE_(?:PROBE|IMPLEMENTATION)_WRITE_REQUIRED\b/.test(earlyWriteResult) ||
+    /^EARLY_WRITE_IMPLEMENTATION_(?:EXACT_VERIFY_REQUIRED|RETURN_REQUIRED|CONTRACT_CHALLENGE_REQUIRED)\b/.test(
+      earlyWriteResult
+    )
+  ) {
     // Recoverable deterministic steering: reject this one tool, but do not
-    // abort the child. The model can immediately retry with the required
-    // direct owned-artifact write/edit.
+    // abort the child. The model can immediately retry with the one required
+    // next action (owned write, exact Verify, or final return).
     throw new Error(earlyWriteResult);
   }
   if (/^EARLY_WRITE_(?:NA|SATISFIED)\b/.test(earlyWriteResult)) {
     earlyWriteSatisfiedSessions.add(sessionID);
+  }
+}
+
+function guardAcceptanceValidatorReport(directory, event, output) {
+  const sessionID = hookSessionID(event);
+  if (!sessionID) return;
+  const tool = String(event?.tool || "");
+  if (tool === "subagent" || tool === "task") return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  try {
+    const receipt = supervisor(directory, [
+      "--acceptance-validator-tool-check", sessionID,
+      "--tool-name", tool,
+      "--tool-args-b64", payload,
+    ]).trim();
+    if (
+      receipt.includes("ACCEPTANCE_VALIDATOR_TOOL_ALLOW") &&
+      receipt.includes("acceptance-report-first-valid-write")
+    ) {
+      acceptanceValidatorAcceptedReportCalls.add(
+        `${sessionID}:${hookCallID(event)}`
+      );
+    }
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    if (detail.includes("not-acceptance-validator")) return;
+    if (detail.includes("ACCEPTANCE_VALIDATOR_TOOL_DENY")) {
+      throw new Error(detail);
+    }
+    throw new Error(
+      "ACCEPTANCE_VALIDATOR_TOOL_GUARD_ERROR " + (detail || "unknown")
+    );
+  }
+}
+
+function guardReferenceValidationCheckpoint(directory, event, output) {
+  const sessionID = hookSessionID(event);
+  if (!sessionID) return;
+  const tool = String(event?.tool || "");
+  if (tool === "subagent" || tool === "task") return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  try {
+    supervisor(directory, [
+      "--reference-validation-tool-check", sessionID,
+      "--tool-name", tool,
+      "--tool-args-b64", payload,
+    ]);
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    if (
+      detail.includes("not-reference-researcher") ||
+      detail.includes("not-reference-validation")
+    ) return;
+    if (detail.includes("REFERENCE_VALIDATION_TOOL_DENY")) {
+      throw new Error(detail);
+    }
+    throw new Error(
+      "REFERENCE_VALIDATION_TOOL_GUARD_ERROR " + (detail || "unknown")
+    );
+  }
+}
+
+function guardPlannerToolBoundary(directory, event, output) {
+  const sessionID = hookSessionID(event);
+  if (!sessionID) return;
+  const tool = String(event?.tool || "");
+  if (tool === "subagent" || tool === "task") return;
+  const args = hookArgs(event, output);
+  const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  try {
+    supervisor(directory, [
+      "--planner-tool-check", sessionID,
+      "--tool-name", tool,
+      "--tool-args-b64", payload,
+    ]);
+  } catch (error) {
+    const detail = String(error?.stderr || error?.message || error).trim();
+    if (detail.includes("not-implementation-planner") ||
+        detail.includes("not-targeted-repair")) return;
+    if (detail.includes("PLANNER_TOOL_DENY")) throw new Error(detail);
+    throw new Error("PLANNER_TOOL_GUARD_ERROR " + (detail || "unknown"));
   }
 }
 
@@ -545,7 +634,10 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
         });
       }
 
+      guardAcceptanceValidatorReport(directory, event, output);
       guardRootControlRead(directory, event, output);
+      guardReferenceValidationCheckpoint(directory, event, output);
+      guardPlannerToolBoundary(directory, event, output);
       guardSplitterToolBoundary(directory, event, output);
       guardProgressHandoff(directory, event, output);
       await guardEarlyWrite(directory, event, output, compatApi);
@@ -690,9 +782,53 @@ export const V2BoundedSubagentPlugin = async ({ directory, client }) => {
         ].join("\n");
       } else if (taskAgent(args) === "acceptance-validator") {
         const raw = rawResult.trim();
-        const modelPass = /^ACCEPTANCE_PASS(?:\s*<\/subagent>)?$/.test(raw);
+        const terminalLines = raw
+          .replace(/\s*<\/subagent>\s*$/, "")
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const modelPass =
+          terminalLines.at(-1) === "ACCEPTANCE_PASS" &&
+          !raw.includes("ACCEPTANCE_FAIL");
+        const childSession = String(
+          result?.metadata?.sessionID || result?.metadata?.sessionId || ""
+        );
+        let terminal = "";
+        let terminalError = "";
+        if (childSession) {
+          try {
+            terminal = supervisor(directory, [
+              "--reconcile-terminal-acceptance-validator", childSession,
+            ]).trim();
+          } catch (error) {
+            terminalError = String(
+              error?.stderr || error?.message || error
+            ).trim().replace(/\s+/g, " ").slice(0, 1200);
+          }
+        } else {
+          terminalError = "missing acceptance-validator child session";
+        }
+
         if (!modelPass) {
-          receipt = "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS";
+          if (
+            terminal.includes(
+              "ACCEPTANCE_VALIDATOR_TERMINAL_FAIL_RECOVERED"
+            )
+          ) {
+            receipt = "ACCEPTANCE_FAIL\nFAIL_REPORT_RESTORED";
+          } else {
+            receipt =
+              "ACCEPTANCE_FAIL\nMODEL_VERDICT_NOT_EXACT_PASS" +
+              (terminalError
+                ? `\nTERMINAL_RECONCILE: ${terminalError}`
+                : "");
+          }
+        } else if (
+          !terminal.includes("ACCEPTANCE_VALIDATOR_TERMINAL_PASS_OK")
+        ) {
+          receipt =
+            "ACCEPTANCE_FAIL\nTERMINAL_TRUST_GATE: " +
+            (terminalError || terminal || "validator terminal evidence invalid");
         } else {
           try {
             execFileSync(
@@ -745,6 +881,15 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
     "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED session=ses-test IMPLEMENTATION_WRITE_REQUIRED deliverable=D004";
   if (!/^EARLY_WRITE_(?:PROBE|IMPLEMENTATION)_WRITE_REQUIRED\b/.test(implementationWriteRequired)) {
     throw new Error("implementation direct-write recoverable guard marker changed");
+  }
+  const exactVerifyRequired =
+    "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED session=ses-test PLAN_CONTRACT_EXACT_VERIFY_REQUIRED deliverable=D004";
+  const returnRequired =
+    "EARLY_WRITE_IMPLEMENTATION_RETURN_REQUIRED session=ses-test PLAN_CONTRACT_EXACT_VERIFY_PASSED deliverable=D004";
+  for (const marker of [exactVerifyRequired, returnRequired]) {
+    if (!/^EARLY_WRITE_IMPLEMENTATION_(?:EXACT_VERIFY_REQUIRED|RETURN_REQUIRED)\b/.test(marker)) {
+      throw new Error("plan-contract reverify recoverable guard marker changed");
+    }
   }
   const event = { kind: "compaction", headers: {} };
   if (!markRequestPurpose(event) || event.headers["x-v2-request-purpose"] !== "compaction") {

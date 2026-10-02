@@ -348,6 +348,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001",
           "generation": 1,
           "kind": "launch"
@@ -523,6 +524,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D015",
           "generation": 1,
           "kind": "launch"
@@ -613,6 +615,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D013",
           "generation": 1,
           "kind": "launch"
@@ -703,6 +706,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D013",
           "generation": 1,
           "kind": "launch"
@@ -791,6 +795,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001-B",
           "generation": 1,
           "kind": "launch"
@@ -869,6 +874,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001-B",
           "generation": 1,
           "kind": "launch"
@@ -2498,6 +2504,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D003",
           "generation": 1,
           "kind": "launch"
@@ -2828,6 +2835,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D003-B",
           "generation": 1,
           "kind": "launch"
@@ -3463,6 +3471,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001",
           "generation": 1,
           "kind": "launch"
@@ -4354,6 +4363,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D002",
           "generation": 1,
           "kind": "launch"
@@ -4493,6 +4503,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D004",
           "generation": 1,
           "kind": "launch"
@@ -4561,6 +4572,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D004",
           "generation": 1,
           "kind": "launch"
@@ -5715,6 +5727,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D004",
           "generation": 1,
           "kind": "launch"
@@ -5785,6 +5798,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D002",
           "generation": 1,
           "kind": "launch"
@@ -5948,12 +5962,14 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001",
           "generation": 1,
           "kind": "launch"
         },
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D002",
           "generation": 1,
           "kind": "launch"
@@ -6812,6 +6828,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001",
           "generation": 1,
           "kind": "launch"
@@ -7281,6 +7298,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D003",
           "generation": 1,
           "kind": "launch"
@@ -7475,6 +7493,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D002",
           "generation": 1,
           "kind": "launch"
@@ -8237,6 +8256,7 @@
       "expected_current_actions": [
         {
           "agent": "task-splitter",
+          "claim": 1,
           "deliverable": "D001",
           "generation": 1,
           "kind": "launch"

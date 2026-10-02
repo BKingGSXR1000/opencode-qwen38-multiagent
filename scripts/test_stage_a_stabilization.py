@@ -7,7 +7,9 @@ import importlib.util
 import io
 import json
 import hashlib
+import inspect
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -18,9 +20,11 @@ from pathlib import Path
 
 import control_state
 import control_query_views
+import control_policy
 import deterministic_dispatch
 import stage_a_controller as controller
 import stage_a_path_permissions as path_permissions
+import runtime_contract
 import supervisor
 import worker_sandbox
 
@@ -29,11 +33,37 @@ OWNED = ".opencode-v2/ACCEPTANCE.md"
 RULES = [("*", "deny"), (OWNED, "allow")]
 
 
+class ReferenceResearcherModelTests(unittest.TestCase):
+    def test_reference_researcher_uses_dedicated_nonthinking_model(self):
+        root=Path(__file__).resolve().parent.parent
+        role=(root/"xdg/config/opencode/agents/reference-researcher.md").read_text()
+        config=(root/"xdg/config/opencode/opencode.jsonc").read_text()
+        self.assertIn("model: syv/qwen38-reference-nothink",role)
+        self.assertNotIn("model: syv/qwen38-reasoning-48k",role)
+        anchor='"qwen38-reference-nothink"'
+        start=config.index(anchor)
+        block=config[start:start+900]
+        self.assertIn('"context": 32768',block)
+        self.assertIn('"output": 4096',block)
+        self.assertIn('"enable_thinking": false',block)
+
+
 class LauncherReadinessTimeoutTests(unittest.TestCase):
     def test_stage_a_launcher_bounds_status_probe(self):
         text = Path(__file__).with_name("start-stage-a-run.sh").read_text()
         self.assertIn("--connect-timeout 1 --max-time 2", text)
         self.assertIn('http_status(){', text)
+
+    def test_server_launcher_kills_child_if_runtime_setup_fails(self):
+        text = Path(__file__).with_name("run-a2-v11831-server.sh").read_text()
+        self.assertIn('SERVER_PID=""', text)
+        self.assertIn('trap cleanup_runtime EXIT', text)
+        self.assertIn('kill -0 "$SERVER_PID"', text)
+        self.assertIn('kill "$SERVER_PID"', text)
+        self.assertLess(
+            text.index('"$BIN" serve --hostname 127.0.0.1 --port "$PORT" &'),
+            text.index('python3 "$ROOT/scripts/runtime_contract.py"'),
+        )
 
     def test_normal_entrypoints_require_consolidated_preflight_proof(self):
         scripts = Path(__file__).resolve().parent
@@ -57,6 +87,202 @@ class LauncherReadinessTimeoutTests(unittest.TestCase):
         self.assertIn("preflight.verify_proof(proof, project, base_url, root_session)", driver)
 
 
+class ControlPolicyProvenanceTests(unittest.TestCase):
+    def test_policy_fingerprint_includes_its_own_source(self):
+        self.assertIn("control_policy.py",control_policy._POLICY_FILES)
+
+    def test_phase_ready_validators_are_artifact_scoped(self):
+        plan=control_policy.phase_ready_validator_id()
+        acceptance=control_policy.phase_ready_validator_id("ACCEPTANCE.md")
+        self.assertEqual(control_state.PHASE_READY_VALIDATOR,plan)
+        self.assertEqual(control_state.ACCEPTANCE_READY_VALIDATOR,acceptance)
+        self.assertRegex(plan,r"^deterministic-policy-[0-9a-f]{20}$")
+        self.assertRegex(
+            acceptance,r"^deterministic-acceptance-[0-9a-f]{20}$"
+        )
+        self.assertNotEqual(plan,acceptance)
+        self.assertEqual(
+            control_policy._ACCEPTANCE_POLICY_FILES,
+            ("acceptance_contract.py",),
+        )
+        self.assertNotIn(
+            "leaf_contract.py",control_policy._ACCEPTANCE_POLICY_FILES
+        )
+
+    def test_materialized_control_epoch_is_same_policy_fingerprint(self):
+        current=control_policy.control_policy_epoch()
+        self.assertEqual(control_query_views.CONTROL_POLICY_EPOCH,current)
+        self.assertRegex(
+            current,r"^v2-control-policy-[0-9a-f]{20}$"
+        )
+
+
+class RootSessionLedgerRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        (self.project/".opencode-v2/work").mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_ledger(self,roots):
+        executions={
+            f"e{i}":{
+                "execution_id":f"e{i}",
+                "root_session":root,
+                "action":{"kind":"launch","agent":"feature-builder","deliverable":"D001"},
+            }
+            for i,root in enumerate(roots,1)
+        }
+        controller.save_execution_ledger(self.project,{
+            "owner":"stage-a-controller",
+            "protocol":controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions":executions,
+        })
+
+    def test_missing_tracker_recovers_unanimous_root_from_execution_ledger(self):
+        self.write_ledger(["ses-root","ses-root"])
+        self.assertEqual(
+            controller.root_session_from_execution_ledger(self.project),
+            "ses-root",
+        )
+        info={
+            "id":"ses-root","agent":"transport-root",
+            "parentID":None,"directory":str(self.project),
+        }
+        with mock.patch.object(
+            controller,"http_json",return_value=(200,info)
+        ):
+            self.assertEqual(
+                controller.resolve_root_session(
+                    self.project,"http://127.0.0.1:1"
+                ),
+                "ses-root",
+            )
+
+    def test_conflicting_ledger_roots_fail_closed(self):
+        self.write_ledger(["ses-a","ses-b"])
+        with self.assertRaisesRegex(
+            controller.ControllerError,"conflicting root_session"
+        ):
+            controller.root_session_from_execution_ledger(self.project)
+
+
+class RuntimeContractBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        base=Path(self.tmp.name)
+        self.root=base/"harness"
+        self.project=base/"project"
+        self.overlay=base/"overlay"
+        self.project.mkdir()
+        opencode=self.root/"xdg/config/opencode"
+        (opencode/"agents").mkdir(parents=True)
+        (opencode/"plugins").mkdir()
+        (self.root/"scripts").mkdir()
+        (opencode/"opencode.jsonc").write_text("{}\n")
+        (opencode/"AGENTS.md").write_text("stable global instructions\n")
+        (opencode/"plugins/v2-bounded-subagent.js").write_text(
+            "export const marker = true;\n"
+        )
+        (opencode/"agents/tester.md").write_text(
+            "---\ndescription: test\nmode: subagent\n---\n"
+        )
+        (self.root/"scripts/stage_a_path_permissions.py").write_text(
+            "# permission projection contract\n"
+        )
+        path_permissions.create_overlay(
+            self.project,self.root/"xdg/config",self.overlay
+        )
+        self.base_url="http://127.0.0.1:59999"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_state(self):
+        return runtime_contract.write_state(
+            self.root,self.project,self.base_url,os.getpid(),self.overlay
+        )
+
+    def test_runtime_marker_binds_canonical_and_actual_overlay(self):
+        state=self.write_state()
+        self.assertEqual(
+            state["overlay_contract_sha256"],
+            runtime_contract.overlay_contract_sha256(self.overlay),
+        )
+        verified=runtime_contract.verify_state(
+            self.root,self.project,self.base_url
+        )
+        self.assertEqual(
+            verified["canonical_contract_sha256"],
+            runtime_contract.contract_sha256(self.root),
+        )
+
+    def test_old_runtime_marker_protocol_fails_closed(self):
+        self.write_state()
+        path=runtime_contract.state_path(self.root,self.base_url)
+        data=json.loads(path.read_text())
+        data["protocol"]="v2-opencode-runtime-contract-v1"
+        path.write_text(json.dumps(data))
+        with self.assertRaisesRegex(
+            ValueError,"runtime contract marker protocol mismatch"
+        ):
+            runtime_contract.verify_state(
+                self.root,self.project,self.base_url
+            )
+
+    def test_controller_stale_runtime_contract_fails_closed(self):
+        with mock.patch.object(
+            controller,"verify_runtime_server_state",
+            side_effect=ValueError("stale marker"),
+        ):
+            with self.assertRaisesRegex(
+                controller.ControllerError,"OPENCODE_RUNTIME_CONTRACT_STALE"
+            ):
+                controller.require_current_runtime_contract(
+                    self.project,self.base_url
+                )
+
+    def test_all_native_dispatchers_gate_runtime_before_root_idle(self):
+        for fn in (
+            controller.execute_first_planner,
+            controller.execute_first_semantic,
+            controller.execute_first_implementation,
+            controller.execute_first_task_splitter,
+        ):
+            source=inspect.getsource(fn)
+            gate=source.index(
+                "require_current_runtime_contract(project, base_url)"
+            )
+            idle=source.index("ensure_root_idle(project, base_url, root)")
+            self.assertLess(gate,idle,fn.__name__)
+
+    def test_overlay_mutation_fails_closed(self):
+        self.write_state()
+        (self.overlay/"opencode/agents/tester.md").write_text(
+            "---\ndescription: mutated\nmode: subagent\n---\n"
+        )
+        with self.assertRaisesRegex(
+            ValueError,"runtime contract overlay mismatch"
+        ):
+            runtime_contract.verify_state(
+                self.root,self.project,self.base_url
+            )
+
+    def test_global_agents_change_invalidates_running_contract(self):
+        self.write_state()
+        (self.root/"xdg/config/opencode/AGENTS.md").write_text(
+            "changed global instructions\n"
+        )
+        with self.assertRaisesRegex(
+            ValueError,"runtime contract mismatch: canonical_contract_sha256"
+        ):
+            runtime_contract.verify_state(
+                self.root,self.project,self.base_url
+            )
+
+
 class DriverReportingTests(unittest.TestCase):
     def load_driver(self):
         path = Path(__file__).with_name("drive-stage-a-run.py")
@@ -66,6 +292,34 @@ class DriverReportingTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_driver_binds_runtime_environment_from_verified_server(self):
+        driver=self.load_driver()
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)/"project"
+            project.mkdir()
+            db=Path(td)/"opencode.db"
+            sqlite3.connect(db).close()
+            source={
+                "V2_OPENCODE_BASE_URL":"http://127.0.0.1:58508",
+                "V2_OPENCODE_DB":str(db),
+                "V2_ROOT":str(driver.HARNESS_ROOT),
+                "V2_OPENCODE_SESSION_TABLE":"session",
+            }
+            with mock.patch.object(
+                driver.runtime_contract,"verify_state",
+                return_value={"server_pid":12345},
+            ), mock.patch.object(
+                driver,"read_process_environment",return_value=source,
+            ), mock.patch.dict(driver.os.environ,{},clear=True):
+                bound=driver.configure_runtime_environment(
+                    project,"http://127.0.0.1:58508"
+                )
+                self.assertEqual(bound["V2_PROJECT"],str(project.resolve()))
+                self.assertEqual(driver.os.environ["V2_OPENCODE_DB"],str(db))
+                self.assertEqual(
+                    driver.os.environ["V2_OPENCODE_SESSION_TABLE"],"session"
+                )
 
     def test_driver_cannot_execute_tick_when_preflight_proof_fails(self):
         driver = self.load_driver()
@@ -113,6 +367,73 @@ class DriverReportingTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0]), {"event": "no-dispatch", "actions": blocked["actions"]})
 
+    def test_blocked_attempt_limit_waits_for_autonomous_split_reconciliation(self):
+        driver=self.load_driver()
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            work=project/".opencode-v2/work"
+            work.mkdir(parents=True)
+            (work/"D011.split-status.json").write_text(json.dumps({
+                "owner":"supervisor",
+                "parent_id":"D011",
+                "generation":1,
+                "claim_count":1,
+                "state":"split-retryable",
+            }))
+            blocked={
+                "outcome":"no-dispatch",
+                "state_version":"blocked-state",
+                "actions":[{
+                    "kind":"blocked",
+                    "deliverable":"D011",
+                    "reason":"attempt_limit_reached",
+                }],
+            }
+            complete={
+                "outcome":"no-dispatch",
+                "state_version":"complete-state",
+                "actions":[{"kind":"complete"}],
+            }
+            with mock.patch.object(
+                driver.preflight,"verify_proof"
+            ), mock.patch.object(
+                driver.tick,"execute_one",
+                side_effect=[blocked,blocked,blocked,complete],
+            ), mock.patch.object(driver.time,"sleep"):
+                self.assertEqual(
+                    driver.drive(
+                        project,"http://127.0.0.1:1","root",
+                        project/"proof",0.01,0
+                    ),
+                    0,
+                )
+
+    def test_terminal_split_state_does_not_mask_attempt_limit_block(self):
+        driver=self.load_driver()
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            work=project/".opencode-v2/work"
+            work.mkdir(parents=True)
+            (work/"D011.split-status.json").write_text(json.dumps({
+                "owner":"supervisor",
+                "parent_id":"D011",
+                "generation":1,
+                "claim_count":2,
+                "state":"splitter-failed",
+            }))
+            receipt={
+                "outcome":"no-dispatch",
+                "state_version":"blocked-state",
+                "actions":[{
+                    "kind":"blocked",
+                    "deliverable":"D011",
+                    "reason":"attempt_limit_reached",
+                }],
+            }
+            self.assertFalse(
+                driver.blocked_split_reconciliation_pending(project,receipt)
+            )
+
 
 class StageATickPreflightSafetyTests(unittest.TestCase):
     def test_tick_cannot_dispatch_when_preflight_proof_is_rejected(self):
@@ -154,6 +475,25 @@ class PlannerContractTests(unittest.TestCase):
         self.assertIn("Never embed a multiline Python/JavaScript/shell program", role)
         self.assertIn("python3 -m py_compile", role)
         self.assertIn("bounded owned test/helper", role)
+
+    def test_behavioral_done_when_requires_behavioral_verify_in_role_and_repair_prompt(self):
+        role = (
+            Path(__file__).resolve().parent.parent
+            / "xdg/config/opencode/agents/implementation-planner.md"
+        ).read_text()
+        self.assertIn("Verify MUST\n  execute that relevant behavior", role)
+        prompt=controller.PLANNER_PROMPTS["repair"]
+        self.assertIn("MUST\nactually execute the relevant behavior",prompt)
+        self.assertIn("Syntax checks, file existence, grep",prompt)
+
+    def test_plugin_enforces_targeted_planner_tool_boundary(self):
+        plugin=(
+            Path(__file__).resolve().parent.parent
+            / "xdg/config/opencode/plugins/v2-bounded-subagent.js"
+        ).read_text()
+        self.assertIn("function guardPlannerToolBoundary",plugin)
+        self.assertIn('"--planner-tool-check", sessionID',plugin)
+        self.assertIn("guardPlannerToolBoundary(directory, event, output);",plugin)
 
 
 class FinalTestLeafContextTests(unittest.TestCase):
@@ -402,6 +742,41 @@ class WorkerSandboxPluginHistoryTests(unittest.TestCase):
         self.assertNotIn('restoreOriginalSandboxCommand(event, output);',plugin)
 
 
+class PlannerRetryGenerationTests(unittest.TestCase):
+    def test_infrastructure_refund_advances_generation_without_raising_failure_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            work=project/".opencode-v2/work"
+            work.mkdir(parents=True)
+            path=work/"planner-restarts.json"
+            path.write_text(json.dumps({
+                "owner":"supervisor",
+                "count":2,
+                "counted_sessions":["p1","p2"],
+            }))
+            self.assertEqual(controller.planner_dispatch_generation(project),2)
+            path.write_text(json.dumps({
+                "owner":"supervisor",
+                "count":2,
+                "counted_sessions":["p1","p2"],
+                "infrastructure_recoveries":[{
+                    "session":"p3",
+                    "source":"operator-controller",
+                    "reason":"proven harness defect",
+                    "timestamp":"2026-09-26T16:34:14Z",
+                }],
+            }))
+            self.assertEqual(controller.planner_dispatch_generation(project),3)
+
+    def test_refund_generation_changes_planner_execution_id_at_same_decision(self):
+        action={"kind":"launch","agent":"implementation-planner","mode":"repair"}
+        old=controller.execution_action_id("same-state","ses-root",action,2)
+        replay=controller.execution_action_id("same-state","ses-root",action,2)
+        recovered=controller.execution_action_id("same-state","ses-root",action,3)
+        self.assertEqual(old,replay)
+        self.assertNotEqual(old,recovered)
+
+
 class ImplementationRetryGenerationTests(unittest.TestCase):
     def test_preclaim_does_not_advance_generation_but_terminal_failure_does(self):
         with tempfile.TemporaryDirectory() as td:
@@ -432,6 +807,34 @@ class ImplementationRetryGenerationTests(unittest.TestCase):
             (work / "attempts.json").write_text(json.dumps(ledger))
             self.assertEqual(controller.attempt_failure_generation(project, "D001"), 1)
 
+    def test_plan_contract_revision_advances_generation_without_failure_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            project=Path(td)
+            work=project/".opencode-v2/work"
+            work.mkdir(parents=True)
+            ledger={
+                "owner":"supervisor",
+                "protocol":"v2-attempt-ledger-v1",
+                "deliverables":{
+                    "D001":{
+                        "count":1,
+                        "sessions":["ses-contract"],
+                        "automatic_limit":2,
+                        "plan_contract_revisions":[{
+                            "attempt":1,
+                            "source":"supervisor-plan-contract-revision",
+                            "previous_verify_sha256":"a"*64,
+                            "current_verify_sha256":"b"*64,
+                            "previous_result":"verify-failed-1",
+                        }],
+                    }
+                },
+            }
+            (work/"attempts.json").write_text(json.dumps(ledger))
+            self.assertEqual(
+                controller.attempt_failure_generation(project,"D001"),1
+            )
+
     def test_retry_generation_changes_execution_id_without_changing_decision(self):
         action = {"kind": "launch", "agent": "implementer", "deliverable": "D001"}
         first = controller.execution_action_id("same-state", "ses-root", action, 0)
@@ -448,6 +851,10 @@ class ImplementationLogicalDispatchIdempotencyTests(unittest.TestCase):
         self.work=self.project/".opencode-v2/work"
         self.work.mkdir(parents=True)
         self.root="ses-root"
+        self.runtime_contract_patch=mock.patch.object(
+            controller,"require_current_runtime_contract",return_value={}
+        )
+        self.runtime_contract_patch.start()
         self.action={"kind":"launch","agent":"feature-builder","deliverable":"D001"}
         self.result={"state_version":"state-b","actions":[self.action]}
         self.prior_id=controller.execution_action_id(
@@ -473,6 +880,7 @@ class ImplementationLogicalDispatchIdempotencyTests(unittest.TestCase):
         })
 
     def tearDown(self):
+        self.runtime_contract_patch.stop()
         self.tmp.cleanup()
 
     def _write_attempts(self,count,sessions):
@@ -525,6 +933,473 @@ class ImplementationLogicalDispatchIdempotencyTests(unittest.TestCase):
                 "LOGICAL_IMPLEMENTATION_DISPATCH_SETTLING",
             ):
                 controller.execute_first_implementation(
+                    self.project,"http://127.0.0.1:1",self.result,self.root
+                )
+        http.assert_not_called()
+        self.assertEqual(
+            len(controller.load_execution_ledger(self.project)["executions"]),1
+        )
+
+    def test_reusable_reservation_reposts_after_terminal_zero_work_orphan(self):
+        self._write_attempts(1,["dispatch:old"])
+        result={
+            **self.result,
+            "scheduler":{
+                "replayable_reserved_deliverables":["D001"],
+            },
+        }
+        child={
+            "id":"ses-zero",
+            "parentID":self.root,
+            "agent":"feature-builder",
+            "tokens":{"input":0,"output":0,"reasoning":0},
+            "summary":{"additions":0,"deletions":0,"files":0},
+        }
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(
+            controller,"session_is_active",return_value=False
+        ), mock.patch.object(
+            controller,"ensure_root_idle",return_value=None
+        ), mock.patch.object(
+            controller,"http_json",return_value=(204,{})
+        ) as http:
+            receipt=controller.execute_first_implementation(
+                self.project,"http://127.0.0.1:1",result,self.root
+            )
+        self.assertFalse(receipt["replay_suppressed"])
+        self.assertNotEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(http.call_count,1)
+        ledger=controller.load_execution_ledger(self.project)
+        self.assertEqual(len(ledger["executions"]),2)
+        prior=ledger["executions"][self.prior_id]
+        self.assertEqual(
+            prior["zero_work_orphan_replays"][-1]["sessions"],
+            ["ses-zero"],
+        )
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        self.assertEqual(attempts["deliverables"]["D001"]["count"],1)
+        self.assertEqual(
+            attempts["deliverables"]["D001"]["sessions"],
+            ["dispatch:old"],
+        )
+
+    def test_prior_execution_id_reposts_supervisor_superseded_child(self):
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "automatic_limit":2,
+                    "count":1,
+                    "sessions":["dispatch:rearmed"],
+                    "unmaterialized_dispatch_history":[{
+                        "sequence":1,
+                        "replaced":"ses-superseded",
+                        "replacement":"dispatch:rearmed",
+                        "source":"supervisor-test-recovery",
+                        "timestamp":"2026-09-26T00:00:00Z",
+                    }],
+                }
+            },
+        }))
+        result={
+            **self.result,
+            "scheduler":{
+                "replayable_reserved_deliverables":["D001"],
+            },
+        }
+        child={
+            "id":"ses-superseded",
+            "parentID":self.root,
+            "agent":"feature-builder",
+            "tokens":{"input":100,"output":20,"reasoning":0},
+            "summary":{"additions":2,"deletions":0,"files":1},
+        }
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(
+            controller,"session_is_active",return_value=False
+        ), mock.patch.object(
+            controller,"ensure_root_idle",return_value=None
+        ), mock.patch.object(
+            controller,"http_json",return_value=(204,{})
+        ) as http:
+            receipt=controller.execute_first_implementation(
+                self.project,"http://127.0.0.1:1",result,self.root
+            )
+        self.assertFalse(receipt["replay_suppressed"])
+        self.assertNotEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(http.call_count,1)
+        ledger=controller.load_execution_ledger(self.project)
+        prior=ledger["executions"][self.prior_id]
+        self.assertEqual(
+            prior["superseded_child_replays"][-1]["sessions"],
+            ["ses-superseded"],
+        )
+        self.assertEqual(
+            prior["superseded_child_replays"][-1]["reason"],
+            "reusable-reservation-supervisor-superseded-child",
+        )
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        self.assertEqual(
+            attempts["deliverables"]["D001"]["sessions"],
+            ["dispatch:rearmed"],
+        )
+
+    def test_same_execution_id_reposts_replayable_zero_work_orphan(self):
+        self._write_attempts(1,["dispatch:old"])
+        result={
+            "state_version":"state-a",
+            "actions":[self.action],
+            "scheduler":{
+                "replayable_reserved_deliverables":["D001"],
+            },
+        }
+        child={
+            "id":"ses-zero",
+            "parentID":self.root,
+            "agent":"feature-builder",
+            "tokens":{"input":0,"output":0,"reasoning":0},
+            "summary":{"additions":0,"deletions":0,"files":0},
+        }
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(
+            controller,"session_is_active",return_value=False
+        ), mock.patch.object(
+            controller,"ensure_root_idle",return_value=None
+        ), mock.patch.object(
+            controller,"http_json",return_value=(204,{})
+        ) as http:
+            receipt=controller.execute_first_implementation(
+                self.project,"http://127.0.0.1:1",result,self.root
+            )
+        self.assertFalse(receipt["replay_suppressed"])
+        self.assertEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(http.call_count,1)
+        ledger=controller.load_execution_ledger(self.project)
+        self.assertEqual(len(ledger["executions"]),1)
+        current=ledger["executions"][self.prior_id]
+        self.assertEqual(
+            current["zero_work_orphan_replays"][-1]["sessions"],
+            ["ses-zero"],
+        )
+        self.assertEqual(
+            current["zero_work_orphan_replays"][-1]["reason"],
+            "same-execution-reusable-reservation-terminal-zero-work-child",
+        )
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        self.assertEqual(
+            attempts["deliverables"]["D001"]["sessions"],
+            ["dispatch:old"],
+        )
+
+    def test_same_execution_id_reposts_supervisor_superseded_child(self):
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "automatic_limit":2,
+                    "count":1,
+                    "sessions":["dispatch:rearmed"],
+                    "unmaterialized_dispatch_history":[{
+                        "sequence":1,
+                        "replaced":"ses-superseded",
+                        "replacement":"dispatch:rearmed",
+                        "source":"supervisor-test-recovery",
+                        "timestamp":"2026-09-26T00:00:00Z",
+                    }],
+                }
+            },
+        }))
+        result={
+            "state_version":"state-a",
+            "actions":[self.action],
+            "scheduler":{
+                "replayable_reserved_deliverables":["D001"],
+            },
+        }
+        child={
+            "id":"ses-superseded",
+            "parentID":self.root,
+            "agent":"feature-builder",
+            "tokens":{"input":100,"output":20,"reasoning":0},
+            "summary":{"additions":2,"deletions":0,"files":1},
+        }
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(
+            controller,"session_is_active",return_value=False
+        ), mock.patch.object(
+            controller,"ensure_root_idle",return_value=None
+        ), mock.patch.object(
+            controller,"http_json",return_value=(204,{})
+        ) as http:
+            receipt=controller.execute_first_implementation(
+                self.project,"http://127.0.0.1:1",result,self.root
+            )
+        self.assertFalse(receipt["replay_suppressed"])
+        self.assertEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(http.call_count,1)
+        ledger=controller.load_execution_ledger(self.project)
+        self.assertEqual(len(ledger["executions"]),1)
+        current=ledger["executions"][self.prior_id]
+        self.assertEqual(
+            current["superseded_child_replays"][-1]["sessions"],
+            ["ses-superseded"],
+        )
+        self.assertEqual(
+            current["superseded_child_replays"][-1]["reason"],
+            "same-execution-reusable-reservation-supervisor-superseded-child",
+        )
+        attempts=json.loads((self.work/"attempts.json").read_text())
+        self.assertEqual(
+            attempts["deliverables"]["D001"]["sessions"],
+            ["dispatch:rearmed"],
+        )
+
+    def test_terminal_native_attempt_does_not_suppress_next_authorized_launch(self):
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D001":{
+                    "automatic_limit":2,
+                    "count":1,
+                    "sessions":["ses-terminal"],
+                    "operator_retry_attempts":[{
+                        "sequence":1,
+                        "session":"ses-terminal",
+                        "state":"infrastructure_abort",
+                        "outcome":"infrastructure_abort",
+                        "consumes_operator_grant":False,
+                    }],
+                }
+            },
+        }))
+        child={
+            "id":"ses-terminal",
+            "parentID":self.root,
+            "agent":"feature-builder",
+            "tokens":{"input":0,"output":0,"reasoning":0},
+            "summary":{"additions":0,"deletions":0,"files":0},
+        }
+        with mock.patch.object(
+            controller,"canonical_implementation_prompt",return_value="prompt"
+        ), mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=self.result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(
+            controller,"ensure_root_idle",return_value=None
+        ), mock.patch.object(
+            controller,"http_json",return_value=(204,{})
+        ) as http:
+            receipt=controller.execute_first_implementation(
+                self.project,"http://127.0.0.1:1",self.result,self.root
+            )
+        self.assertFalse(receipt["replay_suppressed"])
+        self.assertNotEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(http.call_count,1)
+
+    def test_evaluate_preserves_replayable_scheduler_evidence(self):
+        decision={
+            "state_version":"replay-state",
+            "resume_phase":"execution",
+            "eligible":["D001"],
+            "eligible_roles":{"D001":"feature-builder"},
+            "scheduler":{
+                "active_workers":0,
+                "available_worker_slots":0,
+                "replayable_reserved_deliverables":["D001"],
+            },
+        }
+        path=controller.decision_path(self.project)
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(json.dumps(decision))
+        result=controller.evaluate(self.project)
+        self.assertEqual(
+            result["actions"],
+            [{"kind":"launch","agent":"feature-builder","deliverable":"D001"}],
+        )
+        self.assertEqual(
+            result["scheduler"]["replayable_reserved_deliverables"],
+            ["D001"],
+        )
+
+    def test_prior_intent_filter_excludes_older_completed_attempt(self):
+        older=dict(
+            controller.load_execution_ledger(self.project)["executions"][
+                self.prior_id
+            ]
+        )
+        older["baseline_attempt"]={"count":5,"sessions":[]}
+        matches=controller.prior_logical_implementation_intents(
+            {"old":older},
+            "new",
+            self.root,
+            self.action,
+            0,
+            7,
+        )
+        self.assertEqual(matches,[])
+
+
+class TaskSplitterLogicalDispatchIdempotencyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.work=self.project/".opencode-v2/work"
+        self.work.mkdir(parents=True)
+        self.root="ses-root"
+        self.action={
+            "kind":"launch","agent":"task-splitter",
+            "deliverable":"D007","generation":1,"claim":1,
+        }
+        self.result={"state_version":"state-b","actions":[self.action]}
+        self.prior_id=controller.execution_action_id(
+            "state-a",self.root,self.action
+        )
+        (self.work/"attempts.json").write_text(json.dumps({
+            "owner":"supervisor",
+            "deliverables":{
+                "D007":{
+                    "automatic_limit":2,
+                    "count":2,
+                    "sessions":["ses-one","ses-two"],
+                }
+            },
+        }))
+        controller.save_execution_ledger(self.project,{
+            "owner":"stage-a-controller",
+            "protocol":controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions":{
+                self.prior_id:{
+                    "execution_id":self.prior_id,
+                    "state_version":"state-a",
+                    "root_session":self.root,
+                    "action":self.action,
+                    "transport":"prompt_async+SubtaskPart",
+                    "transport_may_have_been_attempted":True,
+                    "created_at_ms":1000,
+                    "baseline_attempt":{
+                        "count":2,
+                        "sessions":["ses-one","ses-two"],
+                    },
+                    "baseline_child_ids":[],
+                }
+            },
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_state_version_churn_reconciles_prior_splitter_child(self):
+        child={
+            "id":"ses-splitter",
+            "parentID":self.root,
+            "agent":"task-splitter",
+        }
+        with mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=self.result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[child]
+        ), mock.patch.object(controller,"http_json") as http:
+            receipt=controller.execute_first_task_splitter(
+                self.project,"http://127.0.0.1:1",self.result,self.root
+            )
+        self.assertTrue(receipt["replay_suppressed"])
+        self.assertEqual(receipt["execution_id"],self.prior_id)
+        self.assertEqual(
+            receipt["reconciliation"],
+            {"kind":"native-child","sessions":["ses-splitter"]},
+        )
+        http.assert_not_called()
+        self.assertEqual(
+            len(controller.load_execution_ledger(self.project)["executions"]),1
+        )
+
+    def test_split_retryable_selector_advances_claim_ordinal(self):
+        decision={
+            "resume_phase":"recursive-split",
+            "split_required":[{
+                "deliverable":"D007",
+                "split_state":"split-retryable",
+                "split_generation":1,
+                "split_claim_count":1,
+            }],
+            "eligible":[],
+            "eligible_roles":{},
+            "scheduler":{
+                "available_worker_slots":0,
+                "replayable_reserved_deliverables":[],
+            },
+        }
+        self.assertEqual(
+            deterministic_dispatch.select_actions(decision),
+            [{
+                "kind":"launch","agent":"task-splitter",
+                "deliverable":"D007","generation":1,"claim":2,
+            }],
+        )
+
+    def test_retry_claim_ordinal_is_a_distinct_logical_splitter_attempt(self):
+        retry={
+            "kind":"launch","agent":"task-splitter",
+            "deliverable":"D007","generation":1,"claim":2,
+        }
+        retry_id=controller.execution_action_id(
+            "state-b",self.root,retry
+        )
+        self.assertNotEqual(retry_id,self.prior_id)
+        ledger=controller.load_execution_ledger(self.project)["executions"]
+        self.assertEqual(
+            controller.prior_logical_task_splitter_intents(
+                ledger,retry_id,self.root,retry
+            ),
+            [],
+        )
+
+    def test_unmaterialized_prior_splitter_waits_without_second_post(self):
+        with mock.patch.object(
+            controller,"resolve_root_session",return_value=self.root
+        ), mock.patch.object(
+            controller,"evaluate",return_value=self.result
+        ), mock.patch.object(
+            controller,"child_snapshot",return_value=[]
+        ), mock.patch.object(controller,"http_json") as http:
+            with self.assertRaisesRegex(
+                controller.ControllerError,
+                "LOGICAL_TASK_SPLITTER_DISPATCH_SETTLING",
+            ):
+                controller.execute_first_task_splitter(
                     self.project,"http://127.0.0.1:1",self.result,self.root
                 )
         http.assert_not_called()
@@ -607,6 +1482,32 @@ class ExactProjectPathPermissionTests(unittest.TestCase):
         self.assertNotIn(str(self.sibling / OWNED).lstrip("/"), rendered)
 
 
+class AcceptanceRepairPromptTests(unittest.TestCase):
+    def test_repair_prompt_names_canonical_guard_error_file(self):
+        part=controller.build_semantic_subtask({
+            "kind":"launch","agent":"acceptance-planner","mode":"repair",
+        })
+        prompt=part["prompt"]
+        self.assertIn(".opencode-v2/ACCEPTANCE.guard-errors.txt",prompt)
+        self.assertIn("do not guess alternate guard-error names",prompt)
+        self.assertNotIn("and any\nguard-error artifact",prompt)
+
+
+class ImplementationPlannerRepairPromptTests(unittest.TestCase):
+    def test_python_exception_verify_uses_one_line_stdlib_pattern(self):
+        prompt=controller.PLANNER_PROMPTS["repair"]
+        self.assertIn("unittest.TestCase().assertRaises",prompt)
+        self.assertIn("semicolon-compressed try/except",prompt)
+
+    def test_planner_prompts_forbid_human_summary_as_incidental_contract(self):
+        for mode in ("fresh","repair"):
+            prompt=controller.PLANNER_PROMPTS[mode]
+            normalized=" ".join(prompt.split())
+            self.assertIn("human-readable",normalized)
+            self.assertIn("exit status",normalized)
+            self.assertIn("Done-when explicitly requires",normalized)
+
+
 class TerminalSemanticChildTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -670,6 +1571,87 @@ class TerminalSemanticChildTests(unittest.TestCase):
         receipt = controller.execute_first_semantic(self.project, "http://127.0.0.1:1", self.result, self.root)
         self.assertTrue(receipt["replay_suppressed"])
 
+    def test_long_running_child_gets_grace_from_native_terminal_update(self):
+        controller.child_snapshot = lambda project, base_url, root: [{
+            "id":"ses-terminal",
+            "parentID":self.root,
+            "agent":"acceptance-planner",
+            "time":{"updated":int(time.time()*1000)},
+        }]
+        controller.session_is_active = lambda project, base_url, sid: False
+        receipt=controller.execute_first_semantic(
+            self.project,"http://127.0.0.1:1",self.result,self.root
+        )
+        self.assertTrue(receipt["replay_suppressed"])
+        self.assertGreater(
+            int(receipt["reconciliation"]["child_updated_at_ms"]),0
+        )
+
+
+class FinalAcceptanceIndependentExecutionTests(unittest.TestCase):
+    def load_finalizer(self):
+        path=Path(__file__).with_name("finalize-acceptance.py")
+        spec=importlib.util.spec_from_file_location("finalize_acceptance_test",path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def make_project(self):
+        td=tempfile.TemporaryDirectory()
+        project=Path(td.name)
+        ctrl=project/".opencode-v2"
+        ctrl.mkdir(parents=True)
+        (ctrl/"ACCEPTANCE.md").write_text(
+            "# Acceptance Contract\n"
+            "## MUST checks\n"
+            "- [ ] A001: command must actually succeed.\n"
+            "<!-- ACCEPTANCE_COMPLETE -->\n"
+        )
+        command="test -e .opencode-v2/ACCEPTANCE.md"
+        (ctrl/"acceptance-report.json").write_text(json.dumps({
+            "protocol":"v2-acceptance-report-v1",
+            "result":"PASS",
+            "checks":[{
+                "id":"A001",
+                "status":"PASS",
+                "evidence":"validator claims the command succeeded",
+                "required_executable":True,
+                "command":command,
+                "exit_code":0,
+            }],
+        }))
+        (ctrl/"TEST_REPORT.json").write_text(json.dumps({
+            "protocol":"v2-test-report-v1",
+            "status":"pass",
+            "checks_run":1,
+            "checks_passed":1,
+            "missing_required_files":[],
+            "checks":[{
+                "name":"gate",
+                "command":command,
+                "exit_code":0,
+                "timed_out":False,
+            }],
+        }))
+        return td,project
+
+    def test_finalizer_does_not_trust_validator_reported_exit_code(self):
+        finalizer=self.load_finalizer()
+        td,project=self.make_project()
+        try:
+            with mock.patch.object(finalizer,"run_validator_bash",return_value=1):
+                with self.assertRaisesRegex(
+                    RuntimeError,"gate-executable-exit-1"
+                ):
+                    finalizer.finalize(project)
+            self.assertFalse(
+                (project/".opencode-v2/acceptance-pass.json").exists()
+            )
+        finally:
+            td.cleanup()
+
 
 class SemanticInfrastructureRetryTests(unittest.TestCase):
     def setUp(self):
@@ -731,6 +1713,256 @@ class SemanticInfrastructureRetryTests(unittest.TestCase):
         self.assertEqual(generation, 1)
         self.assertEqual(next_id, receipt["next_execution_id"])
         self.assertNotEqual(next_id, self.execution_id)
+
+    def test_final_acceptance_prompt_hash_changes_semantic_execution_identity(self):
+        token_a=controller.semantic_prompt_work_token(self.action,"a"*64)
+        token_b=controller.semantic_prompt_work_token(self.action,"b"*64)
+        self.assertNotEqual(token_a,token_b)
+        id_a=controller.execution_action_id(
+            "same-state",self.root,self.action,None,token_a,None
+        )
+        id_b=controller.execution_action_id(
+            "same-state",self.root,self.action,None,token_b,None
+        )
+        self.assertNotEqual(id_a,id_b)
+        self.assertEqual(
+            controller.semantic_prompt_work_token(
+                {"kind":"launch","agent":"reference-researcher","mode":"validation"},
+                "c"*64,
+            ),
+            "",
+        )
+
+    def test_current_acceptance_work_token_reconstructs_prompt_bound_identity(self):
+        prompt="canonical acceptance packet"
+        expected=controller.semantic_prompt_work_token(
+            self.action,hashlib.sha256(prompt.encode()).hexdigest()
+        )
+        with mock.patch.object(
+            controller,"build_semantic_subtask",
+            return_value={"prompt":prompt},
+        ):
+            self.assertEqual(
+                controller.current_semantic_work_token(
+                    self.project,self.action
+                ),
+                expected,
+            )
+
+    def test_acceptance_retry_uses_prompt_bound_current_work_token(self):
+        prompt="canonical acceptance packet"
+        token=controller.semantic_prompt_work_token(
+            self.action,hashlib.sha256(prompt.encode()).hexdigest()
+        )
+        execution_id=controller.execution_action_id(
+            "state-a",self.root,self.action,None,token,None
+        )
+        controller.save_execution_ledger(self.project,{
+            "owner":"stage-a-controller",
+            "protocol":controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions":{
+                execution_id:{
+                    "execution_id":execution_id,
+                    "state_version":"state-a",
+                    "root_session":self.root,
+                    "action":self.action,
+                    "semantic_generation":0,
+                    "semantic_work_token":token,
+                    "created_at_ms":int((time.time()-30)*1000),
+                    "baseline_child_ids":[],
+                }
+            },
+        })
+        child={
+            "id":"ses-validator-old",
+            "parentID":self.root,
+            "agent":"acceptance-validator",
+        }
+        with mock.patch.object(controller,"evaluate",return_value=self.result), \
+             mock.patch.object(controller,"child_snapshot",return_value=[child]), \
+             mock.patch.object(
+                 controller,"semantic_child_may_still_transition",
+                 return_value=False,
+             ), \
+             mock.patch.object(
+                 controller,"current_semantic_work_token",
+                 return_value=token,
+             ):
+            receipt=controller.authorize_semantic_infrastructure_retry(
+                self.project,
+                "http://127.0.0.1:1",
+                execution_id,
+                "validator accepted malformed executable evidence",
+            )
+        self.assertEqual(receipt["next_generation"],1)
+        self.assertFalse(receipt["idempotent"])
+
+    def test_reference_validation_item_changes_semantic_execution_identity(self):
+        action={"kind":"launch","agent":"reference-researcher","mode":"validation"}
+        work=self.project/".opencode-v2/acceptance/reference-work.json"
+        work.parent.mkdir(parents=True)
+        work.write_text(json.dumps({
+            "mode":"validation","status":"complete",
+            "last_completed_item":"V1-frozen-de-fetch",
+            "next_item":"V2-frozen-horizons-vectors",
+        }))
+        token=controller.semantic_work_item_token(self.project,action)
+        self.assertEqual(token,"reference-validation:V2-frozen-horizons-vectors")
+        legacy_id=controller.execution_action_id("state-a",self.root,action)
+        ledger={"executions":{
+            legacy_id:{
+                "execution_id":legacy_id,"state_version":"state-a",
+                "root_session":self.root,"action":action,"semantic_generation":0,
+            }
+        }}
+        generation,new_id=controller.semantic_execution_slot(
+            ledger,"state-a",self.root,action,token
+        )
+        self.assertEqual(generation,0)
+        self.assertNotEqual(new_id,legacy_id)
+
+    def test_reference_validation_attempt_slot_advances_only_with_gate_attempts(self):
+        action={"kind":"launch","agent":"reference-researcher","mode":"validation"}
+        ctrl=self.project/".opencode-v2"
+        work=ctrl/"acceptance/reference-work.json"
+        work.parent.mkdir(parents=True)
+        work.write_text(json.dumps({
+            "mode":"validation","status":"complete",
+            "last_completed_item":"V1-frozen-de-fetch",
+            "next_item":"V2-frozen-horizons-vectors",
+        }))
+        gate=ctrl/"reference-validation-gate.json"
+        gate.write_text(json.dumps({
+            "owner":"supervisor","phase":"validation","state":"pending",
+            "attempts":2,"max_attempts":8,"active_sessions":[],
+        }))
+        token=controller.semantic_work_item_token(self.project,action)
+        slot=controller.semantic_validation_attempt_slot(self.project,action)
+        self.assertEqual(slot,3)
+        execution_id=controller.execution_action_id(
+            "state-a",self.root,action,None,token,slot
+        )
+        ledger={"executions":{
+            execution_id:{
+                "execution_id":execution_id,
+                "state_version":"state-a",
+                "root_session":self.root,
+                "action":action,
+                "semantic_generation":0,
+                "semantic_work_token":token,
+                "semantic_attempt_slot":slot,
+            }
+        }}
+        generation,same_id=controller.semantic_execution_slot(
+            ledger,"state-a",self.root,action,token,slot
+        )
+        self.assertEqual(generation,0)
+        self.assertEqual(same_id,execution_id)
+
+        # Active children are excluded from the completed-attempt counter, so
+        # the same gate count remains the same idempotency slot.
+        gate.write_text(json.dumps({
+            "owner":"supervisor","phase":"validation","state":"pending",
+            "attempts":2,"max_attempts":8,"active_sessions":["ses-live"],
+        }))
+        self.assertEqual(
+            controller.semantic_validation_attempt_slot(self.project,action),3
+        )
+
+        # Once that child becomes terminal the supervisor increments attempts;
+        # the next semantic launch gets a fresh ordinary-validation slot.
+        gate.write_text(json.dumps({
+            "owner":"supervisor","phase":"validation","state":"pending",
+            "attempts":3,"max_attempts":8,"active_sessions":[],
+        }))
+        next_slot=controller.semantic_validation_attempt_slot(self.project,action)
+        self.assertEqual(next_slot,4)
+        next_generation,next_id=controller.semantic_execution_slot(
+            ledger,"state-a",self.root,action,token,next_slot
+        )
+        self.assertEqual(next_generation,0)
+        self.assertNotEqual(next_id,execution_id)
+
+    def _blocked_reference_retry_fixture(self,last_session="ses-reference-length"):
+        action={"kind":"launch","agent":"reference-researcher","mode":"validation"}
+        ctrl=self.project/".opencode-v2"
+        work=ctrl/"acceptance/reference-work.json"
+        work.parent.mkdir(parents=True,exist_ok=True)
+        work.write_text(json.dumps({
+            "mode":"validation","status":"complete",
+            "last_completed_item":"V1-frozen-de-fetch",
+            "next_item":"V2-frozen-horizons-vectors",
+        }))
+        gate=ctrl/"reference-validation-gate.json"
+        gate.write_text(json.dumps({
+            "owner":"supervisor","phase":"validation","state":"blocked",
+            "attempts":3,"max_attempts":8,"productive_sessions":1,
+            "stagnant_tail":2,"active_sessions":[],
+            "session_ids":["ses-v1","ses-v2-stagnant",last_session],
+        }))
+        token=controller.semantic_work_item_token(self.project,action)
+        slot=3
+        execution_id=controller.execution_action_id(
+            "state-a",self.root,action,None,token,slot
+        )
+        controller.save_execution_ledger(self.project,{
+            "owner":"stage-a-controller",
+            "protocol":controller.EXECUTION_LEDGER_PROTOCOL,
+            "executions":{
+                execution_id:{
+                    "execution_id":execution_id,
+                    "state_version":"state-a",
+                    "root_session":self.root,
+                    "action":action,
+                    "semantic_generation":0,
+                    "semantic_work_token":token,
+                    "semantic_attempt_slot":slot,
+                    "created_at_ms":int((time.time()-30)*1000),
+                    "baseline_child_ids":[],
+                }
+            },
+        })
+        blocked={
+            "state_version":"state-blocked",
+            "resume_phase":"acceptance-validation",
+            "actions":[{"kind":"blocked","reason":"reference-validation-blocked"}],
+        }
+        child={
+            "id":"ses-reference-length",
+            "parentID":self.root,
+            "agent":"reference-researcher",
+        }
+        return action,execution_id,blocked,child
+
+    def test_blocked_reference_gate_can_refund_last_infrastructure_session(self):
+        action,execution_id,blocked,child=self._blocked_reference_retry_fixture()
+        with mock.patch.object(controller,"evaluate",return_value=blocked), \
+             mock.patch.object(controller,"child_snapshot",return_value=[child]), \
+             mock.patch.object(controller,"semantic_child_may_still_transition",return_value=False):
+            receipt=controller.authorize_semantic_infrastructure_retry(
+                self.project,"http://127.0.0.1:1",execution_id,
+                "reference researcher hit model length limit before durable checkpoint",
+            )
+        self.assertEqual(receipt["next_generation"],1)
+        ledger=controller.load_execution_ledger(self.project)
+        grant=ledger["executions"][execution_id]["semantic_infrastructure_retry"]
+        self.assertTrue(grant["blocked_gate_recovery"])
+        self.assertEqual(grant["child_sessions"],["ses-reference-length"])
+
+    def test_blocked_reference_gate_refund_rejects_nonlast_session(self):
+        action,execution_id,blocked,child=self._blocked_reference_retry_fixture(
+            last_session="ses-other"
+        )
+        with mock.patch.object(controller,"evaluate",return_value=blocked), \
+             mock.patch.object(controller,"child_snapshot",return_value=[child]), \
+             mock.patch.object(controller,"semantic_child_may_still_transition",return_value=False):
+            with self.assertRaisesRegex(
+                controller.ControllerError,"same current deterministic work item"
+            ):
+                controller.authorize_semantic_infrastructure_retry(
+                    self.project,"http://127.0.0.1:1",execution_id,
+                    "should remain blocked",
+                )
 
     def test_active_semantic_child_cannot_receive_infrastructure_retry(self):
         child = {
@@ -805,13 +2037,58 @@ class SemanticInfrastructureRetryTests(unittest.TestCase):
             )
             return subprocess.CompletedProcess([], 0, stdout="ACCEPTANCE_GATE_PASS\n")
 
-        with mock.patch.object(controller.subprocess, "run", side_effect=fake_run):
+        with mock.patch.object(
+            controller,"reconcile_terminal_acceptance_with_supervisor",
+            return_value="pass",
+        ), mock.patch.object(
+            controller.subprocess, "run", side_effect=fake_run
+        ):
             result = controller.finalize_terminal_acceptance_report(
-                self.project, intent
+                self.project,
+                "http://127.0.0.1:1",
+                intent,
+                {"sessions":["ses-validator-pass"]},
             )
         self.assertEqual(result["kind"], "terminal-acceptance-report-finalized")
         self.assertEqual(len(result["report_sha256"]), 64)
         self.assertEqual(len(result["acceptance_pass_sha256"]), 64)
+
+    def test_terminal_acceptance_fail_routes_to_existing_leaf_remediation(self):
+        ctrl=self.project/".opencode-v2"
+        ctrl.mkdir(parents=True,exist_ok=True)
+        report=ctrl/"acceptance-report.json"
+        report.write_text(json.dumps({
+            "protocol":"v2-acceptance-report-v1",
+            "result":"FAIL",
+            "checks":[{"id":"A008","status":"FAIL","evidence":"README mismatch"}],
+        }))
+        intent={
+            "action":self.action,
+            "created_at_ms":int((time.time()-1)*1000),
+        }
+        expected={
+            "kind":"terminal-acceptance-fail-remediation",
+            "failed_acceptance_ids":["A008"],
+            "reopened_deliverables":["D008"],
+        }
+        with mock.patch.object(
+            controller,"reconcile_terminal_acceptance_with_supervisor",
+            return_value="fail-recovered",
+        ), mock.patch.object(
+            controller,"finalize_terminal_acceptance_failure_repair",
+            return_value=expected,
+        ) as repair, mock.patch.object(
+            controller.subprocess,"run"
+        ) as finalizer:
+            result=controller.finalize_terminal_acceptance_report(
+                self.project,
+                "http://127.0.0.1:1",
+                intent,
+                {"sessions":["ses-validator-fail"]},
+            )
+        self.assertEqual(result,expected)
+        repair.assert_called_once()
+        finalizer.assert_not_called()
 
     def test_terminal_acceptance_refuses_report_older_than_execution(self):
         ctrl = self.project / ".opencode-v2"
@@ -824,9 +2101,15 @@ class SemanticInfrastructureRetryTests(unittest.TestCase):
             "action": self.action,
             "created_at_ms": int(time.time() * 1000),
         }
-        with mock.patch.object(controller.subprocess, "run") as run:
+        with mock.patch.object(
+            controller,"reconcile_terminal_acceptance_with_supervisor",
+            return_value="pass",
+        ), mock.patch.object(controller.subprocess, "run") as run:
             result = controller.finalize_terminal_acceptance_report(
-                self.project, intent
+                self.project,
+                "http://127.0.0.1:1",
+                intent,
+                {"sessions":["ses-validator-old-report"]},
             )
         self.assertIsNone(result)
         run.assert_not_called()
@@ -1004,20 +2287,30 @@ class AcceptanceValidatorPacketTests(unittest.TestCase):
 
 
 class ValidatorShadowControlTreeTests(unittest.TestCase):
-    def test_validator_shadow_keeps_live_control_tree_on_read_only_lower_mount(self):
+    def test_validator_shadow_keeps_control_inputs_read_only_and_outputs_local(self):
         with tempfile.TemporaryDirectory() as td:
             base=Path(td)
             project=base/"project"
             shadow=base/"shadow"
             (project/".opencode-v2/query/leaves").mkdir(parents=True)
             (project/".opencode-v2/query/leaves/D001.json").write_text("{}\n")
+            (project/".opencode-v2/TEST_REPORT.json").write_text("{}\n")
+            (project/".opencode-v2/test-logs").mkdir()
+            (project/".opencode-v2/test-logs/old.log").write_text("old\n")
             (project/"README.md").write_text("hello\n")
             worker_sandbox._prepare_verify_shadow(
                 project,shadow,"/v2-lower"
             )
             control=shadow/".opencode-v2"
-            self.assertTrue(control.is_symlink())
-            self.assertEqual(os.readlink(control),"/v2-lower/.opencode-v2")
+            self.assertTrue(control.is_dir())
+            self.assertFalse(control.is_symlink())
+            query=control/"query"
+            self.assertTrue(query.is_symlink())
+            self.assertEqual(os.readlink(query),"/v2-lower/.opencode-v2/query")
+            self.assertTrue((control/"test-logs").is_dir())
+            self.assertFalse((control/"test-logs").is_symlink())
+            self.assertFalse((control/"TEST_REPORT.json").exists())
+            self.assertFalse((control/"test-logs/old.log").exists())
             self.assertTrue((shadow/"README.md").is_file())
 
 
@@ -1125,7 +2418,7 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         (self.control / ready).write_text(
             f"status=complete\nprotocol={control_state.PHASE_READY_PROTOCOL}\n"
             f"artifact={artifact}\nmarker={marker}\n"
-            f"validated={control_state.PHASE_READY_VALIDATOR}\nartifact_sha256={digest}\n"
+            f"validated={control_state.ACCEPTANCE_READY_VALIDATOR if artifact=='ACCEPTANCE.md' else control_state.PHASE_READY_VALIDATOR}\nartifact_sha256={digest}\n"
         )
 
     def proposal(self):
@@ -1144,9 +2437,15 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         self.fail_twice()
         self.assertTrue(supervisor.split_request_path("D001").is_file())
         state = control_state.snapshot(self.project)
-        state["split_required"] = [{"deliverable": "D001", "split_state": "split-required", "split_generation": 1}]
+        state["split_required"] = [{
+            "deliverable": "D001", "split_state": "split-required",
+            "split_generation": 1, "split_claim_count": 0,
+        }]
         actions = deterministic_dispatch.select_actions(state)
-        splitter = {"kind": "launch", "agent": "task-splitter", "deliverable": "D001", "generation": 1}
+        splitter = {
+            "kind": "launch", "agent": "task-splitter",
+            "deliverable": "D001", "generation": 1, "claim": 1,
+        }
         self.assertIn(splitter, actions)
         request={"parent_id":"D001","depth":0,"generation":1}
         self.assertIn("CANONICAL_SPLIT_REQUEST_JSON_BEGIN",controller.build_task_splitter_subtask(splitter,request)["prompt"])
@@ -1237,6 +2536,107 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         self.assertNotIn("split_rearm_after_contract_repair",preserved)
         self.assertTrue(preserved["false_parent_contract_repair_recovery"]["resolution_archive"])
         self.assertEqual(supervisor.claim_splitter("D001","claim-seven"),(True,"claimed"))
+
+
+class SharedAcceptanceRemediationOwnerTests(unittest.TestCase):
+    """A failed shared MUST must select only the exact verified executable owner."""
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.ctrl=self.project/".opencode-v2"
+        (self.ctrl/"work").mkdir(parents=True)
+        self.command="python3 -m unittest tests.test_report -v"
+        self.report=self.ctrl/"acceptance-report.json"
+        self.failed={
+            "protocol":"v2-acceptance-report-v1","result":"FAIL",
+            "checks":[{
+                "id":"A012","status":"FAIL","required_executable":True,
+                "command":self.command,"exit_code":0,
+                "evidence":"Report-formatting test is missing from test_report.py",
+            }],
+        }
+        self.leaves={
+            "D006":{"acceptance_ids":["A012"],
+                    "owned_artifact_paths":["tests/test_text.py"],
+                    "verify_command":"python3 -m unittest tests.test_text -v"},
+            "D008":{"acceptance_ids":["A012"],
+                    "owned_artifact_paths":["tests/test_report.py"],
+                    "verify_command":self.command},
+            "D009":{"acceptance_ids":["A012"],
+                    "owned_artifact_paths":["tests/test_cli.py"],
+                    "verify_command":"python3 -m unittest tests.test_cli -v"},
+        }
+        (self.ctrl/"ACCEPTANCE.md").write_text("- [ ] A012: Test coverage\\n")
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "leaves":self.leaves,
+        }))
+        (self.ctrl/"work/attempts.json").write_text(json.dumps({
+            "owner":"supervisor","deliverables":{
+                "D008":{"count":1,"automatic_limit":3},
+            },
+        }))
+        (self.ctrl/"work/D008.ready").write_text("owned READY\\n")
+        self._set_evidence(self.command)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _set_evidence(self,command,result="verified"):
+        (self.ctrl/"work/D008.verify-evidence.json").write_text(json.dumps({
+            "latest":{
+                "command":command,"result":result,"executed":True,
+                "exit_code":0,"attempt":1,
+            },
+        }))
+
+    def _run(self):
+        self.report.write_text(json.dumps(self.failed))
+        with mock.patch.object(
+            controller,"acceptance_must_ids",return_value=["A012"]
+        ):
+            return controller.finalize_terminal_acceptance_failure_repair(
+                self.project,self.report,self.failed
+            )
+
+    def test_chooses_one_attested_writer_among_shared_must_owners(self):
+        result=self._run()
+        self.assertEqual(result["reopened_deliverables"],["D008"])
+        self.assertEqual(result["failed_acceptance_ids"],["A012"])
+        self.assertFalse((self.ctrl/"work/D008.ready").exists())
+        handoff=(self.ctrl/"work/D008.progress.md").read_text()
+        self.assertIn("report-formatting",handoff.lower())
+
+    def test_rejects_unattested_report_command_without_reopening(self):
+        self.failed["checks"][0]["command"]="python3 -m unittest tests.test_unknown -v"
+        with self.assertRaisesRegex(controller.ControllerError,"owner must be unique"):
+            self._run()
+        self.assertTrue((self.ctrl/"work/D008.ready").exists())
+
+    def test_rejects_failed_supervisor_verify_evidence(self):
+        self._set_evidence(self.command,result="verify-failed-1")
+        with self.assertRaisesRegex(controller.ControllerError,"owner must be unique"):
+            self._run()
+        self.assertTrue((self.ctrl/"work/D008.ready").exists())
+
+    def test_rejects_duplicate_exact_verified_writer(self):
+        self.leaves["D008-B"]={
+            "acceptance_ids":["A012"],
+            "owned_artifact_paths":["tests/test_report.py"],
+            "verify_command":self.command,
+        }
+        (self.ctrl/"IMPLEMENTATION_PLAN.guard.json").write_text(json.dumps({
+            "leaves":self.leaves,
+        }))
+        (self.ctrl/"work/D008-B.verify-evidence.json").write_text(json.dumps({
+            "latest":{
+                "command":self.command,"result":"verified",
+                "executed":True,"exit_code":0,
+            },
+        }))
+        with self.assertRaisesRegex(controller.ControllerError,"owner must be unique"):
+            self._run()
+        self.assertTrue((self.ctrl/"work/D008.ready").exists())
 
 
 if __name__ == "__main__":

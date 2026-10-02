@@ -5,9 +5,11 @@ This module deliberately derives every value from the authoritative artifacts.
 It does not write readiness, attempts, or test state.
 """
 import hashlib
+from control_policy import phase_ready_validator_id
 import json
 from pathlib import Path
 from state_io import StateCorruptionError, load_json_object
+from leaf_contract import validate_verify_adequacy
 
 
 AUTOMATIC_ATTEMPT_LIMIT = 3
@@ -31,9 +33,11 @@ MAX_UNMATERIALIZED_DISPATCH_REPLAYS = MAX_INFRASTRUCTURE_RETRY_GRANTS
 MAX_OPERATOR_INFRASTRUCTURE_ABORTS = 1
 SPLIT_STATUS_SUFFIX = ".split-status.json"
 LEAF_READY_PROTOCOL = "v2-leaf-ready-v1"
+READY_PROVENANCE_PROTOCOL = "v2-ready-provenance-v1"
 VERIFY_WAIT_PROTOCOL = "v2-verify-wait-v1"
 PHASE_READY_PROTOCOL = "V2.6.7c"
-PHASE_READY_VALIDATOR = "deterministic-v2.6.7b"
+PHASE_READY_VALIDATOR = phase_ready_validator_id()
+ACCEPTANCE_READY_VALIDATOR = phase_ready_validator_id("ACCEPTANCE.md")
 SPLIT_PROGRESS_STATES = frozenset({"split-required","splitter-active","split-retryable"})
 SPLIT_TERMINAL_STATES = frozenset({
     "split-validation-failed","splitter-failed",
@@ -69,7 +73,7 @@ def _kv(path):
         return {}
 
 
-def _base_ready(project, did):
+def _base_ready(project, did, ledger=None):
     project = Path(project)
     data = _kv(project / ".opencode-v2" / "work" / f"{did}.ready")
     if not (
@@ -84,7 +88,8 @@ def _base_ready(project, did):
         ready_attempt = int(data.get("attempt") or 0)
     except (TypeError, ValueError):
         return {}
-    ledger = load_attempts(project)
+    if ledger is None:
+        ledger = load_attempts(project)
     if ledger.get("owner") != "supervisor":
         return {}
     entry = (ledger.get("deliverables") or {}).get(did)
@@ -111,40 +116,178 @@ def valid_deliverable_id(did):
     return split_depth(did) >= 0
 
 
-def ready_info(project, did, _seen=None):
-    """A split parent is ready only after its children and original check pass."""
-    base=_base_ready(project, did)
-    if not base:
+def ready_provenance(project, did, leaf=None):
+    """Bind READY to the exact project root and current owned durable artifacts."""
+    project=Path(project).resolve(strict=False)
+    if leaf is None:
+        manifest=load_manifest(project)
+        leaf=(manifest.get("leaves") or {}).get(did,{})
+    if not isinstance(leaf,dict):
+        leaf={}
+    roots=list(leaf.get("owned_artifact_paths") or [])
+    if leaf.get("split_handoff_only") and not roots:
+        roots=[f".opencode-v2/work/{did}.progress.md"]
+    files={}
+    for raw in roots:
+        if not isinstance(raw,str) or not raw:
+            continue
+        rel=raw.rstrip("/")
+        path=project/rel
+        if not path.exists():
+            files[rel]="missing"
+        elif path.is_file():
+            try:
+                files[rel]="file:"+hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                files[rel]="unreadable"
+        elif path.is_dir():
+            files[rel]="dir"
+            for child in sorted(path.rglob("*")):
+                if not child.is_file():
+                    continue
+                crel=child.relative_to(project).as_posix()
+                if "__pycache__" in child.parts or child.suffix in {".pyc",".pyo"}:
+                    continue
+                try:
+                    files[crel]="file:"+hashlib.sha256(child.read_bytes()).hexdigest()
+                except OSError:
+                    files[crel]="unreadable"
+        else:
+            files[rel]="other"
+    material=json.dumps(files,sort_keys=True,separators=(",",":")).encode()
+    return {
+        "provenance_protocol":READY_PROVENANCE_PROTOCOL,
+        "project_sha256":hashlib.sha256(str(project).encode()).hexdigest(),
+        "artifact_sha256":hashlib.sha256(material).hexdigest(),
+    }
+
+
+def _ready_info_cached(
+    project,
+    did,
+    manifest,
+    ledger,
+    memo,
+    visiting,
+    provenance_cache,
+):
+    """Resolve one authoritative READY verdict with per-projection memoization."""
+    if did in memo:
+        return memo[did]
+    if did in visiting:
         return {}
-    manifest = load_manifest(project)
-    leaf = (manifest.get("leaves") or {}).get(did, {})
-    command=str(leaf.get("verify_command") or "") if isinstance(leaf,dict) else ""
-    if not command:
-        return {}
-    expected=str(base.get("verify_sha256") or "")
-    if expected:
-        if hashlib.sha256(command.encode()).hexdigest()!=expected:
-            return {}
-    else:
-        evidence=load_json_object(
-            Path(project)/".opencode-v2"/"work"/f"{did}.verify-evidence.json",
-            default_missing={},label=f"verify evidence {did}",
+
+    visiting.add(did)
+    try:
+        base=_base_ready(project,did,ledger)
+        if not base:
+            memo[did]={}
+            return memo[did]
+
+        manifest_leaves=(
+            manifest.get("leaves")
+            if isinstance(manifest,dict) else {}
         )
-        latest=evidence.get("latest") if isinstance(evidence,dict) else {}
-        if not (
-            isinstance(latest,dict)
-            and latest.get("result")=="verified"
-            and latest.get("command")==command
+        manifest_leaves=(
+            manifest_leaves if isinstance(manifest_leaves,dict) else {}
+        )
+        leaf=manifest_leaves.get(did,{})
+        command=(
+            str(leaf.get("verify_command") or "")
+            if isinstance(leaf,dict) else ""
+        )
+        if not command:
+            memo[did]={}
+            return memo[did]
+        if (
+            not bool(leaf.get("split_handoff_only"))
+            and validate_verify_adequacy(
+                leaf.get("done_when","") if isinstance(leaf,dict) else "",
+                command,
+            )
         ):
-            return {}
-    children = leaf.get("split_children", []) if isinstance(leaf, dict) else []
-    if not children:
+            memo[did]={}
+            return memo[did]
+
+        provenance_protocol=str(base.get("provenance_protocol") or "")
+        if provenance_protocol:
+            if provenance_protocol!=READY_PROVENANCE_PROTOCOL:
+                memo[did]={}
+                return memo[did]
+            current=provenance_cache.get(did)
+            if current is None:
+                current=ready_provenance(project,did,leaf)
+                provenance_cache[did]=current
+            if any(
+                str(base.get(key) or "")!=value
+                for key,value in current.items()
+            ):
+                memo[did]={}
+                return memo[did]
+
+        expected=str(base.get("verify_sha256") or "")
+        if expected:
+            if hashlib.sha256(command.encode()).hexdigest()!=expected:
+                memo[did]={}
+                return memo[did]
+        else:
+            evidence=load_json_object(
+                Path(project)/".opencode-v2"/"work"/f"{did}.verify-evidence.json",
+                default_missing={},label=f"verify evidence {did}",
+            )
+            latest=evidence.get("latest") if isinstance(evidence,dict) else {}
+            if not (
+                isinstance(latest,dict)
+                and latest.get("result")=="verified"
+                and latest.get("command")==command
+            ):
+                memo[did]={}
+                return memo[did]
+
+        dependencies=[]
+        for kind in ("launch_deps","contract_deps","verify_deps"):
+            values=leaf.get(kind,[]) if isinstance(leaf,dict) else []
+            if (
+                not isinstance(values,list)
+                or not all(isinstance(x,str) and x for x in values)
+            ):
+                memo[did]={}
+                return memo[did]
+            dependencies.extend(x for x in values if x in manifest_leaves)
+        for dep in dict.fromkeys(dependencies):
+            if not _ready_info_cached(
+                project,dep,manifest,ledger,memo,visiting,provenance_cache
+            ):
+                memo[did]={}
+                return memo[did]
+
+        children=leaf.get("split_children",[]) if isinstance(leaf,dict) else []
+        if children:
+            if not isinstance(children,list) or len(children)!=2:
+                memo[did]={}
+                return memo[did]
+            for child in children:
+                if not _ready_info_cached(
+                    project,child,manifest,ledger,memo,visiting,provenance_cache
+                ):
+                    memo[did]={}
+                    return memo[did]
+
+        memo[did]=base
         return base
-    seen = set() if _seen is None else set(_seen)
-    if did in seen or not isinstance(children, list) or len(children) != 2:
-        return {}
-    seen.add(did)
-    return base if all(ready_info(project, child, seen) for child in children) else {}
+    finally:
+        visiting.discard(did)
+
+
+def ready_info(project, did, _seen=None):
+    """A READY marker is authoritative only under the current live contract."""
+    project=Path(project).resolve()
+    manifest=load_manifest(project)
+    ledger=load_attempts(project)
+    visiting=set(_seen or ())
+    return _ready_info_cached(
+        project,did,manifest,ledger,{},visiting,{}
+    )
 
 
 def phase_ready(project, name, artifact, marker):
@@ -152,12 +295,17 @@ def phase_ready(project, name, artifact, marker):
     data=_kv(root/name)
     artifact_path=root/artifact
     digest=str(data.get("artifact_sha256") or "")
+    expected_validator=(
+        ACCEPTANCE_READY_VALIDATOR
+        if artifact=="ACCEPTANCE.md"
+        else PHASE_READY_VALIDATOR
+    )
     if not (
         data.get("status")=="complete"
         and data.get("protocol")==PHASE_READY_PROTOCOL
         and data.get("artifact")==artifact
         and data.get("marker")==marker
-        and data.get("validated")==PHASE_READY_VALIDATOR
+        and data.get("validated")==expected_validator
         and len(digest)==64
         and all(ch in "0123456789abcdef" for ch in digest)
         and artifact_path.is_file()
@@ -220,21 +368,67 @@ def split_status(project, did):
     )
 
 
-def _plan_contract_revision_credit_count(entry, count):
+def _plan_contract_revision_terminal_attempts(entry, count):
+    """Return attempts terminalized by unique supervisor plan transitions."""
     rows=entry.get("plan_contract_revisions") or [] if isinstance(entry,dict) else []
     if not isinstance(rows,list):
-        return 0
+        return set()
     seen=set()
+    attempts=set()
     for row in rows:
-        if not isinstance(row,dict) or row.get("source")!="supervisor-plan-contract-revision":
+        if not isinstance(row,dict):
+            continue
+        source=row.get("source")
+        if source not in {
+            "supervisor-plan-contract-revision",
+            "supervisor-dependency-contract-repair",
+        }:
             continue
         try:
             attempt=int(row.get("attempt") or 0)
         except (TypeError,ValueError):
             continue
-        if 1 <= attempt <= count:
-            seen.add((attempt,str(row.get("current_verify_sha256") or "")))
-    return len(seen)
+        if not (1 <= attempt <= count):
+            continue
+        if source=="supervisor-dependency-contract-repair":
+            old=str(row.get("producer_previous_sha256") or "")
+            new=str(row.get("producer_current_sha256") or "")
+            consumer=str(row.get("consumer_verify_sha256") or "")
+            producer=str(row.get("producer") or "")
+            if not (
+                row.get("protocol")=="v2-dependency-contract-replacement-v1"
+                and producer and len(old)==len(new)==len(consumer)==64
+                and old!=new
+                and all(c in "0123456789abcdef" for c in old+new+consumer)
+            ):
+                continue
+            key=("dependency-transition",producer,old,new,consumer)
+            if key not in seen:
+                seen.add(key)
+                attempts.add(attempt)
+            continue
+        previous=str(row.get("previous_verify_sha256") or "")
+        current=str(row.get("current_verify_sha256") or "")
+        if previous and current:
+            if previous==current:
+                continue
+            key=("transition",previous,current)
+        else:
+            # Backward compatibility for old rows written before digests
+            # were mandatory: retain their historical per-attempt meaning.
+            key=("legacy-attempt",attempt)
+        if key in seen:
+            continue
+        seen.add(key)
+        attempts.add(attempt)
+    return attempts
+
+
+def _plan_contract_revision_credit_count(entry, count):
+    # One actual completion-contract transition grants one replacement slot.
+    # Re-observing the same old->new Verify transition on a later attempt must
+    # not mint another credit indefinitely.
+    return len(_plan_contract_revision_terminal_attempts(entry,count))
 
 
 def _context_delivery_recovery_credit_count(entry, count):
@@ -397,6 +591,16 @@ def _attempt_state_v2612_original(entry):
                 except (TypeError, ValueError):
                     overrides = None; break
                 if grant != 1 or not override.get("timestamp") or not override.get("reason"):
+                    overrides = None; break
+                if override.get("revoked") is True:
+                    if not (
+                        override.get("revoked_at")
+                        and override.get("revoked_reason")
+                        and override.get("revoked_source")=="operator-cli"
+                    ):
+                        overrides = None; break
+                    continue
+                if override.get("revoked") not in (None,False):
                     overrides = None; break
                 override_grants += grant
     infrastructure_failures = entry.get("infrastructure_failures", [])
@@ -600,6 +804,16 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
             return state
         if grant!=1 or not override.get("timestamp") or not override.get("reason"):
             return state
+        if override.get("revoked") is True:
+            if not (
+                override.get("revoked_at")
+                and override.get("revoked_reason")
+                and override.get("revoked_source")=="operator-cli"
+            ):
+                return state
+            continue
+        if override.get("revoked") not in (None,False):
+            return state
         override_grants+=grant
     if override_grants != operator_grants:
         return state
@@ -797,6 +1011,15 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
                 ):
                     return state
                 continue
+            if status in {"plan_contract_replacement","bad_plan_replacement"}:
+                if (
+                    item.get("consumes_operator_grant") is not False
+                    or item.get("outcome")!=status
+                    or item.get("normalized_by")!="supervisor-credit-authority-v1"
+                    or not item.get("normalized_at")
+                ):
+                    return state
+                continue
             return state
 
         operator_record_count+=1
@@ -851,7 +1074,39 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         return state
 
     # At most one current dispatch may be unclassified while it is still live.
-    if count - len(history) not in (0, 1):
+    # Supervisor-normalized replacements and audited operator infrastructure
+    # outcomes are already terminal even though they intentionally have no
+    # failure_history row. Count those durable terminal sequences rather than
+    # raw failure-row cardinality so a later live dispatch does not make the
+    # ledger look two attempts behind.
+    terminal_sequences=set()
+    for item in history:
+        if not isinstance(item,dict):
+            continue
+        try:
+            seq=int(item.get("attempt") or 0)
+        except (TypeError,ValueError):
+            continue
+        if 1 <= seq <= count:
+            terminal_sequences.add(seq)
+    for item in operator_attempts:
+        if not isinstance(item,dict):
+            continue
+        if item.get("state") not in {
+            "plan_contract_replacement","bad_plan_replacement",
+            "infrastructure_abort","infrastructure_blocked",
+        }:
+            continue
+        try:
+            seq=int(item.get("sequence") or 0)
+        except (TypeError,ValueError):
+            continue
+        if 1 <= seq <= count:
+            terminal_sequences.add(seq)
+    terminal_sequences.update(
+        _plan_contract_revision_terminal_attempts(entry,count)
+    )
+    if count - len(terminal_sequences) not in (0, 1):
         return state
 
     excess=max(0,count-automatic_limit)
@@ -980,6 +1235,59 @@ def attempt_state(entry):
 
 
 
+PLANNER_RESTART_LIMIT=3
+RUNTIME_PLAN_REPAIR_SOURCES=frozenset({
+    "runtime-leaf-contract-challenge",
+    "runtime-split-parent-contract",
+    "control-policy-revalidation",
+})
+
+
+def planner_restart_limit(project, base_limit=PLANNER_RESTART_LIMIT):
+    """Return the bounded planner-failure ceiling for current durable repair state.
+
+    A runtime repair discovered after execution gets at most one planner failure
+    beyond the planner-failure count that existed when the repair was requested.
+    Legacy runtime packets without an explicit baseline are capped at the normal
+    base limit for compatibility, so a failed repair cannot recursively extend
+    its own budget.
+    """
+    try:
+        base=int(base_limit)
+    except (TypeError,ValueError) as exc:
+        raise StateCorruptionError("planner restart base limit is invalid") from exc
+    if base < 1:
+        raise StateCorruptionError("planner restart base limit must be positive")
+    count=planner_restarts(project)
+    path=Path(project)/".opencode-v2"/"IMPLEMENTATION_PLAN.repair.json"
+    if not path.exists():
+        return base
+    repair=load_json_object(path,label="implementation plan repair packet")
+    if (
+        repair.get("protocol")!="v2-structured-plan-repair-v1"
+        or repair.get("source") not in RUNTIME_PLAN_REPAIR_SOURCES
+        or repair.get("whole_plan") is not False
+        or not isinstance(repair.get("affected_keys"),list)
+        or not repair.get("affected_keys")
+    ):
+        return base
+    raw=repair.get("planner_restart_baseline")
+    if raw is None:
+        baseline=min(count,base)
+    else:
+        try:
+            baseline=int(raw)
+        except (TypeError,ValueError) as exc:
+            raise StateCorruptionError(
+                "runtime plan repair planner_restart_baseline is invalid"
+            ) from exc
+        if baseline < 0:
+            raise StateCorruptionError(
+                "runtime plan repair planner_restart_baseline is negative"
+            )
+    return max(base,baseline+1)
+
+
 def planner_restarts(project):
     data=load_json_object(
         Path(project) / ".opencode-v2" / "work" / "planner-restarts.json",
@@ -1066,10 +1374,18 @@ def snapshot(project):
         # Never project stale leaf state from an old guard manifest while the
         # current plan artifact is not hash-bound READY.
         leaves={}
-    attempts = load_attempts(project).get("deliverables") or {}
+    attempt_ledger=load_attempts(project)
+    attempts=attempt_ledger.get("deliverables") or {}
+    ready_memo={}
+    provenance_cache={}
+    def ready(did):
+        return _ready_info_cached(
+            project,did,manifest,attempt_ledger,ready_memo,set(),provenance_cache
+        )
+
     leaf_states = {}
     for did, leaf in sorted(leaves.items()):
-        complete = bool(ready_info(project, did))
+        complete = bool(ready(did))
         entry = attempts.get(did) if isinstance(attempts.get(did), dict) else {}
         attempt = attempt_state(entry)
         count = attempt["count"]
@@ -1079,9 +1395,9 @@ def snapshot(project):
         contract_deps = contract_deps if isinstance(contract_deps, list) else []
         verify_deps = leaf.get("verify_deps") if isinstance(leaf, dict) else []
         verify_deps = verify_deps if isinstance(verify_deps, list) else []
-        launch_missing = [dep for dep in launch_deps if not ready_info(project, dep)]
-        contract_missing = [dep for dep in contract_deps if not ready_info(project, dep)]
-        verify_missing = [dep for dep in verify_deps if not ready_info(project, dep)]
+        launch_missing = [dep for dep in launch_deps if not ready(dep)]
+        contract_missing = [dep for dep in contract_deps if not ready(dep)]
+        verify_missing = [dep for dep in verify_deps if not ready(dep)]
         verify_wait = verify_wait_info(project,did)
         verification_pending = bool(verify_wait)
         children = leaf.get("split_children", []) if isinstance(leaf, dict) else []
@@ -1141,6 +1457,7 @@ def snapshot(project):
             "split_required": split_required,
             "split_state": split_state,
             "split_generation": pending_split.get("generation", (split_marker or {}).get("generation",1)) if split_required else 0,
+            "split_claim_count": int(pending_split.get("claim_count") or 0) if split_required else 0,
             "eligible": (
                 not complete and not children and not split_required
                 and not verification_pending
@@ -1150,6 +1467,7 @@ def snapshot(project):
             ),
         }
     planner_failures = planner_restarts(project)
+    planner_limit = planner_restart_limit(project)
     tests = test_state(project)
     execution_blockers = []
     for did, leaf in leaf_states.items():
@@ -1194,7 +1512,7 @@ def snapshot(project):
             "complete": plan_complete,
             "manifest_present": bool(leaves),
             "planner_failures": planner_failures,
-            "blocked": not plan_complete and planner_failures >= 3,
+            "blocked": not plan_complete and planner_failures >= planner_limit,
         },
         "leaves": leaf_states,
         "execution_blockers": execution_blockers,
@@ -1221,6 +1539,8 @@ def resume_phase(state):
         for leaf in leaves.values()
     ):
         return "recursive-split"
+    if any(leaf.get("eligible") for leaf in leaves.values()):
+        return "execution"
     if state.get("execution_blockers"):
         return "execution-blocked"
     if any(not leaf.get("complete") for leaf in leaves.values()):

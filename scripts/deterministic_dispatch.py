@@ -23,6 +23,9 @@ def select_actions(decision):
     scheduler=decision.get("scheduler") if isinstance(decision.get("scheduler"),dict) else {}
     active=int(scheduler.get("active_workers") or 0)
     available=int(scheduler.get("available_worker_slots") or 0)
+    replayable_reserved=set(
+        scheduler.get("replayable_reserved_deliverables") or []
+    )
     eligible=decision.get("eligible") if isinstance(decision.get("eligible"),list) else []
     roles=decision.get("eligible_roles") if isinstance(decision.get("eligible_roles"),dict) else {}
     blockers=decision.get("execution_blockers") if isinstance(decision.get("execution_blockers"),list) else []
@@ -67,16 +70,27 @@ def select_actions(decision):
             did=str(item.get("deliverable") or "")
             state=str(item.get("split_state") or "")
             generation=int(item.get("split_generation") or 0)
+            claim_count=int(item.get("split_claim_count") or 0)
             if state in SPLIT_LAUNCH_STATES:
-                launches.append(action("launch",agent="task-splitter",deliverable=did,generation=generation))
+                launches.append(action(
+                    "launch",agent="task-splitter",deliverable=did,
+                    generation=generation,claim=claim_count+1,
+                ))
             elif state in SPLIT_WAIT_STATES:
                 waiting=True
             elif state in SPLIT_TERMINAL_STATES:
                 return [action("blocked",reason=state,deliverable=did)]
             elif did:
                 return [action("blocked",reason=f"unknown-split-state:{state}",deliverable=did)]
-        if eligible and available>0:
-            for did in eligible[:min(available,len(eligible))]:
+        replay_ids=[did for did in eligible if did in replayable_reserved]
+        fresh_ids=[did for did in eligible if did not in replayable_reserved]
+        for did in replay_ids:
+            role=str(roles.get(did) or "")
+            if not role:
+                return [action("blocked",reason="eligible-role-missing",deliverable=did)]
+            launches.append(action("launch",agent=role,deliverable=did))
+        if fresh_ids and available>0:
+            for did in fresh_ids[:min(available,len(fresh_ids))]:
                 role=str(roles.get(did) or "")
                 if not role:
                     return [action("blocked",reason="eligible-role-missing",deliverable=did)]
@@ -86,14 +100,21 @@ def select_actions(decision):
         return [action("rescan")]
 
     if phase=="execution":
-        if eligible and available>0:
-            out=[]
-            for did in eligible[:min(available,len(eligible))]:
+        replay_ids=[did for did in eligible if did in replayable_reserved]
+        fresh_ids=[did for did in eligible if did not in replayable_reserved]
+        out=[]
+        for did in replay_ids:
+            role=str(roles.get(did) or "")
+            if not role:
+                return [action("blocked",reason="eligible-role-missing",deliverable=did)]
+            out.append(action("launch",agent=role,deliverable=did))
+        if available>0:
+            for did in fresh_ids[:min(available,len(fresh_ids))]:
                 role=str(roles.get(did) or "")
                 if not role:
                     return [action("blocked",reason="eligible-role-missing",deliverable=did)]
                 out.append(action("launch",agent=role,deliverable=did))
-            return out
+        if out: return out
         if active>0: return [action("wait")]
         return [action("rescan")]
 

@@ -185,7 +185,9 @@ repair. Repair the topology once by merging or removing that SHOULD-only leaf
 and updating dependency references.
 
 `owned_artifacts` is an array of raw project-relative paths, not Markdown.
-Use `[]` only for a genuinely read-only `tester`.
+A directory ownership root MUST end in `/` (for example `reference/fixtures/`);
+without the trailing slash the path means one exact file and does NOT authorize
+descendant files. Use `[]` only for a genuinely read-only `tester`.
 
 ### Supervisor-reserved ownership boundary — HARD RULE
 
@@ -294,6 +296,10 @@ or `systemctl` remediation.
 - Numeric bounds/enums/units must come from ACCEPTANCE, reference foundation,
   a documented format, or a preceding probe contract.
 - Do not invent a narrower/wider requirement in Verify than Outcome/Done-when.
+- If Done-when requires runtime behavior (for example launching/serving,
+  rendering, driving the app, comparing values, or assertions), Verify MUST
+  execute that relevant behavior. Syntax checks, file existence, grep, and
+  static source inspection alone are insufficient for a behavioral Done-when.
 - If Verify needs another leaf's artifact, declare the appropriate dependency.
 - Unknown current external API/SDK/CLI contracts must come from durable verified
   evidence or a bounded probe, never model memory.
