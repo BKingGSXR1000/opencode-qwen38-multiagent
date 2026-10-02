@@ -2538,6 +2538,80 @@ class RecursiveSplitControllerIntegrationTests(unittest.TestCase):
         self.assertEqual(supervisor.claim_splitter("D001","claim-seven"),(True,"claimed"))
 
 
+class InlinePythonVerifyProvenanceTests(unittest.TestCase):
+    """Reject a helper owned only by a downstream child before any worker runs."""
+
+    @classmethod
+    def setUpClass(cls):
+        import runpy
+        cls.guard=runpy.run_path(
+            str(Path(__file__).resolve().with_name("control-guard.py"))
+        )
+
+    def test_inline_importlib_and_runpy_paths_are_real_verify_inputs(self):
+        bad=(
+            'cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" && '
+            'python3 -c "import importlib.util as u; '
+            "s=u.spec_from_file_location('p','tests/_verify_core.py').loader; "
+            's.exec_module(u.module_from_spec(s))"'
+        )
+        self.assertIn(
+            "tests/_verify_core.py",
+            self.guard["verify_referenced_paths"](bad),
+        )
+        self.assertIn(
+            "tests/_verify_core.py",
+            self.guard["verify_referenced_paths"](
+                "python3 -c \"import runpy; runpy.run_path('tests/_verify_core.py')\""
+            ),
+        )
+
+    def test_downstream_owned_verify_helper_is_rejected(self):
+        command=(
+            'python3 -c "import importlib.util as u; '
+            "spec=u.spec_from_file_location('p','tests/_verify_core.py')" + '"'
+        )
+        with tempfile.TemporaryDirectory() as td:
+            leaves={
+                "D001":{
+                    "verify_command":command,
+                    "owned_artifact_paths":["microadd/core.py"],
+                    "launch_deps":[],"contract_deps":[],"verify_deps":[],
+                },
+                "D003":{
+                    "verify_command":"python3 -m unittest tests.test_core -v",
+                    "owned_artifact_paths":["tests/_verify_core.py"],
+                    "launch_deps":["D001"],"contract_deps":[],"verify_deps":[],
+                },
+            }
+            errors=self.guard["verify_path_provenance_errors"](
+                Path(td),leaves
+            )
+        self.assertEqual(len(errors),1,errors)
+        self.assertIn("D001",errors[0])
+        self.assertIn("tests/_verify_core.py",errors[0])
+        self.assertIn("D003",errors[0])
+        self.assertIn("not a declared dependency",errors[0])
+
+    def test_loader_is_not_a_modulespec(self):
+        bad=(
+            'python3 -c "import importlib.util as u; '
+            "s=u.spec_from_file_location('p','tests/_verify_core.py').loader; "
+            's.exec_module(u.module_from_spec(s))"'
+        )
+        errors=self.guard["verify_inline_structural_errors"]("D001",bad)
+        self.assertEqual(len(errors),1,errors)
+        self.assertIn("module_from_spec",errors[0])
+        good=(
+            'python3 -c "import importlib.util as u; '
+            "spec=u.spec_from_file_location('p','tests/_verify_core.py'); "
+            'm=u.module_from_spec(spec); spec.loader.exec_module(m)"'
+        )
+        self.assertEqual(
+            self.guard["verify_inline_structural_errors"]("D001",good),[]
+        )
+
+
 class SharedAcceptanceRemediationOwnerTests(unittest.TestCase):
     """A failed shared MUST must select only the exact verified executable owner."""
 

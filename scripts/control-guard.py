@@ -342,9 +342,17 @@ def _python_inline_verify_paths(code: str):
             name=fn.id
         elif isinstance(fn,ast.Attribute):
             name=fn.attr
-        if name not in {"open","Path","glob","iglob"}:
+        # Python code can load a verifier by importlib or runpy without
+        # opening it with open()/Path(). The literal source path is still a
+        # hard Verify dependency and must be owned by this leaf or an earlier
+        # declared prerequisite, never by a downstream test-builder.
+        offsets={"spec_from_file_location":1,"SourceFileLoader":1}
+        if name not in {"open","Path","glob","iglob","run_path",*offsets}:
             continue
-        arg=node.args[0]
+        position=offsets.get(name,0)
+        if len(node.args)<=position:
+            continue
+        arg=node.args[position]
         if not isinstance(arg,ast.Constant) or not isinstance(arg.value,str):
             continue
         candidate=_normalize_verify_path_candidate(
@@ -379,6 +387,68 @@ def verify_referenced_paths(command: str):
                 if candidate not in out:
                     out.append(candidate)
     return out
+
+
+def verify_inline_structural_errors(did: str, command: str):
+    """Reject a provably invalid Python importlib Verify invocation."""
+    try:
+        tokens=shlex.split(command or "",posix=True)
+    except ValueError:
+        return []
+    errors=[]
+    for index in range(len(tokens)-2):
+        if not (
+            re.fullmatch(r"python(?:3(?:\\.\\d+)?)?",Path(tokens[index]).name.lower())
+            and tokens[index+1]=="-c"
+        ):
+            continue
+        try:
+            tree=ast.parse(tokens[index+2])
+        except (SyntaxError,ValueError):
+            # Existing lexical/static adequacy checks own other syntax issues.
+            continue
+        assigned={}
+        for node in ast.walk(tree):
+            if isinstance(node,ast.Assign):
+                for target in node.targets:
+                    if isinstance(target,ast.Name):
+                        assigned.setdefault(target.id,[]).append(node.value)
+        loader_variables=set()
+        for name,values in assigned.items():
+            if len(values)!=1:
+                continue
+            value=values[0]
+            if isinstance(value,ast.Attribute) and value.attr=="loader":
+                inner=value.value
+                if (
+                    isinstance(inner,ast.Call)
+                    and isinstance(inner.func,(ast.Name,ast.Attribute))
+                    and (inner.func.id if isinstance(inner.func,ast.Name)
+                         else inner.func.attr)=="spec_from_file_location"
+                ):
+                    loader_variables.add(name)
+        for node in ast.walk(tree):
+            if not isinstance(node,ast.Call) or not node.args:
+                continue
+            fn=node.func
+            name=fn.id if isinstance(fn,ast.Name) else (
+                fn.attr if isinstance(fn,ast.Attribute) else ""
+            )
+            if name!="module_from_spec":
+                continue
+            arg=node.args[0]
+            if (
+                isinstance(arg,ast.Name) and arg.id in loader_variables
+            ) or (
+                isinstance(arg,ast.Attribute) and arg.attr=="loader"
+            ):
+                errors.append(
+                    f"{did}: Verify passes an importlib loader to module_from_spec; "
+                    "module_from_spec requires the ModuleSpec returned by "
+                    "spec_from_file_location"
+                )
+                break
+    return errors
 
 
 def _dependency_closure_ids(leaves: dict, did: str):
@@ -1110,6 +1180,13 @@ def validate_plan(project: Path, finalize=False):
         errors.extend(parse_errors)
         leaves = merge_split_leaf_overlay(project, leaves)
         errors.extend(ownership_overlap_errors(leaves))
+        for did,leaf in leaves.items():
+            if isinstance(leaf,dict):
+                errors.extend(
+                    verify_inline_structural_errors(
+                        did,str(leaf.get("verify_command") or "")
+                    )
+                )
         errors.extend(verify_path_provenance_errors(project, leaves))
         acceptance = ctrl / "ACCEPTANCE.md"
         try:
