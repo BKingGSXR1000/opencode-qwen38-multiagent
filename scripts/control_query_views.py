@@ -13,6 +13,7 @@ from pathlib import Path
 from state_io import atomic_write_text
 from control_policy import control_policy_epoch
 from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
+import project_memory
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
@@ -334,12 +335,20 @@ def _execution_contract_correction(project, did):
     }
 
 
-def build_leaf_contexts(project, manifest):
+def build_leaf_contexts(project, manifest, snapshot=None):
     # Project canonical leaf contracts into compact worker-readable packets.
     project = Path(project)
     manifest = manifest if isinstance(manifest, dict) else {}
     leaves = manifest.get("leaves") if isinstance(manifest.get("leaves"), dict) else {}
     acceptance = _acceptance_contract(project)
+    # A memory marker may be installed before the very first planner starts.
+    # The pre-plan manifest is intentionally empty, not corrupt; retain the
+    # normal Acceptance/planning path and activate only after a guarded plan
+    # has executable leaves. refresh() itself still rejects malformed input.
+    memory = (
+        project_memory.refresh(project, manifest, acceptance, snapshot=snapshot)
+        if leaves else None
+    )
     contexts = {}
 
     for did, leaf in sorted(leaves.items()):
@@ -429,6 +438,11 @@ def build_leaf_contexts(project, manifest):
                 if parent_id else {}
             ),
         }
+
+        if memory is not None:
+            packet["selective_project_memory"] = project_memory.select(
+                project, did, memory
+            )
 
         if ".opencode-v2/TEST_CHECKS.json" in packet["owned_artifact_paths"]:
             packet["test_checks_contract"] = {
@@ -634,7 +648,7 @@ def materialize_control_query_views(project, snapshot, manifest, source_rendered
     leaf_root.mkdir(parents=True, exist_ok=True)
 
     views, leaf_views = build_query_views(snapshot, manifest, source_rendered, project=project)
-    leaf_contexts = build_leaf_contexts(project, manifest)
+    leaf_contexts = build_leaf_contexts(project, manifest, snapshot=snapshot)
 
     # Publish leaf state + contract packets before decision.json. Therefore any
     # newly eligible leaf visible in the latest decision already has its packet.

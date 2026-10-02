@@ -31,6 +31,9 @@ _SUPERVISOR_RUNTIME_FILES = (
     "worker_sandbox.py",
     "watchdog_telemetry.py",
     "state_io.py",
+    # Context-only optional projections must be reloaded without revoking the
+    # canonical plan/Acceptance contract when implementation internals change.
+    "project_memory.py",
 )
 
 
