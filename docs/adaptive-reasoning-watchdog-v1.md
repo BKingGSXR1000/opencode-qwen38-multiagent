@@ -97,3 +97,29 @@ NEXT: a matched long-horizon quality/speed comparison with and without
 selective project memory, then tightly bounded enforcement testing with
 fault-injected reasoning loops and false-positive metrics. No Jupiter product
 implementation is included: all application tasks are disposable harness tests.
+
+## Verified observation and action-clock continuation (2 October 2026)
+
+The isolated tasklog memory-enabled canary at
+`/home/bking/AI/a2-e2e/20261002-adaptive-watchdog-observe-canary/project`
+reached independent `ACCEPTANCE_PASS`: all 23 MUST criteria passed, 13
+supervisor-verified current READY checkpoints and 70 selective-memory events.
+Its project supervisor had `V2_ADAPTIVE_REASONING_MODE=observe` set. The corrected
+legacy/new JSON decoder recovered 289 observation records from 36 sessions
+in this run; no would-interrupt event or actual adaptive interruption occurred.
+Implementation-worker samples mostly contained no visible reasoning at the
+five-second polling points. Four large visible reasoning samples belonged to
+the implementation planner, intentionally governed by its existing separate
+retirement policy. The live run establishes compatibility, **not** an
+empirical false-positive rate for enforcement.
+
+A subsequent action-clock fix persists `action_reasoning_chars` across
+`session.next.step.started` events that have no tool invocation and keys a
+connected SSE session's action timer by actual `action_seq` and successful
+tool count rather than assistant message ID. A reasoning-only continuation
+therefore cannot evade the budget simply by starting a new message. On a
+tool invocation, completion or failure, the action counter resets. If SSE is
+unavailable, the earlier conservative per-message clock is retained. Two
+additional tests cover multi-step reasoning without actions and live-clock
+stability across message-ID rollover. Enforce mode remains opt-in and has
+not yet been used to interrupt a real Qwen child.

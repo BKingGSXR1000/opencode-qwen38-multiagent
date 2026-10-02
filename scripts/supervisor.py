@@ -16395,13 +16395,22 @@ def adaptive_reasoning_step(
     leaf=(load_manifest().get("leaves") or {}).get(did,{})
     state=adaptive_watch.setdefault(sid,{})
     current=now_mono if now_mono is not None else time.monotonic()
+    # When SSE is connected, use its tool-action sequence rather than the
+    # assistant message ID. Otherwise a reasoning-only continuation could
+    # reset the clock on every new model step without ever using a tool.
+    streaming=bool(live and live.get("connected"))
     action_key=(
-        shape.get("message_id") or "",
-        shape.get("last_tool_id") or "",
+        (f"sse:{sid}" if streaming else (shape.get("message_id") or "")),
+        (str(int(live.get("action_seq") or 0)) if streaming
+         else (shape.get("last_tool_id") or "")),
         int((live or {}).get("tool_successes") or 0),
     )
+    cumulative=max(
+        int(reasoning or 0),
+        int((live or {}).get("action_reasoning_chars") or 0),
+    ) if streaming else reasoning
     age,chars=adaptive_reasoning.action_clock(
-        state,action_key,current,reasoning,
+        state,action_key,current,cumulative,
         observable=can_watch,tool_running=tool_running
     )
     verdict=adaptive_reasoning.decision(
@@ -16450,6 +16459,12 @@ def reduce_live_event(state,event,now=None):
     progressed=False
     if kind=="session.next.reasoning.delta":
         state["reasoning"]=state.get("reasoning",0)+len(delta)
+        # Independent from the legacy per-step counter. A new model step
+        # without any tool is NOT useful action, so retain the cumulative
+        # visible reasoning until tool.called/tool.success/tool.failed.
+        state["action_reasoning_chars"]=int(
+            state.get("action_reasoning_chars") or 0
+        )+len(delta)
         adaptive_reasoning.append_reasoning_tail(state,delta)
         progressed=bool(delta)
     elif kind=="session.next.text.delta":
@@ -16457,19 +16472,23 @@ def reduce_live_event(state,event,now=None):
         progressed=bool(delta)
     elif kind=="session.next.tool.called":
         state["tool_running"]=True
+        state["action_seq"]=int(state.get("action_seq") or 0)+1
+        state["action_reasoning_chars"]=0
         progressed=True
     elif kind=="session.next.tool.success":
         state.update(reasoning=0,text=0,tool_running=False)
+        state["action_reasoning_chars"]=0
         progressed=True
     elif kind=="session.next.tool.failed":
         state["tool_running"]=False
+        state["action_reasoning_chars"]=0
         progressed=True
     elif kind=="session.next.step.started":
         state.update(reasoning=0,text=0,tool_running=False)
         progressed=True
     if kind in {
         "session.next.tool.called","session.next.tool.success",
-        "session.next.tool.failed","session.next.step.started"
+        "session.next.tool.failed"
     }:
         adaptive_reasoning.clear_reasoning_tail(state)
     state["last_event"]=now
@@ -16493,6 +16512,7 @@ def ensure_event_watch(sid):
     stop=threading.Event()
     created=time.monotonic()
     state={"reasoning":0,"text":0,"tool_running":False,"tool_successes":0,
+           "action_reasoning_chars":0,"action_seq":0,
            "connected":False,"last_event":created,"last_progress":created,
            "progress_seq":0,"stop":stop}
     event_watch[sid]=state

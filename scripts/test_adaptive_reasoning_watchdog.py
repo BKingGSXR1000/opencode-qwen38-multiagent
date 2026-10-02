@@ -288,6 +288,69 @@ class AdaptiveReasoningWatchdogTests(unittest.TestCase):
             self.assertNotIn(sid,supervisor.adaptive_watch)
             interrupt.assert_not_called()
 
+    def test_stream_counter_persists_across_reasoning_only_model_steps(self):
+        state={"reasoning":0,"text":0,"progress_seq":0,"connected":True,
+               "action_reasoning_chars":0,"action_seq":0,"tool_successes":0}
+        supervisor.reduce_live_event(
+            state,{"type":"session.next.reasoning.delta",
+                   "data":{"delta":"first "*600}},now=100,
+        )
+        self.assertEqual(state["action_reasoning_chars"],3600)
+        supervisor.reduce_live_event(
+            state,{"type":"session.next.step.started","data":{}},now=101,
+        )
+        self.assertEqual(state["reasoning"],0)
+        self.assertEqual(state["action_reasoning_chars"],3600)
+        supervisor.reduce_live_event(
+            state,{"type":"session.next.reasoning.delta",
+                   "data":{"delta":"second "*600}},now=102,
+        )
+        self.assertEqual(state["action_reasoning_chars"],7800)
+        supervisor.reduce_live_event(
+            state,{"type":"session.next.tool.called","data":{}},now=103,
+        )
+        self.assertEqual(state["action_reasoning_chars"],0)
+        self.assertEqual(state["action_seq"],1)
+        self.assertNotIn("reasoning_tail",state)
+        supervisor.reduce_live_event(
+            state,{"type":"session.next.tool.success","data":{}},now=104,
+        )
+        self.assertEqual(state["action_reasoning_chars"],0)
+
+    def test_supervisor_sse_action_clock_ignores_message_id_only_rollover(self):
+        sid="ses-test-action-stability"
+        supervisor.adaptive_watch.pop(sid,None)
+        leaf={"leaves":{"D001":{
+            "complexity":"S","repeated_operations":1,
+        }}}
+        live={"connected":True,"tool_successes":0,"action_seq":0,
+              "action_reasoning_chars":0}
+        shape={"message_id":"step-one","last_tool_id":""}
+        with mock.patch.object(supervisor,"ADAPTIVE_REASONING_MODE","observe"), \
+             mock.patch.object(supervisor,"load_manifest",return_value=leaf), \
+             mock.patch.object(supervisor,"log"), \
+             mock.patch.object(supervisor,"csv"):
+            kwargs=dict(sid=sid,agent="implementer",did="D001",key=("", ""),
+                        live=live,can_watch=True,tool_running=False,
+                        compaction_active=False,backend_snapshot={},
+                        watch_state={"aborted_key":None})
+            first=supervisor.adaptive_reasoning_step(
+                shape=shape,reasoning=0,now_mono=100,**kwargs)
+            shape["message_id"]="step-two"
+            live["action_reasoning_chars"]=7000
+            second=supervisor.adaptive_reasoning_step(
+                shape=shape,reasoning=4000,now_mono=180,**kwargs)
+            self.assertFalse(first["abort"])
+            self.assertTrue(second["abort"])
+            self.assertGreaterEqual(second["reasoning_chars_since_action"],7000)
+            live["action_seq"]+=1
+            live["action_reasoning_chars"]=0
+            third=supervisor.adaptive_reasoning_step(
+                shape=shape,reasoning=0,now_mono=181,**kwargs)
+            self.assertFalse(third["abort"])
+            self.assertEqual(third["action_age"],0)
+        supervisor.adaptive_watch.pop(sid,None)
+
     def test_runtime_reload_fingerprint_tracks_new_module(self):
         from control_policy import reexec_source_paths
         names = {p.name for p in reexec_source_paths()}
