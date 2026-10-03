@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse,base64,contextlib,copy,hashlib,json,os,re,shlex,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
+import argparse,ast,base64,contextlib,copy,hashlib,json,os,re,shlex,sqlite3,subprocess,sys,threading,time,traceback,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 from acceptance_contract import must_acceptance_ids
 from control_state import (phase_ready, ready_info as state_ready_info,
@@ -2498,13 +2498,12 @@ def reconcile_split_transactions():
 
 
 def _split_unittest_target_reference_errors(command, prospective_paths):
-    """Reject definitely-local unittest targets that cannot exist for this child.
+    """Reject definitely-local unittest targets that cannot resolve statically.
 
-    This is a narrow static check, not Python import execution. Unittest
-    discover is unaffected. A dotted target is considered definitely local
-    only when one of its module components is test-like (test*, tests). Such a
-    target must resolve to an existing project .py/package prefix or to a .py
-    path the proposed child itself owns/creates.
+    This never imports or executes project code. Discovery mode is unaffected.
+    For explicit test-like dotted targets, resolve the longest existing local
+    module prefix (or a module the child itself will create). Existing modules
+    are parsed with ast and any remaining Class/method path must exist.
     """
     try:
         lexer=shlex.shlex(
@@ -2523,6 +2522,39 @@ def _split_unittest_target_reference_errors(command, prospective_paths):
     }
     errors=[]
     shell_ops={";","&&","||","&","|"}
+
+    def resolve(parts):
+        for n in range(len(parts),0,-1):
+            rel="/".join(parts[:n])
+            candidates=(rel+".py",rel+"/__init__.py")
+            if any(candidate in prospective for candidate in candidates):
+                return "prospective",None,parts[n:]
+            if PROJECT:
+                for candidate in candidates:
+                    path=project/candidate
+                    if path.is_file():
+                        return "existing",path,parts[n:]
+        return "",None,parts
+
+    def ast_path_exists(path,remainder):
+        if not remainder:
+            return True,""
+        try:
+            tree=ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError,UnicodeError,SyntaxError) as exc:
+            return False,"local unittest module cannot be parsed: "+type(exc).__name__
+        nodes=list(tree.body)
+        for segment in remainder:
+            match=next((
+                node for node in nodes
+                if isinstance(node,(ast.ClassDef,ast.FunctionDef,ast.AsyncFunctionDef))
+                and node.name==segment
+            ),None)
+            if match is None:
+                return False,"missing local unittest attribute: "+segment
+            nodes=list(match.body) if isinstance(match,ast.ClassDef) else []
+        return True,""
+
     for i in range(max(0,len(tokens)-2)):
         base=tokens[i].rsplit("/",1)[-1]
         if base not in {"python","python3"}:
@@ -2535,6 +2567,9 @@ def _split_unittest_target_reference_errors(command, prospective_paths):
             j+=1
             if target=="discover":
                 break
+            if target=="-k":
+                j+=1
+                continue
             if target.startswith("-"):
                 continue
             if "/" in target or chr(92) in target:
@@ -2544,22 +2579,23 @@ def _split_unittest_target_reference_errors(command, prospective_paths):
                 x=="tests" or x.startswith("test") for x in parts
             ):
                 continue
-            resolved=False
-            for n in range(len(parts),0,-1):
-                rel="/".join(parts[:n])
-                candidates=(rel+".py",rel+"/__init__.py")
-                if any(candidate in prospective for candidate in candidates):
-                    resolved=True
-                    break
-                if PROJECT and any((project/candidate).is_file() for candidate in candidates):
-                    resolved=True
-                    break
-            if not resolved:
+            kind,path,remainder=resolve(parts)
+            if not kind:
                 errors.append(
                     "split child unittest target is definitely local but has no "
                     "existing/prospective importable module: "+target
                 )
+                continue
+            if kind=="prospective":
+                continue
+            ok,detail=ast_path_exists(path,remainder)
+            if not ok:
+                errors.append(
+                    "split child unittest target has invalid local attribute path: "
+                    +target+" ("+detail+")"
+                )
     return errors
+
 
 
 def validate_split_proposal(parent, proposals, request=None):

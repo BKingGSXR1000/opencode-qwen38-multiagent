@@ -8064,7 +8064,7 @@ class SplitStateMachineTests(unittest.TestCase):
     def test_split_rejects_nonexistent_local_unittest_module_target(self):
         (self.project/"tests").mkdir(exist_ok=True)
         (self.project/"tests"/"test_summary.py").write_text(
-            "import unittest\\n"
+            "import unittest\n"
         )
         proposals=self.proposals()
         proposals[0]["verify_command"]="python3 -m unittest test_summary.SummarizeTests -v"
@@ -8077,7 +8077,7 @@ class SplitStateMachineTests(unittest.TestCase):
 
     def test_split_accepts_discover_and_prospective_owned_unittest_module(self):
         (self.project/"tests").mkdir(exist_ok=True)
-        (self.project/"tests"/"test_summary.py").write_text("import unittest\n")
+        (self.project/"tests"/"test_summary.py").write_text("import unittest\nclass SummarizeTests(unittest.TestCase):\n    def test_ok(self): pass\n")
         proposals=self.proposals()
         proposals[0]["verify_command"]="python3 -m unittest discover -s tests -v"
         proposals[0]["done_when"]="discovered tests pass"
@@ -8095,6 +8095,33 @@ class SplitStateMachineTests(unittest.TestCase):
                 "python3 -m unittest tests.test_summary.SummarizeTests -v",
                 [],
             ),
+            [],
+        )
+
+    def test_split_rejects_invalid_existing_unittest_attribute_path(self):
+        root=self.project/"spec_tests"
+        root.mkdir(exist_ok=True)
+        (root/"__init__.py").write_text("")
+        (root/"test_summary.py").write_text(
+            "import unittest\n"
+            "class SummaryTests(unittest.TestCase):\n"
+            "    def test_mixed(self): pass\n"
+        )
+        bad=(
+            "python3 -m unittest "
+            "spec_tests.test_summary.test_summary.SummaryTests.test_mixed -v"
+        )
+        errors=supervisor._split_unittest_target_reference_errors(bad,[])
+        self.assertEqual(len(errors),1)
+        self.assertIn("invalid local attribute path",errors[0])
+        self.assertIn("missing local unittest attribute: test_summary",errors[0])
+
+        good=(
+            "python3 -m unittest "
+            "spec_tests.test_summary.SummaryTests.test_mixed -v"
+        )
+        self.assertEqual(
+            supervisor._split_unittest_target_reference_errors(good,[]),
             [],
         )
 
