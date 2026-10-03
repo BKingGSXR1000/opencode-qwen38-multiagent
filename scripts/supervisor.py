@@ -2497,6 +2497,71 @@ def reconcile_split_transactions():
                     apply_split_transaction(parent,txn)
 
 
+def _split_unittest_target_reference_errors(command, prospective_paths):
+    """Reject definitely-local unittest targets that cannot exist for this child.
+
+    This is a narrow static check, not Python import execution. Unittest
+    discover is unaffected. A dotted target is considered definitely local
+    only when one of its module components is test-like (test*, tests). Such a
+    target must resolve to an existing project .py/package prefix or to a .py
+    path the proposed child itself owns/creates.
+    """
+    try:
+        lexer=shlex.shlex(
+            str(command or ""),posix=True,punctuation_chars=";&|"
+        )
+        lexer.whitespace_split=True
+        lexer.commenters=""
+        tokens=list(lexer)
+    except ValueError:
+        return []
+    project=Path(PROJECT).resolve() if PROJECT else Path()
+    prospective={
+        str(Path(str(raw))).replace(chr(92),"/").lstrip("./")
+        for raw in (prospective_paths or [])
+        if isinstance(raw,str) and raw.strip()
+    }
+    errors=[]
+    shell_ops={";","&&","||","&","|"}
+    for i in range(max(0,len(tokens)-2)):
+        base=tokens[i].rsplit("/",1)[-1]
+        if base not in {"python","python3"}:
+            continue
+        if tokens[i+1:i+3]!=["-m","unittest"]:
+            continue
+        j=i+3
+        while j<len(tokens) and tokens[j] not in shell_ops:
+            target=tokens[j]
+            j+=1
+            if target=="discover":
+                break
+            if target.startswith("-"):
+                continue
+            if "/" in target or chr(92) in target:
+                continue
+            parts=[x for x in target.split(".") if x]
+            if not parts or not any(
+                x=="tests" or x.startswith("test") for x in parts
+            ):
+                continue
+            resolved=False
+            for n in range(len(parts),0,-1):
+                rel="/".join(parts[:n])
+                candidates=(rel+".py",rel+"/__init__.py")
+                if any(candidate in prospective for candidate in candidates):
+                    resolved=True
+                    break
+                if PROJECT and any((project/candidate).is_file() for candidate in candidates):
+                    resolved=True
+                    break
+            if not resolved:
+                errors.append(
+                    "split child unittest target is definitely local but has no "
+                    "existing/prospective importable module: "+target
+                )
+    return errors
+
+
 def validate_split_proposal(parent, proposals, request=None):
     """Validate one materially-shrinking two-child split.
 
@@ -2583,6 +2648,12 @@ def validate_split_proposal(parent, proposals, request=None):
             contract_errors.extend(validate_verify_adequacy(
                 proposal.get("done_when",""), proposal["verify_command"]
             ))
+            contract_errors.extend(
+                _split_unittest_target_reference_errors(
+                    proposal["verify_command"],
+                    list(owned_list)+list(creates_or_updates),
+                )
+            )
             if contract_errors:
                 raise ValueError("; ".join(contract_errors))
             parent_verify=str(leaf.get("verify_command") or "").strip()

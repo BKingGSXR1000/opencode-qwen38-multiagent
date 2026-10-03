@@ -8061,6 +8061,43 @@ class SplitStateMachineTests(unittest.TestCase):
             refreshed["decomposition_policy"]["parent_verify_invalid_precedence"],
         )
 
+    def test_split_rejects_nonexistent_local_unittest_module_target(self):
+        (self.project/"tests").mkdir(exist_ok=True)
+        (self.project/"tests"/"test_summary.py").write_text(
+            "import unittest\\n"
+        )
+        proposals=self.proposals()
+        proposals[0]["verify_command"]="python3 -m unittest test_summary.SummarizeTests -v"
+        proposals[0]["done_when"]="summary behavior passes"
+        with self.assertRaisesRegex(
+            ValueError,
+            "definitely local but has no existing/prospective importable module",
+        ):
+            supervisor.validate_split_proposal("D001",proposals,request={})
+
+    def test_split_accepts_discover_and_prospective_owned_unittest_module(self):
+        (self.project/"tests").mkdir(exist_ok=True)
+        (self.project/"tests"/"test_summary.py").write_text("import unittest\n")
+        proposals=self.proposals()
+        proposals[0]["verify_command"]="python3 -m unittest discover -s tests -v"
+        proposals[0]["done_when"]="discovered tests pass"
+        supervisor.validate_split_proposal("D001",proposals,request={})
+
+        self.assertEqual(
+            supervisor._split_unittest_target_reference_errors(
+                "python3 -m unittest test_new.NewTests -v",
+                ["test_new.py"],
+            ),
+            [],
+        )
+        self.assertEqual(
+            supervisor._split_unittest_target_reference_errors(
+                "python3 -m unittest tests.test_summary.SummarizeTests -v",
+                [],
+            ),
+            [],
+        )
+
     def test_final_test_split_writer_cannot_weaken_run_checks_verify(self):
         self.parent.update({
             "owned_artifacts":"`.opencode-v2/TEST_CHECKS.json`",
