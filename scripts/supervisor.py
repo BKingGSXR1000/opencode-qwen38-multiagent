@@ -16376,6 +16376,27 @@ def planner_context_reason(agent,context_input,tool_running=False):
         f"ceiling={PLANNER_CONTEXT_INPUT_CEILING}"
     )
 
+def record_adaptive_watchdog_event(sid,agent,did,verdict,outcome,backend):
+    """Persist the exact policy decision immediately; polling may miss it.
+
+    Telemetry failure must never convert a confirmed HTTP interrupt into an
+    unclassified worker or grant an extra retry. Existing supervisor event/CSV
+    logs and the durable abort-intent ledger remain the control authority.
+    """
+    row={
+        "session":sid,"directory":PROJECT,"agent":agent,"deliverable":did,
+        "adaptive_reasoning_mode":ADAPTIVE_REASONING_MODE,
+        "adaptive_event":outcome,"adaptive_reasoning":dict(verdict),
+    }
+    try:
+        emit_watchdog_telemetry(sid,row,backend,force=True)
+    except OSError as exc:
+        log(
+            f"ADAPTIVE_REASONING_TELEMETRY_FAILED session={sid} "
+            f"event={outcome} error_type={type(exc).__name__}"
+        )
+
+
 def adaptive_reasoning_step(
     sid,agent,did,key,shape,live,reasoning,*,
     can_watch,tool_running,compaction_active,backend_snapshot,watch_state,
@@ -16433,6 +16454,9 @@ def adaptive_reasoning_step(
         )
         if ADAPTIVE_REASONING_MODE=="observe":
             state["reported_reason"]=candidate
+            record_adaptive_watchdog_event(
+                sid,agent,did,verdict,"would-interrupt",backend_snapshot
+            )
             log("ADAPTIVE_REASONING_WOULD_INTERRUPT "+detail)
             csv("ADAPTIVE_REASONING_WOULD_INTERRUPT",sid,agent,detail)
         elif abort_session(sid,"runaway adaptive_reasoning "+detail,agent):
@@ -16440,6 +16464,9 @@ def adaptive_reasoning_step(
             state["reported_reason"]=candidate
             watch_state["aborted_key"]=key
             abort_count[sid]=abort_count.get(sid,0)+1
+            record_adaptive_watchdog_event(
+                sid,agent,did,verdict,"interrupt-confirmed",backend_snapshot
+            )
             log("ADAPTIVE_REASONING_INTERRUPT "+detail)
             csv("ADAPTIVE_REASONING_INTERRUPT",sid,agent,detail)
     return verdict
@@ -16506,6 +16533,77 @@ def event_watchdog_reason(agent,state):
         return f"sse_text_chars={state['text']}"
     return ""
 
+def native_v1_part_type(sid,part_id):
+    """Resolve an unknown v1 SSE part using this session's read-only DB row."""
+    if not sid or not part_id or not v1_runtime_enabled():
+        return ""
+    con=None
+    try:
+        con=db_connect()
+        row=con.execute(
+            "SELECT data FROM part WHERE id=? AND session_id=?",
+            (part_id,sid),
+        ).fetchone()
+        if not row:
+            return ""
+        value=json.loads(row[0])
+        return str(value.get("type") or "") if isinstance(value,dict) else ""
+    except (sqlite3.Error,ValueError,TypeError):
+        return ""
+    finally:
+        if con is not None:
+            con.close()
+
+
+def normalize_native_v1_stream_event(state,event,sid,lookup=native_v1_part_type):
+    """Map native message.part SSE to typed per-worker watchdog events."""
+    kind=str(event.get("type") or "")
+    if kind not in {"message.part.updated","message.part.delta"}:
+        return event
+    props=event.get("data") if isinstance(event.get("data"),dict) else {}
+    if str(props.get("sessionID") or props.get("sessionId") or "")!=sid:
+        return {"type":"ignored","data":{}}
+    types=state.setdefault("part_types",{})
+    part=props.get("part") if isinstance(props.get("part"),dict) else {}
+    part_id=str(props.get("partID") or part.get("id") or "")
+    if kind=="message.part.updated":
+        part_type=str(part.get("type") or "")
+        if part_id and part_type:
+            types[part_id]=part_type
+        if part_type=="step-start":
+            return {"type":"session.next.step.started","data":{}}
+        if part_type=="tool" and part_id:
+            status=str((part.get("state") or {}).get("status") or "")
+            statuses=state.setdefault("tool_part_status",{})
+            previous=statuses.get(part_id,"")
+            statuses[part_id]=status
+            if status in {"pending","running"} and previous not in {
+                "pending","running","completed","error"
+            }:
+                return {"type":"session.next.tool.called","data":{}}
+            if status=="completed" and previous!="completed":
+                return {"type":"session.next.tool.success","data":{}}
+            if status=="error" and previous!="error":
+                return {"type":"session.next.tool.failed","data":{}}
+        return {"type":"ignored","data":{}}
+    if props.get("field")!="text" or not part_id:
+        return {"type":"ignored","data":{}}
+    part_type=types.get(part_id)
+    if not part_type:
+        part_type=lookup(sid,part_id)
+        if part_type:
+            types[part_id]=part_type
+    if part_type not in {"reasoning","text"}:
+        return {"type":"ignored","data":{}}
+    return {
+        "type":(
+            "session.next.reasoning.delta" if part_type=="reasoning"
+            else "session.next.text.delta"
+        ),
+        "data":{"delta":str(props.get("delta") or "")},
+    }
+
+
 def ensure_event_watch(sid):
     state=event_watch.get(sid)
     if state and state.get("thread") and state["thread"].is_alive(): return state
@@ -16513,14 +16611,16 @@ def ensure_event_watch(sid):
     created=time.monotonic()
     state={"reasoning":0,"text":0,"tool_running":False,"tool_successes":0,
            "action_reasoning_chars":0,"action_seq":0,
+           "part_types":{},"tool_part_status":{},
            "connected":False,"last_event":created,"last_progress":created,
            "progress_seq":0,"stop":stop}
     event_watch[sid]=state
     def consume(event):
         with lock:
             state["connected"]=True; state["last_event"]=time.monotonic()
-            kind=event.get("type")
-            reduce_live_event(state,event)
+            normalized=normalize_native_v1_stream_event(state,event,sid)
+            kind=normalized.get("type")
+            reduce_live_event(state,normalized)
             if kind=="session.next.tool.called": state["tool_running"]=True
             elif kind in {"session.next.tool.success","session.next.tool.failed"}:
                 state["tool_running"]=False
@@ -18191,6 +18291,10 @@ def worker_behavior_abort_reason(reason):
     prefixes=(
         "probe_research_loop_no_owned_progress",
         "early_write_deadline_no_owned_artifact_delta",
+        # A positive, supervisor-owned action-clock intervention is a model
+        # behavior failure, NOT an infrastructure outage. The retry budget
+        # must be consumed and normal bounded split recovery remain available.
+        "runaway adaptive_reasoning session=",
     )
     return reason if reason.startswith(prefixes) else ""
 

@@ -123,3 +123,72 @@ unavailable, the earlier conservative per-message clock is retained. Two
 additional tests cover multi-step reasoning without actions and live-clock
 stability across message-ID rollover. Enforce mode remains opt-in and has
 not yet been used to interrupt a real Qwen child.
+## Native OpenCode v1 SSE and controlled enforcement proof — 3 October 2026
+
+The early observer canary was limited by an overlooked wire-format mismatch:
+OpenCode v1.18.31 emits `message.part.delta` with `field=text` for BOTH
+reasoning and ordinary text; the earlier watcher only processed
+`session.next.reasoning.delta`. Therefore missing reasoning values in the
+earlier observer trace must not be interpreted as genuine no-reasoning
+behavior or a measured false-positive rate.
+
+The supervisor now maps native `message.part.updated` part IDs to canonical
+reasoning/text/tool/step types. For a late SSE subscription, it can resolve a
+part ID with a **read-only, same-session** query against the native OpenCode
+`part` table. Native reasoning and text deltas are kept separate; each real
+tool invocation, completed tool or failed tool produces the corresponding
+watchdog action. It never treats arbitrary text as thinking, and an event
+bound to another session is rejected. The cumulative action clock continues
+across model-only step changes. An SSE disconnect clears the connection
+indicator; the fallback stays conservative.
+
+Two independent fresh canaries were retained. Both used an isolated compiled
+and guarded two-deliverable Stage-A fixture, native no-Qwen technical root,
+their own localhost OpenCode server and a **one-shot synthetic** OpenAI-compatible
+SSE stall proxy. Only the first worker-model call was intercepted. All later
+model calls were routed to the existing local Qwen proxy; the shared vLLM
+server and previously accepted projects were never reconfigured or killed.
+
+- Baseline, BEFORE native normalization:
+  `/home/bking/AI/a2-e2e/20261003-adaptive-enforce-sse-fault/project`.
+  The old hard watchdog terminated the unobservable stream after about
+  120 seconds and 64 synthetic frames. It correctly recorded one
+  `immediate-runtime-cancel` infrastructure abort and allowed recovery.
+  The resumed Qwen worker, final test worker and independent validator
+  produced valid 2/2 `ACCEPTANCE_PASS`. This is a historical control, NOT
+  evidence of an adaptive interrupt.
+- Native bridge plus adaptive ENFORCE:
+  `/home/bking/AI/a2-e2e/20261003-adaptive-enforce-native-v1/project`.
+  The native SSE adapter immediately observed the synthetic reasoning
+  deltas and measured increasing reasoned characters and action age.
+  Profile NORMAL has an earliest intervention time of 75 seconds and a
+  6,500-visible-character budget. At precisely **75.3 seconds** and
+  **11,778 visible reasoning characters since action**, the project-scoped
+  supervisor emitted `ADAPTIVE_REASONING_INTERRUPT` and called the real
+  OpenCode HTTP abort endpoint. The fault proxy observed the upstream stream
+  disconnect after 41 frames. The durable supervisor abort-intent record
+  became resolved as `genuine-worker-behavior-failure`; D001 attempt 1 was
+  recorded as one genuine failure, with **zero infrastructure credits**.
+  The ordinary Stage-A controller dispatched D001 attempt 2 to actual local
+  Qwen. D001 and D002 became supervisor-READY and the independent
+  acceptance-validator reached valid 2/2 `ACCEPTANCE_PASS`, no blockers.
+  No test-application files were manually modified.
+
+The live test revealed another diagnostic weakness: a short adaptive trigger
+may occur between the standard five-second telemetry samples. A subsequent
+change now emits a `force=True` JSONL record at every distinct observed
+would-interrupt or successfully confirmed interrupt. The record contains
+the bounded policy verdict, role, deliverable, project binding and coarse
+backend state, but **never reasoning text or model prompts**. If the telemetry
+file is unavailable, the already-confirmed abort and durable ledger are
+unaffected. This last event-emission refinement is covered by deterministic
+tests; the accepted ENFORCE canary was run immediately before it was added.
+
+The project-scoped test proxy and both private OpenCode/supervisor instances
+were stopped only after their acceptance markers were independently verified.
+The local Qwen model server was not interrupted. Default production mode
+remains `off`; the two canaries prove targeted interrupt and bounded
+recovery under an adversarial **synthetic** stall. They do not establish
+production false-positive rates against representative complex real work.
+Next compare healthy workload outcomes and costs in OBSERVE versus controlled
+ENFORCE, and no-memory versus selective-memory context retrieval.

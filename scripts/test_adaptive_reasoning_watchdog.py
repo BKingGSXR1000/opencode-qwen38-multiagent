@@ -218,7 +218,8 @@ class AdaptiveReasoningWatchdogTests(unittest.TestCase):
              mock.patch.object(supervisor,"load_manifest",return_value=manifest), \
              mock.patch.object(supervisor,"abort_session") as interrupt, \
              mock.patch.object(supervisor,"log") as log, \
-             mock.patch.object(supervisor,"csv"):
+             mock.patch.object(supervisor,"csv"), \
+             mock.patch.object(supervisor,"emit_watchdog_telemetry") as telemetry:
             first=supervisor.adaptive_reasoning_step(
                 sid,"implementer","D001",("msg",""),shape,live,0,
                 can_watch=True,tool_running=False,compaction_active=False,
@@ -238,6 +239,12 @@ class AdaptiveReasoningWatchdogTests(unittest.TestCase):
             self.assertTrue(second["abort"])
             self.assertTrue(again["abort"])
             interrupt.assert_not_called()
+            telemetry.assert_called_once()
+            self.assertTrue(telemetry.call_args.kwargs["force"])
+            self.assertEqual(
+                telemetry.call_args.args[1]["adaptive_event"],
+                "would-interrupt",
+            )
             log.assert_called_once()
             self.assertIn("WOULD_INTERRUPT",log.call_args.args[0])
             self.assertIsNone(watch["aborted_key"])
@@ -255,7 +262,8 @@ class AdaptiveReasoningWatchdogTests(unittest.TestCase):
              mock.patch.object(supervisor,"load_manifest",return_value=manifest), \
              mock.patch.object(supervisor,"abort_session",side_effect=[False,True]) as interrupt, \
              mock.patch.object(supervisor,"log"), \
-             mock.patch.object(supervisor,"csv"):
+             mock.patch.object(supervisor,"csv"), \
+             mock.patch.object(supervisor,"emit_watchdog_telemetry") as telemetry:
             kwargs=dict(
                 sid=sid,agent="implementer",did="D001",key=("msg",""),
                 shape=shape,live={"tool_successes":0},
@@ -268,6 +276,11 @@ class AdaptiveReasoningWatchdogTests(unittest.TestCase):
             self.assertIsNone(watch["aborted_key"])
             supervisor.adaptive_reasoning_step(reasoning=7510,now_mono=181,**kwargs)
             self.assertEqual(interrupt.call_count,2)
+            telemetry.assert_called_once()
+            self.assertEqual(
+                telemetry.call_args.args[1]["adaptive_event"],
+                "interrupt-confirmed",
+            )
             self.assertEqual(watch["aborted_key"],("msg",""))
             supervisor.adaptive_reasoning_step(reasoning=7520,now_mono=182,**kwargs)
             self.assertEqual(interrupt.call_count,2)
@@ -350,6 +363,44 @@ class AdaptiveReasoningWatchdogTests(unittest.TestCase):
             self.assertFalse(third["abort"])
             self.assertEqual(third["action_age"],0)
         supervisor.adaptive_watch.pop(sid,None)
+
+    def test_immediate_candidate_telemetry_persists_even_between_polling_ticks(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        verdict={"abort":True,"profile":"NORMAL","action_age":75.3,
+                 "reasoning_chars_since_action":11778,
+                 "reason":"reasoning-budget-without-tool"}
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"events.jsonl"
+            with mock.patch.object(supervisor,"WATCHDOG_TELEMETRY",path), \
+                 mock.patch.object(supervisor,"watchdog_telemetry_last",{}), \
+                 mock.patch.object(supervisor,"PROJECT",td), \
+                 mock.patch.object(supervisor,"ADAPTIVE_REASONING_MODE","enforce"):
+                supervisor.record_adaptive_watchdog_event(
+                    "ses-native","implementer","D001",verdict,
+                    "interrupt-confirmed",{"running":1},
+                )
+            rows=[json.loads(x) for x in path.read_text().splitlines()]
+        self.assertEqual(len(rows),1)
+        row=rows[0]
+        self.assertEqual(row["adaptive_event"],"interrupt-confirmed")
+        self.assertEqual(row["adaptive_reasoning"]["reasoning_chars_since_action"],11778)
+        self.assertEqual(row["session"],"ses-native")
+        self.assertNotIn("reasoning_text",row)
+
+    def test_telemetry_filesystem_failure_cannot_unconfirm_worker_abort(self):
+        verdict={"abort":True,"profile":"NORMAL","reason":"budget"}
+        with mock.patch.object(supervisor,"emit_watchdog_telemetry",
+                               side_effect=OSError("disk full")), \
+             mock.patch.object(supervisor,"log") as log:
+            supervisor.record_adaptive_watchdog_event(
+                "ses-native","implementer","D001",verdict,
+                "interrupt-confirmed",{},
+            )
+            log.assert_called_once()
+            self.assertIn("ADAPTIVE_REASONING_TELEMETRY_FAILED",
+                          log.call_args.args[0])
 
     def test_runtime_reload_fingerprint_tracks_new_module(self):
         from control_policy import reexec_source_paths
