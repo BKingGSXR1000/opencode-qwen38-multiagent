@@ -3,12 +3,15 @@ from __future__ import annotations
 import argparse, json
 from pathlib import Path
 
-SPLIT_LAUNCH_STATES={"split-required","split-retryable"}
-SPLIT_WAIT_STATES={"splitter-active"}
-SPLIT_TERMINAL_STATES={
-    "split-validation-failed","splitter-failed",
-    "split-unavailable-read-only-parent","parent-finalize-failed",
-}
+from control_state import SPLIT_PROGRESS_STATES, SPLIT_TERMINAL_STATES
+
+SPLIT_LAUNCH_STATES=frozenset({"split-required","split-retryable"})
+# All other centrally declared progress states are supervisor-owned
+# reconciliation. Deterministic dispatch must wait rather than launch a new
+# semantic child or invent an unknown-split-state blocker.
+SPLIT_WAIT_STATES=frozenset(
+    set(SPLIT_PROGRESS_STATES)-set(SPLIT_LAUNCH_STATES)
+)
 
 def action(kind,**kwargs):
     return {"kind":kind,**kwargs}

@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 import control_state
+import deterministic_dispatch
 
 HERE=Path(__file__).resolve().parent
 SPEC=importlib.util.spec_from_file_location(
@@ -74,6 +75,61 @@ class SplitProgressStateContractTests(unittest.TestCase):
                     self.assertTrue(
                         driver.blocked_split_reconciliation_pending(project,receipt)
                     )
+
+    def test_dispatcher_waits_for_nonlaunch_progress_states(self):
+        launch={"split-required","split-retryable"}
+        for state in sorted(set(control_state.SPLIT_PROGRESS_STATES)-launch):
+            with self.subTest(state=state):
+                decision={
+                    "resume_phase":"recursive-split",
+                    "split_required":[{
+                        "deliverable":"D003",
+                        "split_state":state,
+                        "split_generation":1,
+                        "split_claim_count":1,
+                    }],
+                    "eligible":[],
+                    "eligible_roles":{},
+                    "execution_blockers":[],
+                    "scheduler":{
+                        "active_workers":0,
+                        "available_worker_slots":3,
+                        "replayable_reserved_deliverables":[],
+                    },
+                }
+                self.assertEqual(
+                    deterministic_dispatch.select_actions(decision),
+                    [{"kind":"wait"}],
+                )
+
+    def test_dispatcher_launches_only_launchable_split_states(self):
+        for state,claim in (("split-required",0),("split-retryable",1)):
+            with self.subTest(state=state):
+                decision={
+                    "resume_phase":"recursive-split",
+                    "split_required":[{
+                        "deliverable":"D003",
+                        "split_state":state,
+                        "split_generation":2,
+                        "split_claim_count":claim,
+                    }],
+                    "eligible":[],
+                    "eligible_roles":{},
+                    "execution_blockers":[],
+                    "scheduler":{
+                        "active_workers":0,
+                        "available_worker_slots":3,
+                        "replayable_reserved_deliverables":[],
+                    },
+                }
+                self.assertEqual(
+                    deterministic_dispatch.select_actions(decision),
+                    [{
+                        "kind":"launch","agent":"task-splitter",
+                        "deliverable":"D003","generation":2,
+                        "claim":claim+1,
+                    }],
+                )
 
     def test_true_terminal_split_state_still_does_not_get_hidden(self):
         with tempfile.TemporaryDirectory(prefix="split-terminal-driver-") as td:
