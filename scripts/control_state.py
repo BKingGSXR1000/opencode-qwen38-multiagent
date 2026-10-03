@@ -38,7 +38,20 @@ VERIFY_WAIT_PROTOCOL = "v2-verify-wait-v1"
 PHASE_READY_PROTOCOL = "V2.6.7c"
 PHASE_READY_VALIDATOR = phase_ready_validator_id()
 ACCEPTANCE_READY_VALIDATOR = phase_ready_validator_id("ACCEPTANCE.md")
-SPLIT_PROGRESS_STATES = frozenset({"split-required","splitter-active","split-retryable"})
+SPLIT_PROGRESS_STATES = frozenset({
+    "split-required",
+    "splitter-active",
+    "split-retryable",
+    # Native TaskTool corrective turns are durable continuations of the same
+    # split claim.  They must remain recursive-split work, never masquerade as
+    # an attempt-limit terminal blocker while the child output is pending or
+    # being deterministically processed.
+    "splitter-corrective-awaiting-output",
+    "splitter-corrective-processing",
+    # All split children are ready but parent re-verification is on its finite
+    # supervisor retry timer.  This is live reconciliation, not terminal.
+    "parent-finalize-retry",
+})
 SPLIT_TERMINAL_STATES = frozenset({
     "split-validation-failed","splitter-failed",
     "split-unavailable-read-only-parent","parent-finalize-failed",

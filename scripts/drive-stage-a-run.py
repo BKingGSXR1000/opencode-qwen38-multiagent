@@ -12,6 +12,7 @@ from pathlib import Path
 import runtime_contract
 import stage_a_controller as controller
 import stage_a_preflight as preflight
+from control_state import SPLIT_PROGRESS_STATES
 
 
 _tick_spec = importlib.util.spec_from_file_location(
@@ -86,12 +87,14 @@ class DriverError(RuntimeError):
 
 
 BLOCKED_STABILITY_OBSERVATIONS = 3
-AUTONOMOUS_SPLIT_RECONCILIATION_STATES = frozenset({
-    "split-required",
-    "splitter-active",
-    "split-retryable",
-    "split-validation-failed",
-})
+AUTONOMOUS_SPLIT_RECONCILIATION_STATES = frozenset(
+    set(SPLIT_PROGRESS_STATES) | {
+        # A validation-failed split is terminal in the projection until the
+        # supervisor's bounded deterministic/operator recovery succeeds.  The
+        # driver must nevertheless give that reconciliation loop time to act.
+        "split-validation-failed",
+    }
+)
 
 
 def blocked_split_reconciliation_pending(project: Path, receipt: dict) -> bool:
