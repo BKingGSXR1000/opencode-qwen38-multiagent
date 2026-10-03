@@ -173,13 +173,26 @@ def blocked_observation_key(receipt: dict) -> tuple[str, str] | None:
     )
 
 
-def drive(project: Path, base_url: str, root_session: str, proof: Path, poll: float, max_ticks: int) -> int:
+def drive(
+    project: Path, base_url: str, root_session: str, proof: Path,
+    poll: float, max_ticks: int, max_seconds: float = 0.0,
+) -> int:
     preflight.verify_proof(proof, project, base_url, root_session)
+    started=time.monotonic()
+    deadline=(started+max_seconds) if max_seconds>0 else 0.0
     dispatched = 0
     last_event = ""
     blocked_key: tuple[str, str] | None = None
     blocked_streak = 0
     while max_ticks == 0 or dispatched < max_ticks:
+        if deadline and time.monotonic() >= deadline:
+            print(json.dumps({
+                "event":"deadline",
+                "elapsed_seconds":round(time.monotonic()-started,3),
+                "max_seconds":max_seconds,
+                "dispatched":dispatched,
+            },sort_keys=True),flush=True)
+            return 3
         try:
             receipt = tick.execute_one(project, base_url, root_session)
         except controller.ControllerError as exc:
@@ -274,6 +287,10 @@ def main() -> int:
     parser.add_argument("--preflight-proof", type=Path)
     parser.add_argument("--poll", type=float, default=1.0)
     parser.add_argument("--max-ticks", type=int, default=0)
+    parser.add_argument(
+        "--max-seconds",type=float,default=0.0,
+        help="hard wall-clock limit; 0 disables the deadline",
+    )
     parser.add_argument("--selftest", action="store_true")
     ns = parser.parse_args()
     if ns.selftest:
@@ -281,11 +298,16 @@ def main() -> int:
         return 0
     if ns.project is None or not ns.base_url or not ns.root_session or ns.preflight_proof is None:
         parser.error("--project, --base-url, --root-session, and --preflight-proof are required unless --selftest is used")
-    if ns.poll <= 0 or ns.max_ticks < 0:
-        parser.error("--poll must be > 0 and --max-ticks must be >= 0")
+    if ns.poll <= 0 or ns.max_ticks < 0 or ns.max_seconds < 0:
+        parser.error(
+            "--poll must be > 0; --max-ticks and --max-seconds must be >= 0"
+        )
     project=ns.project.resolve()
     configure_runtime_environment(project,ns.base_url)
-    return drive(project, ns.base_url, ns.root_session, ns.preflight_proof, ns.poll, ns.max_ticks)
+    return drive(
+        project,ns.base_url,ns.root_session,ns.preflight_proof,
+        ns.poll,ns.max_ticks,ns.max_seconds,
+    )
 
 
 if __name__ == "__main__":

@@ -330,6 +330,36 @@ class DriverReportingTests(unittest.TestCase):
                 driver.drive(Path("/tmp/project"), "http://127.0.0.1:1", "root", Path("/tmp/proof"), 0.01, 0)
         execute.assert_not_called()
 
+    def test_driver_hard_wall_clock_deadline_is_terminal_and_logged(self):
+        driver=self.load_driver()
+        waiting={
+            "outcome":"no-dispatch",
+            "state_version":"wait-state",
+            "actions":[{"kind":"wait"}],
+        }
+        out=io.StringIO()
+        with mock.patch.object(
+            driver.preflight,"verify_proof"
+        ), mock.patch.object(
+            driver.tick,"execute_one",return_value=waiting
+        ) as execute, mock.patch.object(
+            driver.time,"monotonic",side_effect=[100.0,100.2,101.2,101.2]
+        ), mock.patch.object(
+            driver.time,"sleep"
+        ), contextlib.redirect_stdout(out):
+            self.assertEqual(
+                driver.drive(
+                    Path("/tmp/project"),"http://127.0.0.1:1","root",
+                    Path("/tmp/proof"),0.01,0,1.0,
+                ),
+                3,
+            )
+        self.assertEqual(execute.call_count,1)
+        lines=[json.loads(x) for x in out.getvalue().splitlines() if x.strip()]
+        self.assertEqual(lines[-1]["event"],"deadline")
+        self.assertEqual(lines[-1]["max_seconds"],1.0)
+        self.assertEqual(lines[-1]["dispatched"],0)
+
     def test_terminal_and_blocked_reporting_is_compact_and_deduplicated(self):
         driver = self.load_driver()
         complete = {

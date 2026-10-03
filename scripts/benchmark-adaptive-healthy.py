@@ -250,6 +250,7 @@ def run(mode,limit):
             "--root-session",sid,
             "--preflight-proof",str(base/"preflight.json"),
             "--poll","1","--max-ticks",str(limit+35),
+            "--max-seconds",str(max(1,limit-10)),
         ],env=env,cwd=ROOT,stdin=subprocess.DEVNULL,
           stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
         try:
