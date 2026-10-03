@@ -46,6 +46,18 @@ Finite-step rule:
 - if packet evidence is insufficient, write a FAIL report naming the unsupported
   Axxx IDs instead of seeking more evidence.
 
+Evidence precedence:
+- Executed deterministic behavior evidence and the corresponding artifact
+  implementation outrank comments, docstrings, examples, or stale prose when
+  the requested behavior itself is what the MUST requires.
+- A contradictory comment/docstring is not by itself grounds to FAIL a
+  behavioral MUST if executable evidence plus the artifact code already prove
+  the required behavior. Fail documentation text only when the original task
+  or MUST explicitly requires that documentation/content to be correct.
+- Conversely, do not let a passing narrow example stand in for a broader
+  behavioral MUST when the artifact snapshot visibly violates the broader
+  requirement.
+
 Executable-command provenance:
 - NEVER invent, rewrite, simplify, or paraphrase an executable command for the
   acceptance report.

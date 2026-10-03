@@ -2184,6 +2184,21 @@ class AcceptanceValidatorBudgetTests(unittest.TestCase):
         self.assertIn("complete immutable evidence surface",role)
         self.assertIn("use later steps only to correct the report",role)
 
+    def test_validator_prefers_executed_behavior_over_stale_comments(self):
+        role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
+        self.assertIn(
+            "Executed deterministic behavior evidence and the corresponding artifact",
+            role,
+        )
+        self.assertIn(
+            "A contradictory comment/docstring is not by itself grounds to FAIL",
+            role,
+        )
+        self.assertIn(
+            "do not let a passing narrow example stand in for a broader",
+            role,
+        )
+
     def test_validator_cannot_invent_executable_report_commands(self):
         role=(Path(__file__).parents[1] / "xdg/config/opencode/agents/acceptance-validator.md").read_text()
         self.assertIn("NEVER invent, rewrite, simplify, or paraphrase an executable command",role)
@@ -2767,6 +2782,52 @@ class SharedAcceptanceRemediationOwnerTests(unittest.TestCase):
         self.assertFalse((self.ctrl/"work/D008.ready").exists())
         handoff=(self.ctrl/"work/D008.progress.md").read_text()
         self.assertIn("report-formatting",handoff.lower())
+
+    def test_exhausted_leaf_gets_one_bounded_acceptance_repair_credit(self):
+        (self.ctrl/"work/attempts.json").write_text(json.dumps({
+            "owner":"supervisor","deliverables":{
+                "D008":{"count":2,"automatic_limit":2},
+            },
+        }))
+        result=self._run()
+        self.assertEqual(result["reopened_deliverables"],["D008"])
+        ledger=json.loads((self.ctrl/"work/attempts.json").read_text())
+        entry=ledger["deliverables"]["D008"]
+        rows=entry.get("acceptance_remediations")
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]["source"],"stage-a-controller")
+        self.assertEqual(rows[0]["grant"],1)
+        self.assertEqual(rows[0]["attempt_count"],2)
+        self.assertEqual(rows[0]["acceptance_ids"],["A012"])
+        state=control_state.attempt_state(entry)
+        self.assertTrue(state["valid"],state)
+        self.assertEqual(state["allowed_attempts"],3)
+        self.assertEqual(state["acceptance_remediation_retry_grants"],1)
+
+    def test_second_acceptance_repair_credit_is_rejected(self):
+        (self.ctrl/"work/attempts.json").write_text(json.dumps({
+            "owner":"supervisor","deliverables":{
+                "D008":{
+                    "count":3,
+                    "automatic_limit":2,
+                    "acceptance_remediations":[{
+                        "source":"stage-a-controller",
+                        "protocol":controller.ACCEPTANCE_REMEDIATION_PROTOCOL,
+                        "grant":1,
+                        "timestamp":"2026-10-03T00:00:00Z",
+                        "attempt_count":2,
+                        "report_sha256":"a"*64,
+                        "acceptance_ids":["A012"],
+                    }],
+                },
+            },
+        }))
+        with self.assertRaisesRegex(
+            controller.ControllerError,
+            "ACCEPTANCE_REMEDIATION_EXHAUSTED",
+        ):
+            self._run()
+        self.assertTrue((self.ctrl/"work/D008.ready").exists())
 
     def test_rejects_unattested_report_command_without_reopening(self):
         self.failed["checks"][0]["command"]="python3 -m unittest tests.test_unknown -v"

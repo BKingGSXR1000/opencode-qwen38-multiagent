@@ -26,6 +26,9 @@ MAX_CONTEXT_DELIVERY_RETRY_GRANTS = 1
 # One replacement may be granted when an external-reference execution contract
 # is proven wrong by an auditable supervisor correction.
 MAX_EXTERNAL_CONTRACT_RETRY_GRANTS = 1
+# One bounded extra implementation dispatch may be authorized only when
+# final acceptance finds a concrete miss after ordinary attempts are spent.
+MAX_ACCEPTANCE_REMEDIATION_RETRY_GRANTS = 1
 MAX_UNMATERIALIZED_DISPATCH_REPLAYS = MAX_INFRASTRUCTURE_RETRY_GRANTS
 # V2.6.9 BATCH8 VERIFY-SANDBOX-LIFETIME-V3
 # A human authorization may survive one *proven, pre-execution* runtime abort.
@@ -551,6 +554,40 @@ def _external_contract_recovery_credit_count(entry, count):
     return min(len(recovered),MAX_EXTERNAL_CONTRACT_RETRY_GRANTS)
 
 
+def _acceptance_remediation_credit_count(entry, count):
+    """Count bounded controller-issued final-acceptance repair credits."""
+    if not isinstance(entry,dict):
+        return 0
+    rows=entry.get("acceptance_remediations") or []
+    if not isinstance(rows,list):
+        return 0
+    seen=set()
+    for row in rows:
+        if not isinstance(row,dict):
+            continue
+        try:
+            grant=int(row.get("grant") or 0)
+            at_count=int(row.get("attempt_count") or 0)
+        except (TypeError,ValueError):
+            continue
+        digest=str(row.get("report_sha256") or "")
+        ids=row.get("acceptance_ids")
+        if (
+            row.get("source")!="stage-a-controller"
+            or row.get("protocol")!="v2-final-acceptance-remediation-v1"
+            or grant!=1
+            or at_count<1 or at_count>count
+            or not row.get("timestamp")
+            or len(digest)!=64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+            or not isinstance(ids,list) or not ids
+            or not all(isinstance(cid,str) and cid.startswith("A") for cid in ids)
+        ):
+            continue
+        seen.add((digest,tuple(sorted(set(ids))),at_count))
+    return min(len(seen),MAX_ACCEPTANCE_REMEDIATION_RETRY_GRANTS)
+
+
 def _parent_contract_repair_credit_count(entry, count):
     if not isinstance(entry,dict):
         return 0
@@ -601,6 +638,7 @@ def _attempt_state_v2612_original(entry):
                 "infrastructure_retry_grants": 0,
                 "infrastructure_grants_remaining": 0,
                 "context_delivery_retry_grants": 0,
+                "acceptance_remediation_retry_grants": 0,
                 "allowed_attempts": AUTOMATIC_ATTEMPT_LIMIT,
                 "infrastructure_authorized_attempt": False,
                 "operator_authorized_attempt": False}
@@ -665,12 +703,16 @@ def _attempt_state_v2612_original(entry):
     context_delivery_credits=_context_delivery_recovery_credit_count(entry,count)
     external_contract_credits=_external_contract_recovery_credit_count(entry,count)
     bad_plan_credits=_parent_contract_repair_credit_count(entry,count)
+    acceptance_remediation_credits=_acceptance_remediation_credit_count(
+        entry,count
+    )
     non_operator_credits=(
         infrastructure_grants
         + plan_contract_credits
         + context_delivery_credits
         + external_contract_credits
         + bad_plan_credits
+        + acceptance_remediation_credits
     )
 
     operator_attempts = entry.get("operator_retry_attempts", [])
@@ -779,6 +821,8 @@ def _attempt_state_v2612_original(entry):
         "plan_contract_retry_grants": plan_contract_credits,
         "context_delivery_retry_grants": context_delivery_credits,
         "external_contract_retry_grants": external_contract_credits,
+        "acceptance_remediation_retry_grants":
+            acceptance_remediation_credits,
     }
 
 # V2.6.12 INFRASTRUCTURE LEDGER REPAIR BEGIN
@@ -947,6 +991,9 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
     context_delivery_credits = _context_delivery_recovery_credit_count(entry,count)
     external_contract_credits = _external_contract_recovery_credit_count(entry,count)
     bad_plan_credits = _parent_contract_repair_credit_count(entry,count)
+    acceptance_remediation_credits=_acceptance_remediation_credit_count(
+        entry,count
+    )
     # record_infrastructure_abort writes the grant immediately before the
     # matching infrastructure failure-history row, so at most one grant may be
     # temporarily ahead of failure_history.
@@ -961,6 +1008,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         + context_delivery_credits
         + external_contract_credits
         + bad_plan_credits
+        + acceptance_remediation_credits
     ):
         # A human-authorized retry is allowed to fail genuinely. The detailed
         # operator-attempt validation below still requires every excess
@@ -980,6 +1028,7 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         + context_delivery_credits
         + external_contract_credits
         + bad_plan_credits
+        + acceptance_remediation_credits
     )
     non_operator_ceiling=automatic_limit+non_operator_credits
 
@@ -1150,7 +1199,8 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
                 - plan_contract_credits
                 - context_delivery_credits
                 - external_contract_credits
-                - bad_plan_credits,
+                - bad_plan_credits
+                - acceptance_remediation_credits,
                 automatic_limit,
             ),
         ),
@@ -1166,6 +1216,8 @@ def _v2612_repair_infrastructure_attempt_state(entry, state):
         "context_delivery_retry_grants": context_delivery_credits,
         "external_contract_retry_grants": external_contract_credits,
         "bad_plan_retry_grants": bad_plan_credits,
+        "acceptance_remediation_retry_grants":
+            acceptance_remediation_credits,
         "allowed_attempts": allowed,
         # Keep the canonical ordering: infrastructure credits are consumed
         # before plan/bad-plan replacement credits.

@@ -92,6 +92,16 @@ class SummaryTests(unittest.TestCase):
         })
         self.assertEqual(rows,original)
 
+    def test_names_are_globally_lexicographic_not_priority_grouped(self):
+        rows=[
+            {"name":"Zulu","priority":1},
+            {"name":"Alpha","priority":5},
+        ]
+        self.assertEqual(
+            summarize(rows)["names"],
+            ["Alpha","Zulu"],
+        )
+
     def test_empty_and_generator(self):
         expected={"total":0,"high":0,"normal":0,"names":[]}
         self.assertEqual(summarize([]),expected)
@@ -150,6 +160,40 @@ class CLITests(unittest.TestCase):
 if __name__=="__main__":
     unittest.main()
 """,
+    "test_worker_test_contract.py":r"""import ast
+import pathlib
+import unittest
+
+class WorkerTestContract(unittest.TestCase):
+    def test_worker_suite_contains_real_subprocess_cli_integration(self):
+        path=pathlib.Path("tests/test_summary.py")
+        self.assertTrue(path.is_file(),path)
+        tree=ast.parse(path.read_text(encoding="utf-8"))
+        imported=False
+        subprocess_calls=0
+        for node in ast.walk(tree):
+            if isinstance(node,ast.Import):
+                imported=imported or any(a.name=="subprocess" for a in node.names)
+            if isinstance(node,ast.ImportFrom) and node.module=="subprocess":
+                imported=True
+            if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute):
+                if (
+                    isinstance(node.func.value,ast.Name)
+                    and node.func.value.id=="subprocess"
+                    and node.func.attr in {
+                        "run","Popen","check_call","check_output","call"
+                    }
+                ):
+                    subprocess_calls+=1
+        self.assertTrue(imported,"tests/test_summary.py must import subprocess")
+        self.assertGreaterEqual(
+            subprocess_calls,1,
+            "tests/test_summary.py must execute the CLI through subprocess",
+        )
+
+if __name__=="__main__":
+    unittest.main()
+""",
 }
 
 
@@ -193,7 +237,10 @@ def structured_fixture():
             " The immutable corresponding spec_tests functional checks pass."
         )
     worker_tests="python3 -m unittest discover -s tests -v"
-    leaves[3]["verify_command"]+=f" && {worker_tests}"
+    leaves[3]["verify_command"]+=(
+        " && python3 -m unittest spec_tests.test_worker_test_contract -v"
+        f" && {worker_tests}"
+    )
     tick=chr(96)
     leaves[3]["done_when"]+=(
         f" Worker-authored tests also pass via {tick}{worker_tests}{tick}."

@@ -78,6 +78,13 @@ class IndependentAcceptance(unittest.TestCase):
             "total":3,"high":2,"normal":1,"names":["A","B","B"],
         })
         self.assertEqual(rows,old)
+        self.assertEqual(
+            summary.summarize([
+                {"name":"Zulu","priority":1},
+                {"name":"Alpha","priority":5},
+            ])["names"],
+            ["Alpha","Zulu"],
+        )
         self.assertEqual(summary.summarize([]),{
             "total":0,"high":0,"normal":0,"names":[],
         })
@@ -93,6 +100,25 @@ class IndependentAcceptance(unittest.TestCase):
             with self.subTest(rows=repr(rows)):
                 with self.assertRaises(ValueError):
                     summary.summarize(rows)
+
+    def test_worker_authored_tests_use_subprocess_for_cli(self):
+        import ast
+        path=ROOT/"tests/test_summary.py"
+        self.assertTrue(path.is_file())
+        tree=ast.parse(path.read_text(encoding="utf-8"))
+        calls=0
+        for node in ast.walk(tree):
+            if (
+                isinstance(node,ast.Call)
+                and isinstance(node.func,ast.Attribute)
+                and isinstance(node.func.value,ast.Name)
+                and node.func.value.id=="subprocess"
+                and node.func.attr in {
+                    "run","Popen","check_call","check_output","call"
+                }
+            ):
+                calls+=1
+        self.assertGreaterEqual(calls,1)
 
     def test_cli_compact_sorted_json_invalid_and_no_input_modification(self):
         with tempfile.TemporaryDirectory(prefix="heldout-medium-") as td:

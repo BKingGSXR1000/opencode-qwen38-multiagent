@@ -1728,6 +1728,7 @@ def finalize_terminal_acceptance_failure_repair(
             )
         owners.setdefault(selected,[]).append(cid)
 
+    report_sha=hashlib.sha256(report.read_bytes()).hexdigest()
     attempts=load_json(ctrl/"work"/"attempts.json","attempt ledger")
     deliverables=attempts.get("deliverables")
     if (
@@ -1749,19 +1750,47 @@ def finalize_terminal_acceptance_failure_repair(
             raise ControllerError(
                 f"acceptance remediation invalid attempt counters for {did}"
             ) from exc
-        if count<1 or automatic_limit<1 or count>=automatic_limit:
+        if count<1 or automatic_limit<1:
             raise ControllerError(
-                f"ACCEPTANCE_REMEDIATION_NO_AUTOMATIC_ATTEMPT "
+                f"acceptance remediation invalid attempt counters "
                 f"deliverable={did} count={count} "
                 f"automatic_limit={automatic_limit}"
             )
+        rows=entry.get("acceptance_remediations") or []
+        if not isinstance(rows,list):
+            raise ControllerError(
+                f"acceptance remediation ledger is malformed for {did}"
+            )
+        valid_rows=[
+            row for row in rows
+            if isinstance(row,dict)
+            and row.get("source")=="stage-a-controller"
+            and row.get("protocol")==ACCEPTANCE_REMEDIATION_PROTOCOL
+            and row.get("grant")==1
+        ]
+        if count>=automatic_limit:
+            if valid_rows:
+                raise ControllerError(
+                    f"ACCEPTANCE_REMEDIATION_EXHAUSTED "
+                    f"deliverable={did} count={count} "
+                    f"automatic_limit={automatic_limit}"
+                )
+            rows.append({
+                "source":"stage-a-controller",
+                "protocol":ACCEPTANCE_REMEDIATION_PROTOCOL,
+                "grant":1,
+                "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
+                "attempt_count":count,
+                "report_sha256":report_sha,
+                "acceptance_ids":sorted(owners[did]),
+            })
+            entry["acceptance_remediations"]=rows
         ready=ctrl/"work"/f"{did}.ready"
         if not ready.is_file() or ready.is_symlink():
             raise ControllerError(
                 f"acceptance remediation requires current READY leaf: {did}"
             )
 
-    report_sha=hashlib.sha256(report.read_bytes()).hexdigest()
     history={
         "owner":"stage-a-controller",
         "protocol":ACCEPTANCE_REMEDIATION_PROTOCOL,
@@ -1810,6 +1839,10 @@ def finalize_terminal_acceptance_failure_repair(
         ctrl/"work"/"acceptance-remediation-history"/f"{report_sha}.json"
     )
     _atomic_write_json_path(archive,history)
+    # Persist the bounded grant only after all remediation handoffs and their
+    # audit archive exist. A pre-ledger I/O failure therefore cannot silently
+    # consume the one automatic final-acceptance repair.
+    _atomic_write_json_path(ctrl/"work"/"attempts.json",attempts)
     for did in owners:
         (ctrl/"work"/f"{did}.ready").unlink()
     (ctrl/"acceptance-pass.json").unlink(missing_ok=True)
