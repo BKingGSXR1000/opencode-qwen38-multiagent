@@ -35,6 +35,7 @@ _SUPERVISOR_RUNTIME_FILES = (
     # Context-only optional projections must be reloaded without revoking the
     # canonical plan/Acceptance contract when implementation internals change.
     "project_memory.py",
+    "dependency_interfaces.py",
 )
 
 

@@ -181,11 +181,12 @@ def run(mode,limit):
         raise RuntimeError("never overwrite benchmark canary "+str(base))
     project.mkdir(parents=True)
     task=base/"task.md"
-    task.write_text(
+    task.write_text(getattr(
+        fixture,"TASK_TEXT",
         "Create restart_probe.txt with the exact line restart-recovery-ok; "
         "then produce and execute an independent final test manifest. "
-        "Use the standard Stage-A supervisor and exact Verify.\n"
-    )
+        "Use the standard Stage-A supervisor and exact Verify.",
+    ))
     result={"mode":mode,"port":port,"project":str(project),
             "started_epoch":time.time()}
     atomic_write_json(base/"status.json",result)
@@ -345,7 +346,7 @@ def main():
         atomic_write_json(summary_path,{
             "protocol":"adaptive-healthy-smoke-v1",
             "tasks_identical":True,"ordered_sequential":True,
-            "same_backend":True,"same_fixture":"restart-recovery-canary-v1",
+            "same_backend":True,"same_fixture":getattr(fixture,"PROTOCOL","restart-recovery-canary-v1"),
             "results":results,
             "limitations":[
                 "Only one small two-deliverable task per mode.",

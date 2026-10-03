@@ -14,6 +14,7 @@ from state_io import atomic_write_text
 from control_policy import control_policy_epoch
 from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 import project_memory
+from dependency_interfaces import direct_verified_interfaces
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
@@ -397,6 +398,11 @@ def build_leaf_contexts(project, manifest, snapshot=None):
             "contract_deps": _as_string_list(leaf.get("contract_deps")),
             "verify_deps": verify_deps,
             "verify_dependency_artifacts": verify_dependency_artifacts,
+            # Verified, source-bound direct dependency API handoff. The
+            # projection never executes project source and never trusts
+            # unverified or invalidated dependency artifacts.
+            "verified_dependency_interfaces":
+                direct_verified_interfaces(project,manifest,leaf),
             "acceptance_ids": acceptance_ids,
             "reference_policy": acceptance["reference_policy"],
             "acceptance_musts": [

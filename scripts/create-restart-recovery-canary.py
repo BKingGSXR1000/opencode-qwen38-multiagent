@@ -77,7 +77,7 @@ def structured_fixture() -> dict:
     }
 
 
-def build(project: Path, task_file: Path) -> dict:
+def build(project: Path, task_file: Path, *, expected_eligible=None, after_bootstrap=None) -> dict:
     project = project.resolve()
     task_file = task_file.resolve()
     if not project.is_dir() or any(project.iterdir()):
@@ -103,6 +103,10 @@ def build(project: Path, task_file: Path) -> dict:
     if boot.returncode:
         raise CanaryError(f"bootstrap failed: {boot.stderr.strip() or boot.stdout.strip()}")
 
+    # Optional fixture-owned immutable Verify inputs. Only the benchmark
+    # author can create them, before any worker session exists.
+    if after_bootstrap is not None:
+        after_bootstrap(project)
     ctrl = project / ".opencode-v2"
     atomic_write_text(ctrl / "ACCEPTANCE.md", acceptance_text())
     atomic_write_json(ctrl / "IMPLEMENTATION_PLAN.structured.json", structured_fixture())
@@ -149,9 +153,11 @@ def build(project: Path, task_file: Path) -> dict:
         raise CanaryError(
             f"restart canary is not in execution phase: {decision.get('resume_phase')!r}"
         )
-    if decision.get("eligible") != ["D001"]:
+    expected_eligible=(["D001"] if expected_eligible is None else list(expected_eligible))
+    if decision.get("eligible") != expected_eligible:
         raise CanaryError(
-            f"restart canary did not expose exactly D001 as eligible: {decision.get('eligible')!r}"
+            f"canary eligibility mismatch: expected {expected_eligible!r}, "
+            f"got {decision.get('eligible')!r}"
         )
 
     return {
