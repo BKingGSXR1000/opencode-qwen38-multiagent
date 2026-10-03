@@ -762,6 +762,13 @@ class LeafContractChallengeTests(unittest.TestCase):
             "",
         )
 
+    def test_verify_reporting_rule_rejects_underspecification_as_challenge(self):
+        rule=supervisor.verify_reporting_rule()
+        self.assertIn("less detail",rule)
+        self.assertIn("NOT a contradiction",rule)
+        self.assertIn("fix owned code",rule)
+        self.assertIn("mutually exclusive",rule)
+
     def test_parser_accepts_explicit_cannot_both_hold_conflict(self):
         text=(
             "CONTRACT_CHALLENGE: verify_command asserts pure-newline input "

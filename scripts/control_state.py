@@ -407,16 +407,30 @@ def _plan_contract_revision_terminal_attempts(entry, count):
                 seen.add(key)
                 attempts.add(attempt)
             continue
-        previous=str(row.get("previous_verify_sha256") or "")
-        current=str(row.get("current_verify_sha256") or "")
-        if previous and current:
-            if previous==current:
+        previous_contract=str(row.get("previous_contract_sha256") or "")
+        current_contract=str(row.get("current_contract_sha256") or "")
+        contract_fields_present=bool(previous_contract or current_contract)
+        if contract_fields_present:
+            if not (
+                len(previous_contract)==len(current_contract)==64
+                and all(c in "0123456789abcdef"
+                        for c in previous_contract+current_contract)
+                and previous_contract!=current_contract
+            ):
                 continue
-            key=("transition",previous,current)
+            key=("completion-contract-transition",
+                 previous_contract,current_contract)
         else:
-            # Backward compatibility for old rows written before digests
-            # were mandatory: retain their historical per-attempt meaning.
-            key=("legacy-attempt",attempt)
+            previous=str(row.get("previous_verify_sha256") or "")
+            current=str(row.get("current_verify_sha256") or "")
+            if previous and current:
+                if previous==current:
+                    continue
+                key=("transition",previous,current)
+            else:
+                # Backward compatibility for old rows written before digests
+                # were mandatory: retain their historical per-attempt meaning.
+                key=("legacy-attempt",attempt)
         if key in seen:
             continue
         seen.add(key)

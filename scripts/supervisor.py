@@ -7,6 +7,7 @@ from control_state import (phase_ready, ready_info as state_ready_info,
                            snapshot as state_snapshot, attempt_state,
                            load_attempts as state_load_attempts,
                            _plan_contract_revision_credit_count,
+                           _plan_contract_revision_terminal_attempts,
                            _parent_contract_repair_credit_count,
                            AUTOMATIC_ATTEMPT_LIMIT,
                            MAX_INFRASTRUCTURE_RETRY_GRANTS,
@@ -823,12 +824,35 @@ def parse_contract_challenge(text):
 
 def verify_reporting_rule():
     return (
-        "\n\nVERIFY REPORTING:\n"
-        "Say exact Verify passed only if packet verify_command ran UNCHANGED and exited 0; "
-        "label all other checks noncanonical. If failed exact Verify contradicts "
-        "Done-when/Acceptance, STOP edits and return one line: "
-        "CONTRACT_CHALLENGE: <20..800 char concrete contradiction>. "
-        "Never use this for implementation bugs or missing work; it grants no retry."
+        "\n\nVERIFY REPORTING: Pass only if packet verify_command ran UNCHANGED "
+        "and exited 0. On failure, fix owned code unless explicit Acceptance/"
+        "Done-when requirements are mutually exclusive or passing needs an "
+        "out-of-scope change; silence/less detail is NOT a contradiction. "
+        "Only then return one line: CONTRACT_CHALLENGE: <concrete contradiction>. "
+        "Never challenge implementation bugs or missing work."
+    )
+
+
+def completion_contract_sha256(leaf):
+    """Hash the bounded completion semantics that make a prior attempt obsolete."""
+    if not isinstance(leaf,dict):
+        return ""
+    payload={
+        "verify_command":str(leaf.get("verify_command") or ""),
+        "done_when":str(leaf.get("done_when") or ""),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,sort_keys=True,separators=(",",":"),ensure_ascii=True
+        ).encode()
+    ).hexdigest()
+
+
+def _valid_sha256_text(value):
+    value=str(value or "")
+    return (
+        len(value)==64
+        and all(c in "0123456789abcdef" for c in value)
     )
 
 
@@ -847,13 +871,20 @@ def plan_contract_reverify_pending(did,leaf=None):
         entry=(load_attempts().get("deliverables") or {}).get(did,{})
         rows=entry.get("plan_contract_revisions") or []
         digest=hashlib.sha256(command.encode()).hexdigest()
+        contract_digest=completion_contract_sha256(leaf)
         matching_revisions=[
             row for row in rows
             if isinstance(row,dict)
             and (
                 (
                     row.get("source")=="supervisor-plan-contract-revision"
-                    and row.get("current_verify_sha256")==digest
+                    and (
+                        row.get("current_contract_sha256")==contract_digest
+                        or (
+                            not row.get("current_contract_sha256")
+                            and row.get("current_verify_sha256")==digest
+                        )
+                    )
                 ) or (
                     row.get("source")=="supervisor-dependency-contract-repair"
                     and row.get("consumer_verify_sha256")==digest
@@ -11547,13 +11578,26 @@ def reconcile_plan_contract_revisions():
                 except (TypeError,ValueError):
                     continue
                 command=str(leaf.get("verify_command") or "")
+                current_contract=completion_contract_sha256(leaf)
                 latest=load_supervisor_verify_evidence(did).get("latest") or {}
                 old_command=(
                     str(latest.get("command") or "")
                     if isinstance(latest,dict) else ""
                 )
+                old_contract=(
+                    str(latest.get("completion_contract_sha256") or "")
+                    if isinstance(latest,dict) else ""
+                )
                 previous_result=str(latest.get("result") or "")
                 previous_executed=latest.get("executed") is True
+                contract_transition=(
+                    _valid_sha256_text(old_contract)
+                    and old_contract!=current_contract
+                )
+                legacy_verify_transition=(
+                    not _valid_sha256_text(old_contract)
+                    and old_command!=command
+                )
                 if (
                     not command
                     or not previous_executed
@@ -11561,7 +11605,7 @@ def reconcile_plan_contract_revisions():
                         previous_result=="verified"
                         or previous_result.startswith("verify-failed-")
                     )
-                    or old_command==command
+                    or not (contract_transition or legacy_verify_transition)
                 ):
                     continue
 
@@ -11574,8 +11618,18 @@ def reconcile_plan_contract_revisions():
                     row for row in rows
                     if isinstance(row,dict)
                     and row.get("source")=="supervisor-plan-contract-revision"
-                    and row.get("previous_verify_sha256")==previous_digest
-                    and row.get("current_verify_sha256")==digest
+                    and (
+                        (
+                            contract_transition
+                            and row.get("previous_contract_sha256")==old_contract
+                            and row.get("current_contract_sha256")==current_contract
+                        ) or (
+                            not contract_transition
+                            and not row.get("previous_contract_sha256")
+                            and row.get("previous_verify_sha256")==previous_digest
+                            and row.get("current_verify_sha256")==digest
+                        )
+                    )
                 ]
                 same_attempt=[
                     row for row in rows
@@ -11590,14 +11644,22 @@ def reconcile_plan_contract_revisions():
                     pass
                 elif same_attempt:
                     row=same_attempt[-1]
-                    if row.get("current_verify_sha256")!=digest:
-                        row["current_verify_sha256"]=digest
+                    updates={
+                        "current_verify_sha256":digest,
+                    }
+                    if _valid_sha256_text(old_contract):
+                        updates.update({
+                            "previous_contract_sha256":old_contract,
+                            "current_contract_sha256":current_contract,
+                        })
+                    if any(row.get(k)!=v for k,v in updates.items()):
+                        row.update(updates)
                         row["updated_at"]=time.strftime(
                             "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
                         )
                         row_changed=True
                 else:
-                    rows.append({
+                    revision={
                         "attempt":attempt,
                         "source":"supervisor-plan-contract-revision",
                         "previous_verify_sha256":previous_digest,
@@ -11606,7 +11668,13 @@ def reconcile_plan_contract_revisions():
                         "timestamp":time.strftime(
                             "%Y-%m-%dT%H:%M:%SZ",time.gmtime()
                         ),
-                    })
+                    }
+                    if _valid_sha256_text(old_contract):
+                        revision.update({
+                            "previous_contract_sha256":old_contract,
+                            "current_contract_sha256":current_contract,
+                        })
+                    rows.append(revision)
                     row_changed=True
 
                 if (
@@ -11654,11 +11722,17 @@ def persist_supervisor_verify_evidence(did,sid,command,checked,detail,error=""):
     if not attempt:
         entry=(load_attempts().get("deliverables") or {}).get(did,{})
         attempt=int(entry.get("count") or 0) if isinstance(entry,dict) else 0
+    leaf=(load_manifest().get("leaves") or {}).get(did,{})
+    contract_hash=completion_contract_sha256(leaf)
     item={
         "attempt":int(attempt or 0),
         "session":str(sid or ""),
         "timestamp":time.strftime("%Y-%m-%dT%H:%M:%SZ",time.gmtime()),
         "command":str(command or "")[:3000],
+        "completion_contract_sha256":contract_hash,
+        "done_when_sha256":hashlib.sha256(
+            str(leaf.get("done_when") or "").encode()
+        ).hexdigest() if isinstance(leaf,dict) else "",
         "executed":checked is not None,
         "exit_code":(
             int(getattr(checked,"returncode"))
@@ -15295,24 +15369,7 @@ def unclassified_native_attempt_deliverables(data=None):
         # bounded replacement credit from plan_contract_revisions; it must not
         # occupy a phantom pending-worker slot merely because no failure row is
         # written for the superseded attempt.
-        terminal_plan_revision=False
-        for row in entry.get("plan_contract_revisions",[]) or []:
-            if not isinstance(row,dict):
-                continue
-            try:
-                revision_attempt=int(row.get("attempt") or 0)
-            except (TypeError,ValueError):
-                continue
-            previous=str(row.get("previous_verify_sha256") or "")
-            current_verify=str(row.get("current_verify_sha256") or "")
-            if (
-                revision_attempt==count
-                and row.get("source")=="supervisor-plan-contract-revision"
-                and previous and current_verify and previous!=current_verify
-            ):
-                terminal_plan_revision=True
-                break
-        if terminal_plan_revision:
+        if count in _plan_contract_revision_terminal_attempts(entry,count):
             continue
 
         classified=False

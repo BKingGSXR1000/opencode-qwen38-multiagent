@@ -19,7 +19,10 @@ import urllib.request
 from pathlib import Path
 
 from acceptance_contract import must_acceptance_ids
-from control_state import _plan_contract_revision_credit_count
+from control_state import (
+    _plan_contract_revision_credit_count,
+    _plan_contract_revision_terminal_attempts,
+)
 from deterministic_dispatch import select_actions
 from runtime_contract import verify_state as verify_runtime_server_state
 
@@ -499,6 +502,8 @@ def current_attempt_is_terminal(project: Path, did: str) -> bool:
             }
         ):
             return True
+    if count in _plan_contract_revision_terminal_attempts(entry,count):
+        return True
     ready=project/".opencode-v2"/"work"/f"{did}.ready"
     return ready.is_file()
 
