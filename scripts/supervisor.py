@@ -13429,12 +13429,15 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
 
     exact_failures=plan_contract_session_exact_verify_failure_count(sid,leaf)
     if exact_failures>=2:
-        return "implementation-contract-challenge-required",(
-            f"CONTRACT_CHALLENGE_REQUIRED deliverable={did} "
+        # Two concrete repair/Verify cycles are enough for one worker attempt.
+        # Do not manufacture a Contract Challenge: most repeated failures are
+        # ordinary implementation errors. End the session and let deterministic
+        # finalize/retry/split accounting classify the failed canonical Verify.
+        return "implementation-return-required",(
+            f"EXACT_VERIFY_FAILURE_LIMIT deliverable={did} "
             f"exact_verify_failures={exact_failures} "
-            "next_action=return-single-line-CONTRACT_CHALLENGE "
-            "reason_must=name-verify_command-and-contract-authority-and-assert-conflict-or-cannot-pass "
-            "no_more_tools=true"
+            "next_action=return-without-tools attempt_will_finalize_failed_verify=true "
+            "do_not_claim_contract_conflict_without-independent-evidence=true"
         )
 
     changed,detail=_owned_artifact_changed_since_execution_baseline(did,attempt)

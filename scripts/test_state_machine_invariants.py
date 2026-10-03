@@ -4493,7 +4493,7 @@ class PlanContractReverifyDirectWriteTests(unittest.TestCase):
                 2,
             )
 
-    def test_two_failed_exact_verifies_force_contract_challenge_before_more_tools(self):
+    def test_two_failed_exact_verifies_end_attempt_without_forced_contract_challenge(self):
         rows=[
             {"command":self.verify,"status":"completed","exit_code":1},
             {"command":self.verify,"status":"completed","exit_code":1},
@@ -4515,13 +4515,12 @@ class PlanContractReverifyDirectWriteTests(unittest.TestCase):
                     "oldString":"ok\n","newString":"different\n",
                 }
             )
-        self.assertEqual(
-            state,"implementation-contract-challenge-required"
-        )
-        self.assertIn("CONTRACT_CHALLENGE_REQUIRED",detail)
+        self.assertEqual(state,"implementation-return-required")
+        self.assertIn("EXACT_VERIFY_FAILURE_LIMIT",detail)
         self.assertIn("exact_verify_failures=2",detail)
-        self.assertIn("reason_must=name-verify_command-and-contract-authority",detail)
-        self.assertIn("no_more_tools=true",detail)
+        self.assertIn("return-without-tools",detail)
+        self.assertIn("finalize_failed_verify=true",detail)
+        self.assertNotIn("CONTRACT_CHALLENGE_REQUIRED",detail)
 
     def test_failed_reverify_allows_only_explicit_authoritative_source_reads(self):
         (self.project/"package.json").write_text("{}\n")
