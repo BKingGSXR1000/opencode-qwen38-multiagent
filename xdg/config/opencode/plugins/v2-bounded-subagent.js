@@ -469,8 +469,9 @@ function guardProgressHandoff(directory, event, output) {
   if (tool === "subagent" || tool === "task") return;
   const args = hookArgs(event, output);
   const payload = Buffer.from(JSON.stringify(args), "utf8").toString("base64");
+  let raw;
   try {
-    supervisor(directory, [
+    raw = supervisor(directory, [
       "--progress-handoff-tool-check", sessionID,
       "--tool-name", tool,
       "--tool-args-b64", payload,
@@ -479,6 +480,12 @@ function guardProgressHandoff(directory, event, output) {
     const detail = String(error?.stderr || error?.message || error).trim();
     if (detail.includes("not-probe-builder") || detail.includes("not-progress-handoff")) return;
     if (detail.includes("PROGRESS_HANDOFF_DENY")) throw new Error(detail);
+  }
+  const progressResult = String(raw || "").trim();
+  if (/^PROGRESS_HANDOFF_RETURN_REQUIRED\b/.test(progressResult)) {
+    // Recoverable steering after the exact handoff Verify already passed.
+    // Reject this extra tool without aborting the worker so it can return.
+    throw new Error(progressResult);
   }
 }
 
@@ -890,6 +897,11 @@ if (process.env.V2_BOUNDED_SUBAGENT_SELFTEST === "1") {
     if (!/^EARLY_WRITE_IMPLEMENTATION_(?:EXACT_VERIFY_REQUIRED|RETURN_REQUIRED)\b/.test(marker)) {
       throw new Error("plan-contract reverify recoverable guard marker changed");
     }
+  }
+  const progressReturnRequired =
+    "PROGRESS_HANDOFF_RETURN_REQUIRED session=ses-test PROGRESS_EXACT_VERIFY_PASSED deliverable=D004-A";
+  if (!/^PROGRESS_HANDOFF_RETURN_REQUIRED\b/.test(progressReturnRequired)) {
+    throw new Error("progress handoff return-required marker changed");
   }
   const event = { kind: "compaction", headers: {} };
   if (!markRequestPurpose(event) || event.headers["x-v2-request-purpose"] !== "compaction") {

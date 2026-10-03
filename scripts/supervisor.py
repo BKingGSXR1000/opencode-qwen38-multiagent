@@ -13171,11 +13171,17 @@ def progress_handoff_tool_state(sid,tool,args):
 
     if split_handoff_progress_complete(progress_text):
         expected=str(leaf.get("verify_command") or "").strip()
-        command=str((args or {}).get("command") or "").strip() if isinstance(args,dict) else ""
-        if tool=="bash" and expected and command==expected:
+        exact_state=plan_contract_session_exact_verify_state(sid,leaf)
+        if exact_state=="passed":
+            return "return-required",(
+                f"PROGRESS_EXACT_VERIFY_PASSED deliverable={did} "
+                "next_action=return-without-tools no_more_tools=true"
+            )
+        if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
             return "allow","progress-ready-exact-verify"
         return "deny",(
             "PROGRESS_READY_IMMUTABLE "
+            f"verify_state={exact_state} "
             f"next_tool=exact-verify:{expected or '-'} "
             "no-rewrite=true no-discovery=true"
         )

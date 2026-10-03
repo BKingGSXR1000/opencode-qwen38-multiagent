@@ -10920,6 +10920,9 @@ class ProgressHandoffBatchGuardTests(unittest.TestCase):
         ), mock.patch.object(
             supervisor,"session_completed_tool_inputs",
             return_value=history
+        ), mock.patch.object(
+            supervisor,"plan_contract_session_exact_verify_state",
+            return_value="not-attempted"
         ):
             self.assertEqual(
                 supervisor.progress_handoff_tool_state(
@@ -10944,6 +10947,93 @@ class ProgressHandoffBatchGuardTests(unittest.TestCase):
             )
             self.assertEqual(state,"deny")
             self.assertIn("PROGRESS_READY_IMMUTABLE",detail)
+
+    def test_progress_ready_accepts_exact_worker_verify_wrapper(self):
+        import base64
+        import shlex
+        progress=str(self.progress)
+        verify="python3 -c \"print('ok')\""
+        self.progress.write_text(
+            "HANDOFF_READY: true\n\n"
+            "Findings:\nknown fact\n\n"
+            "Evidence:\nmeasured evidence\n\n"
+            "Next step:\nWriter updates only the parent-owned manifest.\n"
+        )
+        history=[("write",{"filePath":progress})]
+        child={
+            "id":"D001","parent":"D009",
+            "split_handoff_only":True,"owned_artifact_paths":[],
+            "verify_command":verify,
+        }
+        parent={
+            "id":"D009",
+            "owned_artifact_paths":[".opencode-v2/TEST_CHECKS.json"],
+        }
+        wrapper=str((supervisor.ROOT/"scripts"/"worker_sandbox.py").resolve())
+        command=shlex.join([
+            "python3",wrapper,"run-worker-verify",
+            "--project",str(self.project.resolve()),
+            "--session",self.sid,"--agent","probe-builder",
+            "--command-b64",base64.b64encode(verify.encode()).decode(),
+        ])
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="probe-builder"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value="DELIVERABLE: D001\n"
+        ), mock.patch.object(
+            supervisor,"load_manifest",
+            return_value={"leaves":{"D001":child,"D009":parent}}
+        ), mock.patch.object(
+            supervisor,"session_completed_tool_inputs",return_value=history
+        ), mock.patch.object(
+            supervisor,"plan_contract_session_exact_verify_state",
+            return_value="not-attempted"
+        ):
+            self.assertEqual(
+                supervisor.progress_handoff_tool_state(
+                    self.sid,"bash",{"command":command}
+                ),
+                ("allow","progress-ready-exact-verify"),
+            )
+
+    def test_progress_ready_passed_verify_requires_return_without_tools(self):
+        progress=str(self.progress)
+        verify="python3 -c \"print('ok')\""
+        self.progress.write_text(
+            "HANDOFF_READY: true\n\n"
+            "Findings:\nknown fact\n\n"
+            "Evidence:\nmeasured evidence\n\n"
+            "Next step:\nWriter updates only the parent-owned manifest.\n"
+        )
+        history=[("write",{"filePath":progress})]
+        child={
+            "id":"D001","parent":"D009",
+            "split_handoff_only":True,"owned_artifact_paths":[],
+            "verify_command":verify,
+        }
+        parent={
+            "id":"D009",
+            "owned_artifact_paths":[".opencode-v2/TEST_CHECKS.json"],
+        }
+        with mock.patch.object(
+            supervisor,"_session_agent_db",return_value="probe-builder"
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value="DELIVERABLE: D001\n"
+        ), mock.patch.object(
+            supervisor,"load_manifest",
+            return_value={"leaves":{"D001":child,"D009":parent}}
+        ), mock.patch.object(
+            supervisor,"session_completed_tool_inputs",return_value=history
+        ), mock.patch.object(
+            supervisor,"plan_contract_session_exact_verify_state",
+            return_value="passed"
+        ):
+            state,detail=supervisor.progress_handoff_tool_state(
+                self.sid,"read",{"filePath":str(self.project/"anything.txt")}
+            )
+        self.assertEqual(state,"return-required")
+        self.assertIn("PROGRESS_EXACT_VERIFY_PASSED",detail)
+        self.assertIn("return-without-tools",detail)
 
     def test_progress_ready_denies_unowned_writer_delta(self):
         progress=str(self.progress)
