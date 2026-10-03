@@ -387,6 +387,22 @@ def _human_test_runner_summary_contract_error(done_when: str, command: str):
     )
 
 
+EXPLICIT_DONE_WHEN_COMMAND_RE = re.compile(
+    r"\x60((?:(?:python3?|pytest|node|nodejs|npm|pnpm|yarn|bash|sh)\s+|\.opencode-v2/bin/)[^\x60\n]+)\x60",
+    re.I,
+)
+
+
+def explicit_done_when_commands(done_when: str):
+    """Return literal executable obligations deliberately embedded in Done-when."""
+    seen=[]
+    for match in EXPLICIT_DONE_WHEN_COMMAND_RE.finditer(str(done_when or "")):
+        command=match.group(1).strip()
+        if command and command not in seen:
+            seen.append(command)
+    return seen
+
+
 def validate_verify_adequacy(done_when: str, verify_command: str):
     """Reject obvious static-proxy Verifies for behavioral completion contracts.
 
@@ -402,6 +418,14 @@ def validate_verify_adequacy(done_when: str, verify_command: str):
     summary_error=_human_test_runner_summary_contract_error(done,command)
     if summary_error:
         errors.append(summary_error)
+    if command != ".opencode-v2/bin/run-checks":
+        for required in explicit_done_when_commands(done):
+            if required not in command:
+                errors.append(
+                    "Done-when explicitly requires command "
+                    + chr(96) + required + chr(96)
+                    + " but verify_command does not execute it"
+                )
     if SERVICE_DONE_WHEN_RE.search(done) and not SERVICE_VERIFY_RE.search(command):
         errors.append(
             "Verify command does not exercise the server/service behavior required by Done when"

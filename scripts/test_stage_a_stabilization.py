@@ -518,6 +518,7 @@ class FinalTestLeafContextTests(unittest.TestCase):
                         "verify_deps": ["D007"],
                         "acceptance_ids": ["A020"],
                         "verify_command": ".opencode-v2/bin/run-checks",
+                        "done_when": "Final runner executes `python3 -m unittest discover -s tests -v`.",
                     },
                 }
             }
@@ -530,6 +531,10 @@ class FinalTestLeafContextTests(unittest.TestCase):
             self.assertEqual(
                 final["test_checks_contract"]["runner"],
                 ".opencode-v2/bin/run-checks",
+            )
+            self.assertEqual(
+                final["test_checks_contract"]["required_commands"],
+                ["python3 -m unittest discover -s tests -v"],
             )
             self.assertEqual(
                 final["verify_dependency_artifacts"]["D007"],

@@ -15,6 +15,7 @@ from control_policy import control_policy_epoch
 from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 import project_memory
 from dependency_interfaces import direct_verified_interfaces
+from leaf_contract import explicit_done_when_commands
 
 QUERY_PROTOCOL = "v2-materialized-control-query-v1"
 LEAF_CONTEXT_PROTOCOL = "v2-leaf-context-v1"
@@ -454,6 +455,9 @@ def build_leaf_contexts(project, manifest, snapshot=None):
             packet["test_checks_contract"] = {
                 "runner": RUN_CHECKS_COMMAND,
                 "schema": TEST_CHECKS_SCHEMA,
+                "required_commands": explicit_done_when_commands(
+                    packet.get("done_when","")
+                ),
             }
 
         if "-" in did:

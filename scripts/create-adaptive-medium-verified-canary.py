@@ -192,15 +192,21 @@ def structured_fixture():
         leaf["done_when"]+=(
             " The immutable corresponding spec_tests functional checks pass."
         )
+    worker_tests="python3 -m unittest discover -s tests -v"
+    leaves[3]["verify_command"]+=f" && {worker_tests}"
+    tick=chr(96)
     leaves[3]["done_when"]+=(
-        " Worker-authored tests also run via python3 -m unittest discover -s tests -v."
+        f" Worker-authored tests also pass via {tick}{worker_tests}{tick}."
     )
     leaves[4]["outcome"]=(
         "Canonical TEST_CHECKS.json executes BOTH existing spec_tests and "
         "worker-authored tests without weakening either."
     )
+    spec_suite="python3 -m unittest discover -s spec_tests -v"
+    tick=chr(96)
     leaves[4]["done_when"]=(
-        "The exact final runner passes spec_tests and worker-authored tests."
+        "The exact final runner executes and passes both "
+        f"{tick}{spec_suite}{tick} and {tick}{worker_tests}{tick}."
     )
     return value
 

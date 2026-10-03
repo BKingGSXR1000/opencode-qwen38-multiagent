@@ -2,7 +2,7 @@
 import argparse,json,os,re,shlex,stat,subprocess,sys,tempfile,time
 from pathlib import Path, PurePosixPath
 from control_state import IMPLEMENTATION_PLAN_SCAFFOLD
-from leaf_contract import validate_verify_command
+from leaf_contract import validate_verify_command, explicit_done_when_commands
 from state_io import atomic_write_text
 from test_checks_contract import RUN_CHECKS_COMMAND, TEST_CHECKS_SCHEMA
 
@@ -125,6 +125,29 @@ def bootstrap_control_surface(project):
         atomic_write(path,text); path.chmod(path.stat().st_mode|stat.S_IXUSR|stat.S_IXGRP|stat.S_IXOTH)
     return wrappers
 
+def guarded_final_manifest_required_commands(project: Path):
+    """Commands explicitly promised by the leaf that owns TEST_CHECKS.json."""
+    path=project/".opencode-v2"/"IMPLEMENTATION_PLAN.guard.json"
+    try:
+        value=json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,json.JSONDecodeError):
+        return []
+    leaves=value.get("leaves") if isinstance(value,dict) else None
+    if not isinstance(leaves,dict):
+        return []
+    required=[]
+    for did,leaf in sorted(leaves.items()):
+        if not isinstance(leaf,dict):
+            continue
+        owned=leaf.get("owned_artifact_paths")
+        if not isinstance(owned,list) or ".opencode-v2/TEST_CHECKS.json" not in owned:
+            continue
+        for command in explicit_done_when_commands(leaf.get("done_when","")):
+            if command not in required:
+                required.append(command)
+    return required
+
+
 def run_checks(project: Path, persist=True):
     ctrl=project/".opencode-v2"; spec_path=ctrl/"TEST_CHECKS.json"; report_path=ctrl/"TEST_REPORT.json"; logs=ctrl/"test-logs"
     if not spec_path.exists(): raise ValueError("TEST_CHECKS.json missing")
@@ -133,6 +156,15 @@ def run_checks(project: Path, persist=True):
     required_targets=[]
     for raw in required: required_targets.append((raw,validate_required_file(project,raw)))
     missing=[raw for raw,target in required_targets if not target.exists()]
+    guarded_required_commands=guarded_final_manifest_required_commands(project)
+    manifest_commands=[
+        str(item.get("command") or "").strip()
+        for item in checks if isinstance(item,dict)
+    ]
+    missing_required_commands=[
+        command for command in guarded_required_commands
+        if command not in manifest_commands
+    ]
     results=[]
     if persist:
         logs.mkdir(parents=True,exist_ok=True)
@@ -154,8 +186,23 @@ def run_checks(project: Path, persist=True):
         if rc!=0 or timed_out:
             result["diagnostic"]=bounded_failure_diagnostic(stdout,stderr)
         results.append(result)
-    passed=not missing and all(x["exit_code"]==0 and not x["timed_out"] for x in results)
-    report={"protocol":"v2-test-report-v1","status":"pass" if passed else "fail","checks_run":len(results),"checks_passed":sum(1 for x in results if x["exit_code"]==0 and not x["timed_out"]),"missing_required_files":missing,"checks":results}
+    passed=(
+        not missing
+        and not missing_required_commands
+        and all(x["exit_code"]==0 and not x["timed_out"] for x in results)
+    )
+    report={
+        "protocol":"v2-test-report-v1",
+        "status":"pass" if passed else "fail",
+        "checks_run":len(results),
+        "checks_passed":sum(
+            1 for x in results
+            if x["exit_code"]==0 and not x["timed_out"]
+        ),
+        "missing_required_files":missing,
+        "missing_required_commands":missing_required_commands,
+        "checks":results,
+    }
     if persist:
         atomic_write(report_path,json.dumps(report,indent=2,sort_keys=True)+"\n")
     return report, 0 if passed else 1

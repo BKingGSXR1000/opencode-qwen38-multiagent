@@ -17,6 +17,8 @@ _POLICY_FILES = (
     "acceptance_contract.py",
     "structured_plan.py",
     "leaf_contract.py",
+    "test_checks_contract.py",
+    "run-checks.py",
     "control-guard.py",
     "control_state.py",
     "deterministic_dispatch.py",

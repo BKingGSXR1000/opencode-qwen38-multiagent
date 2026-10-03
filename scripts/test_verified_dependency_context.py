@@ -49,6 +49,9 @@ class VerifiedDependencyContextTests(unittest.TestCase):
         names={p.name for p in reexec_source_paths()}
         self.assertIn("dependency_interfaces.py",names)
         self.assertIn("control_query_views.py",names)
+        self.assertIn("leaf_contract.py",names)
+        self.assertIn("test_checks_contract.py",names)
+        self.assertIn("run-checks.py",names)
 
 if __name__=="__main__":
     unittest.main()
