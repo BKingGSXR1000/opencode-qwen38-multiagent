@@ -17587,12 +17587,23 @@ REFERENCE_POLICY_RE=re.compile(
 
 
 def reference_foundation_marker_complete(text):
-    # Require one exact READY marker as the final non-empty line.
-    lines=[line.strip() for line in str(text or "").splitlines() if line.strip()]
-    if not lines or lines[-1] != REFERENCE_FOUNDATION_MARKER:
+    # Require exactly one READY marker as the final non-empty line. Accept one
+    # Markdown inline-code wrapper because the agent contract presents the
+    # literal marker in backticks; fenced/embedded/multiple markers remain
+    # invalid.
+    raw=str(text or "")
+    lines=[line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines or raw.count(REFERENCE_FOUNDATION_MARKER)!=1:
         return False
-    markers=[line for line in lines if line == REFERENCE_FOUNDATION_MARKER]
-    return markers == [REFERENCE_FOUNDATION_MARKER]
+    final=lines[-1]
+    if final == REFERENCE_FOUNDATION_MARKER:
+        return True
+    return (
+        final.startswith(chr(96))
+        and final.endswith(chr(96))
+        and not final.startswith(chr(96)*2)
+        and final[1:-1].strip()==REFERENCE_FOUNDATION_MARKER
+    )
 
 
 def reference_policy_from_text(text):

@@ -117,8 +117,9 @@ When those six foundation facts are verified:
   until full validation evidence exists;
 - initialize/maintain a compact `missing` list for later validation work;
 - write a concise `.opencode-v2/REFERENCE_FOUNDATION.md` (target < 8 KB) ending
-  with the exact marker:
-  `<!-- REFERENCE_FOUNDATION_READY -->`
+  with the literal marker line below. Do not wrap this final line in Markdown
+  backticks or a code fence:
+  <!-- REFERENCE_FOUNDATION_READY -->
 - set `.opencode-v2/acceptance/reference-work.json` to
   `{"mode":"foundation","status":"complete"}`;
 - return exactly `REFERENCE_FOUNDATION_READY`.
