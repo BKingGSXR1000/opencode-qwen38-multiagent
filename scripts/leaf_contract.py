@@ -402,6 +402,85 @@ def embedded_python_server_http_verify(command: str) -> bool:
     return False
 
 
+def _javascript_without_literals(payload: str) -> str:
+    """Mask JS strings/comments while preserving executable punctuation."""
+    out=[];i=0;n=len(payload);quote=""
+    while i<n:
+        ch=payload[i]
+        if quote:
+            if ch=="\\":
+                out.extend("  ");i+=2;continue
+            if ch==quote:
+                quote=""
+            out.append(" ")
+            i+=1
+            continue
+        if ch in {"'",'"',"`"}:
+            quote=ch;out.append(" ");i+=1;continue
+        if ch=="/" and i+1<n and payload[i+1]=="/":
+            while i<n and payload[i]!="\n":
+                out.append(" ");i+=1
+            continue
+        if ch=="/" and i+1<n and payload[i+1]=="*":
+            out.extend("  ");i+=2
+            while i<n:
+                if i+1<n and payload[i]=="*" and payload[i+1]=="/":
+                    out.extend("  ");i+=2;break
+                out.append(" ");i+=1
+            continue
+        out.append(ch);i+=1
+    return "".join(out)
+
+
+def embedded_node_server_http_verify(command: str) -> bool:
+    """Recognize a real Node -e server launch + localhost HTTP probe.
+
+    Syntax must already be valid. String/comment mentions alone never count:
+    executable code must call spawn/child_process.spawn, call fetch, and contain
+    an explicit fail-closed throw or non-zero process.exit.
+    """
+    try:
+        tokens=_shell_tokens(command)
+    except ValueError:
+        return False
+    for i in range(len(tokens)-2):
+        if tokens[i].rsplit("/",1)[-1] not in {"node","nodejs"}:
+            continue
+        if tokens[i+1] not in {"-e","--eval"}:
+            continue
+        payload=tokens[i+2]
+        if any(
+            "invalid JavaScript syntax" in err
+            for err in _embedded_interpreter_syntax_errors(tokens[i:i+3])
+        ):
+            continue
+        code=_javascript_without_literals(payload)
+        spawn_call=bool(re.search(
+            r"\b(?:spawn|child_process\s*\.\s*spawn)\s*\(",code
+        ))
+        fetch_call=bool(re.search(r"\bfetch\s*\(",code))
+        fail_closed=bool(re.search(
+            r"\bthrow\s+new\s+Error\s*\(|"
+            r"\bprocess\s*\.\s*exit\s*\(\s*[1-9][0-9]*\s*\)",
+            code,
+        ))
+        server_arg=bool(re.search(
+            r"\b(?:spawn|child_process\s*\.\s*spawn)\s*\(\s*"
+            r"['\"](?:node|nodejs)['\"]\s*,\s*\[\s*"
+            r"['\"][^'\"]+\.js['\"]",
+            payload,
+        ))
+        local_http=bool(re.search(
+            r"\bfetch\s*\(\s*['\"]https?://(?:127\.0\.0\.1|localhost)"
+            r"(?::[0-9]+)?(?:/|['\"])",
+            payload,
+            re.I,
+        ))
+        if spawn_call and server_arg and fetch_call and local_http and fail_closed:
+            return True
+    return False
+
+
 TEST_RUNNER_HUMAN_SUMMARY_RE = re.compile(
     r"(?:unittest(?:\W|$)|pytest(?:\W|$)|npm\s+test|pnpm\s+test|yarn\s+test)",
     re.I,
@@ -482,10 +561,14 @@ def validate_verify_adequacy(done_when: str, verify_command: str):
                     + chr(96) + required + chr(96)
                     + " but verify_command does not execute it"
                 )
+    embedded_service=(
+        embedded_python_server_http_verify(command)
+        or embedded_node_server_http_verify(command)
+    )
     if (
         SERVICE_DONE_WHEN_RE.search(done)
         and not SERVICE_VERIFY_RE.search(command)
-        and not embedded_python_server_http_verify(command)
+        and not embedded_service
     ):
         errors.append(
             "Verify command does not exercise the server/service behavior required by Done when"
@@ -493,6 +576,7 @@ def validate_verify_adequacy(done_when: str, verify_command: str):
     if (
         BEHAVIORAL_DONE_WHEN_RE.search(done)
         and not RUNTIME_VERIFY_RE.search(command)
+        and not embedded_service
     ):
         errors.append(
             "Verify command is static-proxy-only for behavioral Done when; "

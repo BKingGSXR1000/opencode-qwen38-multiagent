@@ -119,7 +119,7 @@ def has_compound_stage_sequence(text):
         or EXPLICIT_MIXED_STAGE_SEQUENCE_RE.search(text)
     )
 EXTERNAL_ACQUISITION_RE = re.compile(
-    r"(?:\b(?:fetch(?:ed|ing)?|download(?:ed|ing)?|vendor(?:ed|ing)?|research(?:ed|ing)?)\b"
+    r"(?:\b(?:fetch(?:ed|ing)?|download(?:ed|ing)?|vendor(?:ed|ing)?|research(?:ed|ing)?)\b(?=\s)"
     r".{0,100}\b(?:https?://|external|public\s+source|authoritative|cdn|jpl|horizons|unpkg|jsdelivr)\b"
     r"|\b(?:curl|wget)\s+https?://)",
     re.I,
@@ -129,12 +129,89 @@ PREEXISTING_EXTERNAL_STATE_RE = re.compile(
     r"(?:fetched|downloaded|vendored|researched)\b",
     re.I,
 )
+LOCAL_VENDORED_STATE_RE = re.compile(
+    r"\b(?:already[- ]frozen\s+)?locally[- ]vendored\b",
+    re.I,
+)
+NEGATED_EXTERNAL_ACQUISITION_RE = re.compile(
+    r"\b(?:"
+    r"not\s+(?:a\s+)?(?:fresh\s+)?external\s+(?:acquisition|download|fetch|research)"
+    r"|without\s+(?:any\s+)?external\s+(?:acquisition|download|fetch|research)"
+    r")\b",
+    re.I,
+)
 
 def external_acquisition_match(text):
-    # Explicitly pre-existing/frozen artifacts are inputs, not acquisition
-    # performed by this leaf. Unqualified/active acquisition remains fail-closed.
-    scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",str(text or ""))
+    # Explicitly pre-existing/frozen artifacts and explicit negations are
+    # inputs/non-actions, not acquisition performed by this leaf. Unqualified
+    # active acquisition remains fail-closed.
+    scrubbed=str(text or "")
+    scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",scrubbed)
+    scrubbed=LOCAL_VENDORED_STATE_RE.sub("preexisting-artifact",scrubbed)
+    scrubbed=NEGATED_EXTERNAL_ACQUISITION_RE.sub("negated-external",scrubbed)
     return EXTERNAL_ACQUISITION_RE.search(scrubbed)
+
+
+def prune_redundant_acceptance_ids(raw):
+    """Reduce task-shape-only duplicate MUST assignments without losing coverage.
+
+    A planner often assigns the same UI MUSTs to both implementation and
+    behavioral-test leaves. If both leaves exceed the S/M acceptance-id limit,
+    a naive repair can delete the same ID from both and lose global coverage.
+    This canonicalizer removes only IDs that still have another owning leaf.
+    It never invents IDs, never removes sole coverage, and leaves genuinely
+    oversized non-redundant leaves for normal fail-closed repair.
+    """
+    if not isinstance(raw,dict) or not isinstance(raw.get("leaves"),list):
+        return raw,[]
+    leaves=raw["leaves"]
+    counts=defaultdict(int)
+    clean={}
+    for index,item in enumerate(leaves):
+        if not isinstance(item,dict):
+            continue
+        ids=item.get("acceptance_ids")
+        complexity=str(item.get("complexity") or "").strip().upper()
+        if complexity not in TASK_SHAPE_ACCEPTANCE_LIMIT or not isinstance(ids,list):
+            continue
+        if (
+            any(not isinstance(aid,str) or not ACC_RE.fullmatch(aid.strip()) for aid in ids)
+            or len(ids)!=len(set(ids))
+        ):
+            continue
+        normalized=[aid.strip() for aid in ids]
+        clean[index]=normalized
+        for aid in normalized:
+            counts[aid]+=1
+
+    changes=[]
+    for index,item in enumerate(leaves):
+        if index not in clean:
+            continue
+        complexity=str(item.get("complexity") or "").strip().upper()
+        limit=TASK_SHAPE_ACCEPTANCE_LIMIT[complexity]
+        ids=list(clean[index])
+        while len(ids)>limit:
+            candidate_index=None
+            candidate_count=1
+            for pos,aid in enumerate(ids):
+                if counts[aid]>candidate_count:
+                    candidate_index=pos
+                    candidate_count=counts[aid]
+            if candidate_index is None:
+                break
+            removed=ids.pop(candidate_index)
+            counts[removed]-=1
+            changes.append({
+                "key":str(item.get("key") or ""),
+                "removed":removed,
+                "remaining_global_owners":counts[removed],
+            })
+        if ids!=item.get("acceptance_ids"):
+            item["acceptance_ids"]=ids
+    return raw,changes
+
+
 HOST_REMEDIATION_RE = re.compile(
     r"\b(?:sudo|systemctl|service\s+[-\w.@:]+\s+(?:start|stop|restart|reload|force-reload)|"
     r"daemon-reload|apt(?:-get)?\s+install|dnf\s+install|yum\s+install|pacman\s+-S|"
@@ -427,7 +504,8 @@ def compile_plan(project: Path):
         return False,errors
 
     raw,helper_relocations=relocate_reserved_worker_helpers(raw)
-    if helper_relocations:
+    raw,acceptance_prunes=prune_redundant_acceptance_ids(raw)
+    if helper_relocations or acceptance_prunes:
         atomic_write_json(src,raw)
 
     leaves,errors=normalize_document(raw)

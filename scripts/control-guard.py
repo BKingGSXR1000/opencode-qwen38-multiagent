@@ -57,7 +57,7 @@ def has_compound_stage_sequence(text):
         or EXPLICIT_MIXED_STAGE_SEQUENCE_RE.search(text)
     )
 EXTERNAL_ACQUISITION_RE = re.compile(
-    r"(?:\b(?:fetch(?:ed|ing)?|download(?:ed|ing)?|vendor(?:ed|ing)?|research(?:ed|ing)?)\b"
+    r"(?:\b(?:fetch(?:ed|ing)?|download(?:ed|ing)?|vendor(?:ed|ing)?|research(?:ed|ing)?)\b(?=\s)"
     r".{0,100}\b(?:https?://|external|public\s+source|authoritative|cdn|jpl|horizons|unpkg|jsdelivr)\b"
     r"|\b(?:curl|wget)\s+https?://)",
     re.I,
@@ -67,11 +67,26 @@ PREEXISTING_EXTERNAL_STATE_RE = re.compile(
     r"(?:fetched|downloaded|vendored|researched)\b",
     re.I,
 )
+LOCAL_VENDORED_STATE_RE = re.compile(
+    r"\b(?:already[- ]frozen\s+)?locally[- ]vendored\b",
+    re.I,
+)
+NEGATED_EXTERNAL_ACQUISITION_RE = re.compile(
+    r"\b(?:"
+    r"not\s+(?:a\s+)?(?:fresh\s+)?external\s+(?:acquisition|download|fetch|research)"
+    r"|without\s+(?:any\s+)?external\s+(?:acquisition|download|fetch|research)"
+    r")\b",
+    re.I,
+)
 
 def external_acquisition_match(text):
-    # Explicitly pre-existing/frozen artifacts are inputs, not acquisition
-    # performed by this leaf. Unqualified/active acquisition remains fail-closed.
-    scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",str(text or ""))
+    # Explicitly pre-existing/frozen artifacts and explicit negations are
+    # inputs/non-actions, not acquisition performed by this leaf. Unqualified
+    # active acquisition remains fail-closed.
+    scrubbed=str(text or "")
+    scrubbed=PREEXISTING_EXTERNAL_STATE_RE.sub("preexisting-artifact",scrubbed)
+    scrubbed=LOCAL_VENDORED_STATE_RE.sub("preexisting-artifact",scrubbed)
+    scrubbed=NEGATED_EXTERNAL_ACQUISITION_RE.sub("negated-external",scrubbed)
     return EXTERNAL_ACQUISITION_RE.search(scrubbed)
 HOST_REMEDIATION_RE = re.compile(
     r"\b(?:sudo|systemctl|service\s+[-\w.@:]+\s+(?:start|stop|restart|reload|force-reload)|"
