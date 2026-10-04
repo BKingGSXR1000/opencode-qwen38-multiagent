@@ -75,6 +75,45 @@ class WatchdogTelemetryFormatTests(unittest.TestCase):
         self.assertEqual(report["max_action_age"],20)
         self.assertEqual(report["max_reasoning_chars_since_action"],1600)
 
+    def test_report_marks_zero_reasoning_signal_as_not_evaluable(self):
+        rows=[
+            {
+                "session":"ses-no-reason","agent":"implementer","deliverable":"D001",
+                "epoch":100+i,"watchdog_phase":"decode",
+                "adaptive_reasoning_mode":"observe",
+                "adaptive_reasoning":{
+                    "profile":"NORMAL","gate":"no-reasoning",
+                    "action_age":i,"reasoning_chars_since_action":0,
+                    "abort":False,"reason":"",
+                },
+            }
+            for i in range(3)
+        ]
+        report=watchdog_report_placeholder.summarize(rows)[0]["adaptive_reasoning"]
+        self.assertFalse(report["visible_reasoning_signal_observed"])
+        self.assertEqual(report["visible_reasoning_signal_records"],0)
+        self.assertEqual(report["evaluation_status"],"no-visible-reasoning-signal")
+        self.assertEqual(report["candidate_episodes"],0)
+
+    def test_report_marks_positive_reasoning_signal_as_evaluable(self):
+        rows=[
+            {
+                "session":"ses-reason","agent":"implementer","deliverable":"D001",
+                "epoch":100+i,"watchdog_phase":"reasoning",
+                "adaptive_reasoning_mode":"observe",
+                "adaptive_reasoning":{
+                    "profile":"NORMAL","gate":"within-budget",
+                    "action_age":i,"reasoning_chars_since_action":chars,
+                    "abort":False,"reason":"",
+                },
+            }
+            for i,chars in enumerate((0,450,900))
+        ]
+        report=watchdog_report_placeholder.summarize(rows)[0]["adaptive_reasoning"]
+        self.assertTrue(report["visible_reasoning_signal_observed"])
+        self.assertEqual(report["visible_reasoning_signal_records"],2)
+        self.assertEqual(report["evaluation_status"],"reasoning-budget-evaluable")
+
     def test_cli_project_filter_excludes_other_canary_sessions(self):
         import contextlib
         import io

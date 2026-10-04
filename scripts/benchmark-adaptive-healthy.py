@@ -136,9 +136,28 @@ def project_telemetry(project):
           if r.get("directory")==str(project)]
     flags=[r for r in rows if r.get("adaptive_event")]
     decision_rows=[r.get("adaptive_reasoning") or {} for r in rows]
+    reasoning_signal_rows=[
+        x for x in decision_rows
+        if int(x.get("reasoning_chars_since_action") or 0)>0
+    ]
+    reasoning_signal_sessions={
+        str(r.get("session") or "")
+        for r in rows
+        if isinstance(r.get("adaptive_reasoning"),dict)
+        and int(r["adaptive_reasoning"].get("reasoning_chars_since_action") or 0)>0
+        and str(r.get("session") or "")
+    }
     return {
         "records":len(rows),
         "decision_records":sum(bool(x) for x in decision_rows),
+        "visible_reasoning_signal_records":len(reasoning_signal_rows),
+        "visible_reasoning_signal_sessions":len(reasoning_signal_sessions),
+        "adaptive_reasoning_evaluable":bool(reasoning_signal_rows),
+        "adaptive_reasoning_evaluation_status":(
+            "reasoning-budget-evaluable"
+            if reasoning_signal_rows
+            else "no-visible-reasoning-signal"
+        ),
         "would_interrupt":sum(
             r.get("adaptive_event")=="would-interrupt" for r in flags
         ),

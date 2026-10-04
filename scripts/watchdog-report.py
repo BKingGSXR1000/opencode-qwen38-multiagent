@@ -102,6 +102,10 @@ def summarize(rows):
                 previous_candidate=reason
             last=adaptive_rows[-1]
             verdict=last["adaptive_reasoning"]
+            reasoning_signal_rows=[
+                x for x in adaptive_rows
+                if int(x["adaptive_reasoning"].get("reasoning_chars_since_action") or 0)>0
+            ]
             adaptive_summary={
                 "mode":last.get("adaptive_reasoning_mode") or "unknown",
                 "profile":verdict.get("profile"),
@@ -111,6 +115,13 @@ def summarize(rows):
                 "max_reasoning_chars_since_action":max(
                     int(x["adaptive_reasoning"].get("reasoning_chars_since_action") or 0)
                     for x in adaptive_rows
+                ),
+                "visible_reasoning_signal_records":len(reasoning_signal_rows),
+                "visible_reasoning_signal_observed":bool(reasoning_signal_rows),
+                "evaluation_status":(
+                    "reasoning-budget-evaluable"
+                    if reasoning_signal_rows
+                    else "no-visible-reasoning-signal"
                 ),
                 "candidate_episodes":len(events),
                 "candidate_reasons":dict(__import__("collections").Counter(events)),
@@ -292,6 +303,7 @@ def human(summary,anomalies):
                 f"mode={adaptive.get('mode')} profile={adaptive.get('profile')} "
                 f"max_action_age={adaptive.get('max_action_age',0):.1f}s "
                 f"max_reasoning_chars={adaptive.get('max_reasoning_chars_since_action',0)} "
+                f"signal={adaptive.get('evaluation_status','unknown')} "
                 f"would_interrupt_episodes={adaptive.get('candidate_episodes',0)}"
             )
 
