@@ -538,6 +538,71 @@ def explicit_done_when_commands(done_when: str):
     return seen
 
 
+DONE_MIN_FILE_COUNT_RE = re.compile(
+    r"\bat\s+least\s+(\d+)\s+(?:[a-z0-9_.-]+\s+){0,4}files?\b",
+    re.I,
+)
+
+def _done_minimum_file_count(done_when: str):
+    match=DONE_MIN_FILE_COUNT_RE.search(str(done_when or ""))
+    return int(match.group(1)) if match else None
+
+def _python_verify_len_file_minimums(command: str):
+    try:
+        tokens=_shell_tokens(command)
+    except ValueError:
+        return []
+    found=[]
+    for i in range(len(tokens)-2):
+        base=tokens[i].rsplit("/",1)[-1]
+        if base not in {"python","python3"} or tokens[i+1]!="-c":
+            continue
+        try:
+            tree=ast.parse(tokens[i+2])
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node,ast.Assert):
+                continue
+            test=node.test
+            if not (
+                isinstance(test,ast.Compare)
+                and len(test.ops)==1
+                and isinstance(test.ops[0],ast.GtE)
+                and len(test.comparators)==1
+                and isinstance(test.comparators[0],ast.Constant)
+                and isinstance(test.comparators[0].value,int)
+                and not isinstance(test.comparators[0].value,bool)
+                and isinstance(test.left,ast.Call)
+                and isinstance(test.left.func,ast.Name)
+                and test.left.func.id=="len"
+                and len(test.left.args)==1
+                and isinstance(test.left.args[0],ast.Name)
+            ):
+                continue
+            variable=test.left.args[0].id
+            lowered=variable.lower()
+            if "file" not in lowered and "fixture" not in lowered:
+                continue
+            found.append((variable,int(test.comparators[0].value)))
+    return found
+
+def _minimum_file_count_contract_errors(done_when: str, command: str):
+    required=_done_minimum_file_count(done_when)
+    if required is None:
+        return []
+    errors=[]
+    for variable,verified in _python_verify_len_file_minimums(command):
+        if verified==required:
+            continue
+        relation="stricter than" if verified>required else "weaker than"
+        errors.append(
+            f"Verify minimum file count {verified} for {variable!r} is {relation} "
+            f"Done-when minimum {required}; keep Verify and Done-when numerically consistent"
+        )
+    return errors
+
+
 def validate_verify_adequacy(done_when: str, verify_command: str):
     """Reject obvious static-proxy Verifies for behavioral completion contracts.
 
@@ -550,6 +615,7 @@ def validate_verify_adequacy(done_when: str, verify_command: str):
     if not done or not command:
         return []
     errors=[]
+    errors.extend(_minimum_file_count_contract_errors(done,command))
     summary_error=_human_test_runner_summary_contract_error(done,command)
     if summary_error:
         errors.append(summary_error)
