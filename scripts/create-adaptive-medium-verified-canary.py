@@ -32,6 +32,61 @@ and the worker-authored tests suite. All modules remain owned only by the
 corresponding worker deliverable; do not change Verify contracts.
 """
 
+# Reference source exists ONLY inside immutable spec_tests; generated
+# worker tests are executed on its temporary copy by the contract oracle.
+# It never replaces any model-generated project artifact.
+REFERENCE_FILES={
+    "normalize.py":"""def normalize_name(value):
+    if not isinstance(value,str) or not value.strip():
+        raise ValueError("nonblank string name required")
+    return value.strip()
+""",
+    "priority.py":"""def priority_band(value):
+    if type(value) is not int or not 1 <= value <= 5:
+        raise ValueError("priority must be an integer from 1 to 5")
+    return "high" if value >= 4 else "normal"
+""",
+    "summary.py":"""from normalize import normalize_name
+from priority import priority_band
+
+def summarize(records):
+    result={"total":0,"high":0,"normal":0,"names":[]}
+    for row in records:
+        if not isinstance(row,dict) or "name" not in row or "priority" not in row:
+            raise ValueError("invalid record")
+        name=normalize_name(row["name"])
+        band=priority_band(row["priority"])
+        result["total"]+=1
+        result[band]+=1
+        result["names"].append(name)
+    result["names"].sort()
+    return result
+""",
+    "cli.py":"""import json
+import sys
+from summary import summarize
+
+def main(argv=None):
+    args=sys.argv[1:] if argv is None else argv
+    if len(args)!=1:
+        print("usage: python3 cli.py INPUT.jsonl",file=sys.stderr)
+        return 2
+    try:
+        with open(args[0],encoding="utf-8") as handle:
+            records=[json.loads(line) for line in handle if line.strip()]
+        if any(not isinstance(record,dict) for record in records):
+            raise ValueError("invalid JSONL record")
+        print(json.dumps(summarize(records),sort_keys=True,separators=(",",":")))
+        return 0
+    except (OSError,ValueError,TypeError) as exc:
+        print("error: "+str(exc),file=sys.stderr)
+        return 1
+
+if __name__=="__main__":
+    sys.exit(main())
+""",
+}
+
 SPEC_FILES={
     "test_normalize.py":r"""import unittest
 from normalize import normalize_name
@@ -161,7 +216,12 @@ if __name__=="__main__":
     unittest.main()
 """,
     "test_worker_test_contract.py":r"""import ast
+import os
 import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 
 class WorkerTestContract(unittest.TestCase):
@@ -191,6 +251,37 @@ class WorkerTestContract(unittest.TestCase):
             "tests/test_summary.py must execute the CLI through subprocess",
         )
 
+    def test_worker_suite_passes_independent_known_good_reference(self):
+        suite=pathlib.Path("tests/test_summary.py")
+        reference=pathlib.Path("spec_tests/reference")
+        self.assertTrue(suite.is_file())
+        required=("normalize.py","priority.py","summary.py","cli.py")
+        for name in required:
+            self.assertTrue((reference/name).is_file(),name)
+        with tempfile.TemporaryDirectory(prefix="trusted-worker-oracle-") as td:
+            root=pathlib.Path(td)
+            for name in required:
+                shutil.copyfile(reference/name,root/name)
+            (root/"tests").mkdir()
+            shutil.copyfile(suite,root/"tests/test_summary.py")
+            env=dict(os.environ)
+            env["PYTHONPATH"]=str(root)
+            try:
+                run=subprocess.run(
+                    [sys.executable,"-m","unittest","discover",
+                     "-s","tests","-v"],
+                    cwd=root,env=env,
+                    capture_output=True,text=True,timeout=35,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail("worker test suite timed out against reference API")
+            self.assertEqual(
+                run.returncode,0,
+                "worker-authored tests reject the known-correct API; "
+                "fix invalid test fixtures/expectations, not the canonical "
+                "implementation contract. Reference stderr: "+run.stderr[-3500:],
+            )
+
 if __name__=="__main__":
     unittest.main()
 """,
@@ -205,14 +296,26 @@ def seed_specs(project:Path):
     (target/"__init__.py").write_text("")
     for filename,content in SPEC_FILES.items():
         (target/filename).write_text(content.rstrip()+"\n",encoding="utf-8")
+    reference=target/"reference"
+    reference.mkdir()
+    for filename,content in REFERENCE_FILES.items():
+        (reference/filename).write_text(content.rstrip()+"\n",encoding="utf-8")
     manifest={
         "owner":"benchmark-author",
         "protocol":"v2-trusted-behavioral-tests-v1",
         "files":{
-            filename:hashlib.sha256(
-                (content.rstrip()+"\n").encode()
-            ).hexdigest()
-            for filename,content in SPEC_FILES.items()
+            **{
+                filename:hashlib.sha256(
+                    (content.rstrip()+"\n").encode()
+                ).hexdigest()
+                for filename,content in SPEC_FILES.items()
+            },
+            **{
+                "reference/"+filename:hashlib.sha256(
+                    (content.rstrip()+"\n").encode()
+                ).hexdigest()
+                for filename,content in REFERENCE_FILES.items()
+            },
         },
     }
     (project/".opencode-v2/work").mkdir(parents=True,exist_ok=True)

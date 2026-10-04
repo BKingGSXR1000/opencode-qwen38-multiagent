@@ -40,6 +40,57 @@ class TrustedFixtureChecks(unittest.TestCase):
             self.assertIn("FAIL",proc.stderr)
 
 
+    def test_worker_suite_validates_against_known_good_reference(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td);(p/".opencode-v2/work").mkdir(parents=True)
+            fixture.seed_specs(p)
+            (p/"tests").mkdir()
+            (p/"tests/test_summary.py").write_text(
+                "import json,subprocess,sys,tempfile,unittest\n"
+                "from pathlib import Path\n"
+                "class Tests(unittest.TestCase):\n"
+                " def test_real_subprocess(self):\n"
+                "  with tempfile.TemporaryDirectory() as td:\n"
+                "   f=Path(td)/'records.jsonl'\n"
+                "   f.write_text(json.dumps({'name':' B ','priority':4})+'\\n')\n"
+                "   r=subprocess.run([sys.executable,'cli.py',str(f)],"
+                "capture_output=True,text=True)\n"
+                "   self.assertEqual(r.returncode,0,r.stderr)\n"
+                "   self.assertEqual(json.loads(r.stdout),"
+                "{'total':1,'high':1,'normal':0,'names':['B']})\n"
+            )
+            result=subprocess.run(
+                [sys.executable,"-m","unittest",
+                 "spec_tests.test_worker_test_contract","-q"],
+                cwd=p,capture_output=True,text=True,timeout=15,
+            )
+            self.assertEqual(result.returncode,0,result.stderr)
+
+    def test_worker_suite_rejects_bad_string_priority_fixture(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td);(p/".opencode-v2/work").mkdir(parents=True)
+            fixture.seed_specs(p)
+            (p/"tests").mkdir()
+            (p/"tests/test_summary.py").write_text(
+                "import json,subprocess,sys,tempfile,unittest\n"
+                "from pathlib import Path\n"
+                "class Tests(unittest.TestCase):\n"
+                " def test_bad_string_priority(self):\n"
+                "  with tempfile.TemporaryDirectory() as td:\n"
+                "   f=Path(td)/'records.jsonl'\n"
+                "   f.write_text(json.dumps({'name':'B','priority':'high'})+'\\n')\n"
+                "   r=subprocess.run([sys.executable,'cli.py',str(f)],"
+                "capture_output=True,text=True)\n"
+                "   self.assertEqual(r.returncode,0,r.stderr)\n"
+            )
+            result=subprocess.run(
+                [sys.executable,"-m","unittest",
+                 "spec_tests.test_worker_test_contract","-q"],
+                cwd=p,capture_output=True,text=True,timeout=15,
+            )
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("known-correct API",result.stderr)
+
     def test_summary_spec_rejects_priority_grouping_instead_of_lexicographic(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td);(p/".opencode-v2/work").mkdir(parents=True)

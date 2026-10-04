@@ -138,7 +138,13 @@ controller-supplied canonical evidence packet below. The packet is the complete
 evidence surface for this run. Do not discover or execute anything else.
 
 Your FIRST tool call must create `.opencode-v2/acceptance-report.json`. Judge
-every exact MUST Axxx against the packet. If the packet does not prove a MUST,
+every exact MUST Axxx against the packet BEFORE that write. Resolve all
+evidence conflicts before committing; an accepted first write is immutable.
+After it succeeds, do not reconsider its verdict: for a committed PASS return
+only the exact bare token ACCEPTANCE_PASS; for committed FAIL return
+ACCEPTANCE_FAIL with only the IDs already marked FAIL in that report.
+A later contradictory terminal answer is a control-plane failure and cannot
+edit or override the first report. If the packet does not prove a MUST,
 record FAIL for that MUST instead of seeking more evidence. Follow the
 acceptance-validator report schema exactly; model prose alone is never success.""",
 }

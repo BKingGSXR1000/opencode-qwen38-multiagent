@@ -38,6 +38,19 @@ Prefer already-durable deterministic evidence over recreating large checks:
   `.opencode-v2/work/D*.verify-evidence.json`;
 - bounded project artifacts produced by verified probe/test leaves.
 
+One-write consistency rule:
+- Before your FIRST tool call, internally resolve EVERY Axxx against the entire
+  packet, including evidence precedence, edge cases and executable provenance.
+- The first accepted report write is a durable immutable verdict. Decide ALL
+  PASS/FAIL statuses and the top-level result BEFORE invoking write.
+- After write succeeds, NEVER reconsider a MUST, introduce new failure
+  allegations, or contradict the committed report. Return exactly
+  ACCEPTANCE_PASS for a written PASS, or ACCEPTANCE_FAIL followed by the
+  already-reported failed IDs for a written FAIL. A later contradictory
+  terminal answer is a control-plane error, not a repair mechanism.
+- If any evidence is ambiguous before write, commit a precise FAIL report.
+  Never guess PASS in the hope of revising the report later.
+
 Finite-step rule:
 - your FIRST tool call MUST create `.opencode-v2/acceptance-report.json`;
 - do not call read, list, glob, grep, bash, task, web, question, or other
