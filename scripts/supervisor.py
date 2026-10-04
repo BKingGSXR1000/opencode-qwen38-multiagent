@@ -13521,6 +13521,61 @@ def implementation_repair_authoritative_read_targets(did):
     return list(dict.fromkeys(targets))
 
 
+def implementation_verify_source_read_targets(leaf):
+    """Resolve bounded local Python unittest source files named by exact Verify."""
+    if not isinstance(leaf,dict) or not PROJECT:
+        return []
+    command=str(leaf.get("verify_command") or "").strip()
+    if not command:
+        return []
+    try:
+        parts=shlex.split(command,posix=True)
+    except ValueError:
+        return []
+    root=Path(PROJECT).resolve()
+    targets=[]
+    shell_breaks={"&&","||",";","|"}
+    i=0
+    while i+3 < len(parts):
+        if parts[i:i+3]!=["python3","-m","unittest"]:
+            i+=1
+            continue
+        token=parts[i+3]
+        if token=="discover":
+            i+=4
+            continue
+        j=i+3
+        while j < len(parts):
+            token=parts[j]
+            if token in shell_breaks:
+                break
+            if token.startswith("-"):
+                j+=1
+                continue
+            if re.fullmatch(
+                r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+",token
+            ):
+                names=token.split(".")
+                while names:
+                    candidate=root.joinpath(*names).with_suffix(".py")
+                    if candidate.is_file():
+                        try:
+                            rel=str(candidate.relative_to(root)).replace("\\","/")
+                        except ValueError:
+                            rel=""
+                        if (
+                            rel
+                            and not rel.startswith(".opencode-v2/")
+                            and rel not in targets
+                        ):
+                            targets.append(rel)
+                        break
+                    names.pop()
+            j+=1
+        i=max(i+1,j)
+    return targets[:8]
+
+
 def implementation_prewrite_read_targets(leaf):
     """Exact bounded reads allowed before an implementation worker's first write."""
     if not isinstance(leaf,dict):
@@ -13536,6 +13591,7 @@ def implementation_prewrite_read_targets(leaf):
             exists=False
         if exists:
             targets.append(rel)
+    targets.extend(implementation_verify_source_read_targets(leaf))
     # Preserve order while removing duplicates.
     return list(dict.fromkeys(targets))
 
@@ -13692,6 +13748,17 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
                 f"IMPLEMENTATION_POST_WRITE_EXACT_VERIFY_PASSED deliverable={did} "
                 "next_action=return-without-tools do_not_mutate=true"
             )
+        if exact_state=="failed" and tool=="read":
+            for target_rel in implementation_verify_source_read_targets(leaf):
+                if (
+                    _tool_targets_exact_project_path(tool,args,target_rel)
+                    and not persisted_exact_project_read_seen(sid,target_rel)
+                ):
+                    return "implementation-authoritative-read-once",(
+                        f"IMPLEMENTATION_VERIFY_SOURCE_READ deliverable={did} "
+                        f"allowed_once=read {target_rel} "
+                        "next_tool=owned-write-or-exact-verify"
+                    )
         if _tool_is_exact_leaf_verify(leaf,tool,args,sid):
             return "implementation-exact-verify",(
                 f"IMPLEMENTATION_POST_WRITE_VERIFY deliverable={did} "
@@ -13736,42 +13803,92 @@ IMPLEMENTATION_RECOVERABLE_GUARD_MARKERS=(
 )
 
 
-def persisted_implementation_guard_denials(sid):
-    """Return persisted recoverable action-guard denials for this one session.
+def persisted_implementation_guard_denials(
+    sid,did="",leaf=None,required_state=""
+):
+    """Return same-phase steering denials since the last real worker action.
 
-    Pre-execution plugin rejections are tool error parts rather than completed
-    tool turns. Count only our canonical deterministic steering markers; normal
-    command/test failures and sandbox errors are unrelated.
+    A completed owned mutation or exact canonical Verify starts a new action
+    episode. Pre-write denials therefore cannot consume the later post-Verify
+    budget, and one failed repair/Verify cycle cannot poison the next cycle.
     """
-    result=[]
-    try:
-        records=_v1_message_records(sid)
-    except Exception:
+    if not did and not required_state:
+        result=[]
+        try:
+            raw_records=_v1_message_records(sid)
+        except Exception:
+            raw_records=[]
+        for raw_record in raw_records:
+            if raw_record.get("data",{}).get("role")!="assistant":
+                continue
+            for part in _v1_message_parts(raw_record["id"]):
+                if part.get("type")!="tool":
+                    continue
+                state=part.get("state") if isinstance(part.get("state"),dict) else {}
+                if str(state.get("status") or "").lower()!="error":
+                    continue
+                combined=(
+                    str(state.get("error") or "")+" "+
+                    str(state.get("output") or "")
+                )
+                marker=next(
+                    (
+                        value for value in IMPLEMENTATION_RECOVERABLE_GUARD_MARKERS
+                        if value in combined
+                    ),
+                    "",
+                )
+                if marker:
+                    result.append({
+                        "tool":str(part.get("tool") or ""),
+                        "marker":marker,
+                        "part_id":str(part.get("id") or ""),
+                    })
         return result
-    for record in records:
-        if record.get("data",{}).get("role")!="assistant":
+
+    records=session_completed_tool_records(sid)
+    marker_by_state={
+        "implementation-write-required":
+            "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+        "implementation-exact-verify-required":
+            "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED",
+        "implementation-return-required":
+            "EARLY_WRITE_IMPLEMENTATION_RETURN_REQUIRED",
+        "implementation-contract-challenge-required":
+            "EARLY_WRITE_IMPLEMENTATION_CONTRACT_CHALLENGE_REQUIRED",
+    }
+    target_marker=marker_by_state.get(required_state,"")
+    last_action=-1
+    if did and isinstance(leaf,dict):
+        for index,record in enumerate(records):
+            if record.get("status")!="completed":
+                continue
+            tool=str(record.get("tool") or "")
+            args=record.get("input") if isinstance(record.get("input"),dict) else {}
+            if (
+                _current_tool_mutates_owned_artifact(did,tool,args)
+                or _tool_is_exact_leaf_verify(leaf,tool,args,sid)
+            ):
+                last_action=index
+    result=[]
+    for record in records[last_action+1:]:
+        if record.get("status")!="error":
             continue
-        for part in _v1_message_parts(record["id"]):
-            if part.get("type")!="tool":
-                continue
-            state=part.get("state") if isinstance(part.get("state"),dict) else {}
-            if str(state.get("status") or "").lower()!="error":
-                continue
-            combined=(
-                str(state.get("error") or "")+" "+
-                str(state.get("output") or "")
-            )
-            marker=next(
-                (value for value in IMPLEMENTATION_RECOVERABLE_GUARD_MARKERS
-                 if value in combined),
-                "",
-            )
-            if marker:
-                result.append({
-                    "tool":str(part.get("tool") or ""),
-                    "marker":marker,
-                    "part_id":str(part.get("id") or ""),
-                })
+        combined=str(record.get("error") or "")
+        marker=next(
+            (
+                value for value in IMPLEMENTATION_RECOVERABLE_GUARD_MARKERS
+                if value in combined
+            ),
+            "",
+        )
+        if not marker or (target_marker and marker!=target_marker):
+            continue
+        result.append({
+            "tool":str(record.get("tool") or ""),
+            "marker":marker,
+            "input":record.get("input") or {},
+        })
     return result
 
 
@@ -13786,11 +13903,14 @@ def enforce_early_write_gate(sid,tool="",args=None):
         "implementation-return-required",
         "implementation-contract-challenge-required",
     }:
-        prior_denials=persisted_implementation_guard_denials(sid)
+        did=parse_deliverable(
+            strip_subagent_prefix(first_user_text_db(sid))
+        )
+        leaf=(load_manifest().get("leaves") or {}).get(did,{})
+        prior_denials=persisted_implementation_guard_denials(
+            sid,did,leaf,implementation_state
+        )
         if len(prior_denials)>=MAX_RECOVERABLE_IMPLEMENTATION_GUARD_DENIALS:
-            did=parse_deliverable(
-                strip_subagent_prefix(first_user_text_db(sid))
-            )
             agent=_session_agent_db(sid)
             reason=(
                 "repeated_action_guard_noncompliance "
@@ -18607,6 +18727,7 @@ def worker_behavior_abort_reason(reason):
     prefixes=(
         "probe_research_loop_no_owned_progress",
         "early_write_deadline_no_owned_artifact_delta",
+        "repeated_action_guard_noncompliance",
         # A positive, supervisor-owned action-clock intervention is a model
         # behavior failure, NOT an infrastructure outage. The retry budget
         # must be consumed and normal bounded split recovery remain available.
