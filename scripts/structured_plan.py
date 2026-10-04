@@ -17,6 +17,68 @@ REPAIR_PROTOCOL = "v2-structured-plan-repair-v1"
 MAP_PROTOCOL = "v2-structured-plan-map-v1"
 PLAN_MARKER = "<!-- IMPLEMENTATION_PLAN_COMPLETE -->"
 RUN_CHECKS_COMMAND = ".opencode-v2/bin/run-checks"
+RESERVED_WORKER_BIN_PREFIX = ".opencode-v2/bin/"
+WORKER_TEST_HELPER_PREFIXES = ("check_","test_","verify_","validate_")
+
+
+def relocate_reserved_worker_helpers(raw):
+    """Canonicalize obvious worker-owned test helpers out of supervisor bin.
+
+    This is intentionally narrow: only single-file helper names beginning with
+    check_/test_/verify_/validate_ are relocated. Production tools remain a
+    planner error rather than being guessed into a new location. run-checks is
+    supervisor-owned and never rewritten.
+    """
+    if not isinstance(raw,dict) or not isinstance(raw.get("leaves"),list):
+        return raw,[]
+    changes=[]
+    for item in raw["leaves"]:
+        if not isinstance(item,dict):
+            continue
+        role=str(item.get("role") or "").strip()
+        if role not in WRITE_ROLES:
+            continue
+        owned=item.get("owned_artifacts")
+        verify=item.get("verify_command")
+        if not isinstance(owned,list) or not isinstance(verify,str):
+            continue
+        for index,path in enumerate(list(owned)):
+            if not isinstance(path,str) or path==RUN_CHECKS_COMMAND:
+                continue
+            if not path.startswith(RESERVED_WORKER_BIN_PREFIX):
+                continue
+            basename=path[len(RESERVED_WORKER_BIN_PREFIX):]
+            if (
+                not basename
+                or "/" in basename
+                or not basename.startswith(WORKER_TEST_HELPER_PREFIXES)
+            ):
+                continue
+            if path not in verify:
+                continue
+            target="tests/"+basename
+            owned[index]=target
+            if verify.strip()==path:
+                if target.endswith(".py"):
+                    verify="python3 "+target
+                elif target.endswith(".js"):
+                    verify="node "+target
+                else:
+                    verify=target
+            else:
+                verify=verify.replace(path,target)
+            item["verify_command"]=verify
+            for field in ("outcome","done_when"):
+                value=item.get(field)
+                if isinstance(value,str) and path in value:
+                    item[field]=value.replace(path,target)
+            changes.append({
+                "key":str(item.get("key") or ""),
+                "from":path,
+                "to":target,
+            })
+    return raw,changes
+
 
 ROLE_ALLOWLIST = {
     "probe-builder",
@@ -363,6 +425,10 @@ def compile_plan(project: Path):
         errors=[{"key":"","code":"json","message":f"structured plan JSON invalid: line {exc.lineno} column {exc.colno}: {exc.msg}"}]
         write_repair(repair,errors,source="structured-compiler")
         return False,errors
+
+    raw,helper_relocations=relocate_reserved_worker_helpers(raw)
+    if helper_relocations:
+        atomic_write_json(src,raw)
 
     leaves,errors=normalize_document(raw)
     if errors:
