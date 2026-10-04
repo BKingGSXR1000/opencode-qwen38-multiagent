@@ -12120,4 +12120,50 @@ class AcceptanceValidatorTrustBoundaryTests(unittest.TestCase):
         self.assertEqual(verdict,"fail")
 
 
+
+class SplitTesterVerifyExecutabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.old_project=supervisor.PROJECT
+        supervisor.PROJECT=str(self.project)
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        self.tmp.cleanup()
+
+    def test_rejects_explicit_top_level_when_start_is_not_package(self):
+        (self.project/"tests").mkdir()
+        err=supervisor._split_read_only_tester_verify_static_error(
+            "python3 -m unittest discover -s tests -t . -v"
+        )
+        self.assertIn("missing tests/__init__.py",err)
+
+    def test_accepts_explicit_top_level_when_start_is_package(self):
+        (self.project/"tests").mkdir()
+        (self.project/"tests/__init__.py").write_text("")
+        self.assertEqual(
+            supervisor._split_read_only_tester_verify_static_error(
+                "python3 -m unittest discover -s tests -t . -v"
+            ),
+            "",
+        )
+
+    def test_plain_discover_without_explicit_top_level_is_unchanged(self):
+        (self.project/"tests").mkdir()
+        self.assertEqual(
+            supervisor._split_read_only_tester_verify_static_error(
+                "python3 -m unittest discover -s tests -v"
+            ),
+            "",
+        )
+
+    def test_non_unittest_verify_is_unchanged(self):
+        self.assertEqual(
+            supervisor._split_read_only_tester_verify_static_error(
+                "python3 -m pytest tests -q"
+            ),
+            "",
+        )
+
 if __name__=="__main__": unittest.main()

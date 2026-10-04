@@ -2891,5 +2891,40 @@ class SharedAcceptanceRemediationOwnerTests(unittest.TestCase):
         self.assertTrue((self.ctrl/"work/D008.ready").exists())
 
 
+
+class SameIntentMaterializationGraceTests(unittest.TestCase):
+    def test_recent_transport_intent_is_pending(self):
+        now=1_000_000
+        intent={
+            "transport_may_have_been_attempted":True,
+            "created_at_ms":now-1500,
+        }
+        result=controller.pending_transport_evidence(intent,now_ms=now)
+        self.assertEqual(result["kind"],"transport-pending")
+        self.assertEqual(result["age_ms"],1500)
+        self.assertGreater(result["grace_ms"],result["age_ms"])
+
+    def test_expired_transport_intent_is_not_pending(self):
+        now=1_000_000
+        intent={
+            "transport_may_have_been_attempted":True,
+            "created_at_ms":now-int(
+                controller.NATIVE_CHILD_MATERIALIZATION_GRACE_SECONDS*1000
+            ),
+        }
+        self.assertIsNone(
+            controller.pending_transport_evidence(intent,now_ms=now)
+        )
+
+    def test_unsent_or_malformed_intent_is_never_pending(self):
+        self.assertIsNone(controller.pending_transport_evidence(
+            {"transport_may_have_been_attempted":False,"created_at_ms":999},
+            now_ms=1000,
+        ))
+        self.assertIsNone(controller.pending_transport_evidence(
+            {"transport_may_have_been_attempted":True,"created_at_ms":"bad"},
+            now_ms=1000,
+        ))
+
 if __name__ == "__main__":
     unittest.main()

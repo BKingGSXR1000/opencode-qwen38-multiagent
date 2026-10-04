@@ -1505,6 +1505,55 @@ def _split_request_verification_recovery_allowed(request):
     )
 
 
+def _split_read_only_tester_verify_static_error(command):
+    """Reject unittest discover forms requiring a package the tester cannot create."""
+    command=str(command or "").strip()
+    try:
+        parts=shlex.split(command,posix=True)
+    except ValueError:
+        return ""
+    if len(parts)<4 or parts[:4]!=["python3","-m","unittest","discover"]:
+        return ""
+    start="."
+    top=None
+    i=4
+    while i < len(parts):
+        token=parts[i]
+        if token in {"-s","--start-directory"} and i+1<len(parts):
+            start=parts[i+1]
+            i+=2
+            continue
+        if token in {"-t","--top-level-directory"} and i+1<len(parts):
+            top=parts[i+1]
+            i+=2
+            continue
+        i+=1
+    if top is None:
+        return ""
+    root=Path(PROJECT).resolve()
+    start_path=(root/start).resolve(strict=False)
+    top_path=(root/top).resolve(strict=False)
+    try:
+        rel=start_path.relative_to(top_path)
+    except ValueError:
+        return "unittest discover start directory lies outside top-level directory"
+    if not rel.parts:
+        return ""
+    cursor=top_path
+    for part in rel.parts:
+        cursor=cursor/part
+        if not (cursor/"__init__.py").is_file():
+            try:
+                missing=cursor.relative_to(root)
+            except ValueError:
+                missing=cursor
+            return (
+                "unittest discover with explicit top-level requires importable "
+                f"start package; missing {missing}/__init__.py"
+            )
+    return ""
+
+
 def _normalized_verify_for_recovery_compare(command):
     # Whitespace-only edits must not bypass the failed-command equality check.
     # Shell safety is still enforced separately by validate_verify_command().
@@ -2844,6 +2893,14 @@ def validate_split_proposal(parent, proposals, request=None):
             raise ValueError(
                 "verification-recovery tester must independently verify with a command "
                 "different from the writer Verify command"
+            )
+        tester_static_error=_split_read_only_tester_verify_static_error(
+            children[1].get("verify_command","")
+        )
+        if tester_static_error:
+            raise ValueError(
+                "verification-recovery tester Verify is not statically executable: "
+                +tester_static_error
             )
 
     if seen != parent_owned:

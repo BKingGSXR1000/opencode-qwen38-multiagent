@@ -34,6 +34,7 @@ HARNESS_ROOT = Path(__file__).resolve().parents[1]
 ROOT_SESSION_PROTOCOL = "v2-root-session-v1"
 EXECUTION_LEDGER_PROTOCOL = "v2-stage-a-controller-execution-ledger-v1"
 EXECUTION_RECEIPT_PROTOCOL = "v2-stage-a-controller-execute-v2"
+NATIVE_CHILD_MATERIALIZATION_GRACE_SECONDS = 12
 ACCEPTANCE_CONTEXT_PROTOCOL = "v2-acceptance-validator-context-v1"
 ACCEPTANCE_REMEDIATION_PROTOCOL = "v2-final-acceptance-remediation-v1"
 ACCEPTANCE_CONTEXT_MAX_FILE_BYTES = 16 * 1024
@@ -746,6 +747,28 @@ def bind_unbound_native_child(
         )
     materialize_native_child(project, base_url, unbound[0], agent)
     return attempt_snapshot(project, did)
+
+
+def pending_transport_evidence(intent: dict, now_ms: int | None = None):
+    """Suppress an exact replay briefly while native child/preclaim materializes."""
+    if not isinstance(intent,dict) or not intent.get("transport_may_have_been_attempted"):
+        return None
+    try:
+        created=int(intent.get("created_at_ms") or 0)
+    except (TypeError,ValueError):
+        return None
+    if created<=0:
+        return None
+    now=int(time.time()*1000) if now_ms is None else int(now_ms)
+    age_ms=max(0,now-created)
+    grace_ms=int(NATIVE_CHILD_MATERIALIZATION_GRACE_SECONDS*1000)
+    if age_ms>=grace_ms:
+        return None
+    return {
+        "kind":"transport-pending",
+        "age_ms":age_ms,
+        "grace_ms":grace_ms,
+    }
 
 
 def replay_receipt(intent: dict, evidence: dict) -> dict:
@@ -2861,6 +2884,9 @@ def execute_first_implementation(
                 evidence = reconcile_execution_evidence(existing, attempts, children)
                 if evidence:
                     return replay_receipt(existing, evidence)
+                pending=pending_transport_evidence(existing)
+                if pending:
+                    return replay_receipt(existing,pending)
                 raise ControllerError(
                     "AMBIGUOUS_EXECUTION replay forbidden: "
                     f"execution_id={execution_id} state_version={result['state_version']} "
