@@ -76,9 +76,10 @@ class LauncherReadinessTimeoutTests(unittest.TestCase):
         second_preflight = launcher.index(
             'python3 "$ROOT/scripts/stage_a_preflight.py"', first_preflight + 1
         )
-        driver_exec = launcher.index('exec python3 "$ROOT/scripts/drive-stage-a-run.py"')
+        driver_start = launcher.index('python3 "$ROOT/scripts/drive-stage-a-run.py"')
+        self.assertNotIn('exec python3 "$ROOT/scripts/drive-stage-a-run.py"', launcher)
         self.assertLess(first_preflight, bootstrap)
-        self.assertLess(second_preflight, driver_exec)
+        self.assertLess(second_preflight, driver_start)
         self.assertIn('--write-proof "$PREFLIGHT_PROOF"', launcher)
         self.assertIn('--preflight-proof "$PREFLIGHT_PROOF"', launcher)
         self.assertIn("ns.preflight_proof is None", tick)
