@@ -84,6 +84,7 @@ MAX_IMPLEMENTATION_PROMPT_CHARS=2500
 PROBE_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=5
 PROGRESS_HANDOFF_MAX_TOOL_TURNS_WITHOUT_DURABLE_PROGRESS=2
 EARLY_WRITE_COMPLETED_TURNS_BY_COMPLEXITY={"S":4,"M":6}
+MAX_RECOVERABLE_IMPLEMENTATION_GUARD_DENIALS=2
 MAX_REFERENCE_FOUNDATION_SESSIONS=3
 MAX_REFERENCE_VALIDATION_SESSIONS=8
 MAX_REFERENCE_FOUNDATION_WEB_CALLS=6
@@ -13670,11 +13671,84 @@ def implementation_direct_write_gate_state(sid,tool="",args=None):
     )
 
 
+IMPLEMENTATION_RECOVERABLE_GUARD_MARKERS=(
+    "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_RETURN_REQUIRED",
+    "EARLY_WRITE_IMPLEMENTATION_CONTRACT_CHALLENGE_REQUIRED",
+)
+
+
+def persisted_implementation_guard_denials(sid):
+    """Return persisted recoverable action-guard denials for this one session.
+
+    Pre-execution plugin rejections are tool error parts rather than completed
+    tool turns. Count only our canonical deterministic steering markers; normal
+    command/test failures and sandbox errors are unrelated.
+    """
+    result=[]
+    try:
+        records=_v1_message_records(sid)
+    except Exception:
+        return result
+    for record in records:
+        if record.get("data",{}).get("role")!="assistant":
+            continue
+        for part in _v1_message_parts(record["id"]):
+            if part.get("type")!="tool":
+                continue
+            state=part.get("state") if isinstance(part.get("state"),dict) else {}
+            if str(state.get("status") or "").lower()!="error":
+                continue
+            combined=(
+                str(state.get("error") or "")+" "+
+                str(state.get("output") or "")
+            )
+            marker=next(
+                (value for value in IMPLEMENTATION_RECOVERABLE_GUARD_MARKERS
+                 if value in combined),
+                "",
+            )
+            if marker:
+                result.append({
+                    "tool":str(part.get("tool") or ""),
+                    "marker":marker,
+                    "part_id":str(part.get("id") or ""),
+                })
+    return result
+
+
 def enforce_early_write_gate(sid,tool="",args=None):
     """Retire at the exact S/M deadline, except one final progress-file write."""
     implementation_state,implementation_detail=implementation_direct_write_gate_state(
         sid,tool,args
     )
+    if implementation_state in {
+        "implementation-write-required",
+        "implementation-exact-verify-required",
+        "implementation-return-required",
+        "implementation-contract-challenge-required",
+    }:
+        prior_denials=persisted_implementation_guard_denials(sid)
+        if len(prior_denials)>=MAX_RECOVERABLE_IMPLEMENTATION_GUARD_DENIALS:
+            did=parse_deliverable(
+                strip_subagent_prefix(first_user_text_db(sid))
+            )
+            agent=_session_agent_db(sid)
+            reason=(
+                "repeated_action_guard_noncompliance "
+                f"deliverable={did or 'unknown'} "
+                f"prior_denials={len(prior_denials)} "
+                f"limit={MAX_RECOVERABLE_IMPLEMENTATION_GUARD_DENIALS} "
+                f"required_state={implementation_state}"
+            )
+            set_abort_intent(sid,reason,agent,"requested")
+            log(
+                f"PLUGIN_INTERRUPT_REQUESTED session={sid} "
+                f"agent={agent} reason={reason}"
+            )
+            csv("PLUGIN_INTERRUPT_REQUESTED",sid,agent,reason)
+            return "deny",reason
     if implementation_state=="implementation-write-required":
         did=parse_deliverable(strip_subagent_prefix(first_user_text_db(sid)))
         leaf=(load_manifest().get("leaves") or {}).get(did,{})

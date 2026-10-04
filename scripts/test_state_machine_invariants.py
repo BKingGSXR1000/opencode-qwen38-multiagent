@@ -4084,6 +4084,124 @@ class ContextDeliveryRecoveryTests(unittest.TestCase):
         self.assertIn("POST_WRITE_EXACT_VERIFY_PASSED",detail)
 
 
+class ImplementationGuardDenialBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.project=Path(self.tmp.name)
+        self.old_project=supervisor.PROJECT
+        self.old_log=supervisor.LOG
+        supervisor.PROJECT=str(self.project)
+        supervisor.LOG=self.project/"events.log"
+        self.sid="ses-denial-budget"
+        self.did="D001"
+
+    def tearDown(self):
+        supervisor.PROJECT=self.old_project
+        supervisor.LOG=self.old_log
+        self.tmp.cleanup()
+
+    def _tool_parts(self,markers):
+        return [
+            {
+                "type":"tool","id":f"part-{i}","tool":"read",
+                "state":{
+                    "status":"error",
+                    "error":f"{marker} session={self.sid} detail",
+                },
+            }
+            for i,marker in enumerate(markers,1)
+        ]
+
+    def test_only_canonical_recoverable_guard_errors_are_counted(self):
+        parts=self._tool_parts([
+            "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+            "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED",
+        ])+[{
+            "type":"tool","id":"other","tool":"bash",
+            "state":{"status":"error","error":"ordinary test command failed"},
+        }]
+        with mock.patch.object(
+            supervisor,"_v1_message_records",
+            return_value=[{"id":"m1","data":{"role":"assistant"}}],
+        ), mock.patch.object(
+            supervisor,"_v1_message_parts",return_value=parts,
+        ):
+            rows=supervisor.persisted_implementation_guard_denials(self.sid)
+        self.assertEqual(len(rows),2)
+        self.assertEqual(
+            [x["marker"] for x in rows],
+            [
+                "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+                "EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED",
+            ],
+        )
+
+    def test_third_forbidden_action_requests_interrupt(self):
+        prior=self._tool_parts([
+            "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+            "EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED",
+        ])
+        with mock.patch.object(
+            supervisor,"implementation_direct_write_gate_state",
+            return_value=(
+                "implementation-write-required",
+                "IMPLEMENTATION_WRITE_REQUIRED deliverable=D001",
+            ),
+        ), mock.patch.object(
+            supervisor,"persisted_implementation_guard_denials",
+            return_value=[
+                {"marker":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED"},
+                {"marker":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED"},
+            ],
+        ), mock.patch.object(
+            supervisor,"first_user_text_db",return_value="DELIVERABLE: D001",
+        ), mock.patch.object(
+            supervisor,"_session_agent_db",return_value="implementer",
+        ), mock.patch.object(supervisor,"set_abort_intent") as intent:
+            state,detail=supervisor.enforce_early_write_gate(
+                self.sid,"read",{"filePath":"unrelated.txt"}
+            )
+        self.assertEqual(state,"deny")
+        self.assertIn("repeated_action_guard_noncompliance",detail)
+        self.assertIn("prior_denials=2",detail)
+        intent.assert_called_once()
+        self.assertEqual(intent.call_args.args[3],"requested")
+
+    def test_two_denials_do_not_block_required_owned_write(self):
+        with mock.patch.object(
+            supervisor,"implementation_direct_write_gate_state",
+            return_value=("implementation-write-only","owned write allowed"),
+        ), mock.patch.object(
+            supervisor,"persisted_implementation_guard_denials",
+            return_value=[
+                {"marker":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED"},
+                {"marker":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED"},
+            ],
+        ):
+            state,detail=supervisor.enforce_early_write_gate(
+                self.sid,"edit",{"filePath":"owned.txt"}
+            )
+        self.assertEqual(state,"implementation-write-only")
+        self.assertEqual(detail,"owned write allowed")
+
+    def test_two_denials_do_not_block_exact_verify(self):
+        with mock.patch.object(
+            supervisor,"implementation_direct_write_gate_state",
+            return_value=("implementation-exact-verify","exact verify allowed"),
+        ), mock.patch.object(
+            supervisor,"persisted_implementation_guard_denials",
+            return_value=[
+                {"marker":"EARLY_WRITE_IMPLEMENTATION_WRITE_REQUIRED"},
+                {"marker":"EARLY_WRITE_IMPLEMENTATION_EXACT_VERIFY_REQUIRED"},
+            ],
+        ):
+            state,detail=supervisor.enforce_early_write_gate(
+                self.sid,"bash",{"command":"canonical verify"}
+            )
+        self.assertEqual(state,"implementation-exact-verify")
+        self.assertEqual(detail,"exact verify allowed")
+
+
 class PlanContractReverifyDirectWriteTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
