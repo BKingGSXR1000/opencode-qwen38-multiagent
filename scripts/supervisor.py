@@ -53,6 +53,11 @@ from control_policy import (
     reexec_source_paths,
 )
 from deterministic_dispatch import select_actions as deterministic_select_actions
+from scheduler_policy import (
+    SchedulerPolicyError,
+    implementation_worker_limit,
+    implementation_worker_limit_source,
+)
 from runtime_contract import verify_state as verify_runtime_state
 from watchdog_telemetry import (
     BackendTelemetrySampler, backend_phase, invisible_watchdog_decision,
@@ -109,7 +114,6 @@ SPLIT_PARENT_CONTRACT_INVALID_PROTOCOL="v2-split-parent-contract-invalid-v1"
 VERIFY_EVIDENCE_PROTOCOL="v2-supervisor-verify-evidence-v1"
 IMPLEMENTATION_AGENTS=set(IMPLEMENTATION_ROLES)
 READ_ONLY_SPLIT_ROLES=set(READ_ONLY_ROLES)
-MAX_CONCURRENT_IMPLEMENTATION_WORKERS=3
 MAX_SPLITTER_ATTEMPTS=2
 MAX_SPLITTER_OUTPUT_LIMIT_RECOVERIES=1
 MAX_SPLITTER_PROFILE_RECOVERIES=1
@@ -10024,11 +10028,18 @@ def normalized_state_snapshot(project):
 
     leaves=data.get("leaves") if isinstance(data.get("leaves"),dict) else {}
     try:
-        active_sessions=active_implementation_sessions(strict=True)
+        worker_limit=implementation_worker_limit()
+        worker_limit_source=implementation_worker_limit_source()
         scheduler_error=""
+    except SchedulerPolicyError as exc:
+        worker_limit=0
+        worker_limit_source="invalid-environment"
+        scheduler_error=f"{type(exc).__name__}: {exc}"
+    try:
+        active_sessions=active_implementation_sessions(strict=True)
     except Exception as exc:
         active_sessions=[]
-        scheduler_error=f"{type(exc).__name__}: {exc}"
+        scheduler_error=scheduler_error or f"{type(exc).__name__}: {exc}"
     active=active_implementation_deliverables(active_sessions)
     active_ids=set(active)
     active_count=len(active_sessions)
@@ -10044,7 +10055,7 @@ def normalized_state_snapshot(project):
         reserved_ids=set()
         native_pending_ids=set()
         latent_ids=set()
-        reserved_count=MAX_CONCURRENT_IMPLEMENTATION_WORKERS
+        reserved_count=worker_limit
         latent_count=0
         scheduler_error=scheduler_error or f"{type(exc).__name__}: {exc}"
     # A reusable dispatch reservation holds capacity but is not a live
@@ -10053,11 +10064,12 @@ def normalized_state_snapshot(project):
     replayable_reserved_ids=set(reserved_ids)
     inflight_ids=active_ids | native_pending_ids
     occupied=min(
-        MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
+        worker_limit,
         active_count+reserved_count+latent_count,
     )
     data["scheduler"]={
-        "max_concurrent_workers":MAX_CONCURRENT_IMPLEMENTATION_WORKERS,
+        "max_concurrent_workers":worker_limit,
+        "worker_limit_source":worker_limit_source,
         "active_workers":active_count,
         "reserved_workers":reserved_count,
         "pending_workers":latent_count,
@@ -10065,8 +10077,7 @@ def normalized_state_snapshot(project):
         "available_worker_slots":(
             0 if scheduler_error else max(
                 0,
-                MAX_CONCURRENT_IMPLEMENTATION_WORKERS
-                -active_count-reserved_count-latent_count,
+                worker_limit-active_count-reserved_count-latent_count,
             )
         ),
         "active_deliverables":sorted(active_ids),
@@ -15519,10 +15530,8 @@ def available_implementation_slots(data=None, strict=False):
     active_ids=set(active_implementation_deliverables(sessions))
     reserved=reserved_dispatch_slot_count(data)
     latent=len(unclassified_native_attempt_deliverables(data)-active_ids)
-    return max(
-        0,
-        MAX_CONCURRENT_IMPLEMENTATION_WORKERS-active-reserved-latent,
-    )
+    limit=implementation_worker_limit()
+    return max(0,limit-active-reserved-latent)
 # V2.6.9 THREE-SLOT IMPLEMENTATION SCHEDULER END
 
 def preclaim_attempt(agent,text,dispatch_token):

@@ -29,6 +29,7 @@ def _scheduler(raw):
     raw = raw if isinstance(raw, dict) else {}
     return {
         "max_concurrent_workers": int(raw.get("max_concurrent_workers") or 0),
+        "worker_limit_source": str(raw.get("worker_limit_source") or ""),
         "active_workers": int(raw.get("active_workers") or 0),
         "reserved_workers": int(raw.get("reserved_workers") or 0),
         "available_worker_slots": int(raw.get("available_worker_slots") or 0),

@@ -38,6 +38,7 @@ _SUPERVISOR_RUNTIME_FILES = (
     # canonical plan/Acceptance contract when implementation internals change.
     "project_memory.py",
     "dependency_interfaces.py",
+    "scheduler_policy.py",
 )
 
 
