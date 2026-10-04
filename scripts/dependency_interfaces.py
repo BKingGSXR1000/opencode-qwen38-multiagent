@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 from pathlib import Path
 
 MAX_DEPS=8
@@ -16,6 +17,45 @@ MAX_FILES_PER_DEP=5
 MAX_SOURCE_BYTES=96000
 MAX_PUBLIC_SYMBOLS=25
 MAX_CONTRACT_CHARS=420
+MAX_LITERAL_HINTS=12
+MAX_LITERAL_HINT_LENGTH=32
+
+
+def _safe_literal_return_hints(func):
+    """Bounded syntactic literal observations, NEVER inferred runtime truth.
+
+    Descend into if/try/loop branches of this function, but exclude nested
+    functions/classes/lambdas; a nested return belongs to another function.
+    A conditional expression contributes both literal arms. Refuse strings
+    that could contain untrusted natural-language instructions.
+    """
+    values=set()
+
+    def literals(node):
+        if isinstance(node,ast.IfExp):
+            literals(node.body)
+            literals(node.orelse)
+        elif isinstance(node,ast.Constant):
+            value=node.value
+            if (
+                isinstance(value,str)
+                and len(value)<=MAX_LITERAL_HINT_LENGTH
+                and re.fullmatch(r"[A-Za-z0-9_.:/-]+",value)
+            ):
+                values.add(value)
+
+    def walk(node):
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef,ast.Lambda,ast.ClassDef)):
+            return
+        if isinstance(node,ast.Return):
+            literals(node.value)
+            return
+        for child in ast.iter_child_nodes(node):
+            walk(child)
+
+    for statement in func.body:
+        walk(statement)
+    return sorted(values)[:MAX_LITERAL_HINTS]
 
 
 def python_public_interface(project, relative_path):
@@ -57,11 +97,22 @@ def python_public_interface(project, relative_path):
         if isinstance(node,ast.ClassDef)
         and not node.name.startswith("_")
     })[:MAX_PUBLIC_SYMBOLS]
+    hint_source={
+        node.name:_safe_literal_return_hints(node)
+        for node in tree.body
+        if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef))
+        and node.name in functions
+    }
     return {
         "path":rel.as_posix(),
         "sha256":hashlib.sha256(raw).hexdigest(),
         "public_functions":functions,
         "public_classes":classes,
+        "literal_return_hints":{
+            name:hint_source[name] for name in sorted(hint_source)
+            if hint_source[name]
+        },
+        "literal_hint_authority":"static-AST-observation-not-verified-behavior",
     }
 
 
