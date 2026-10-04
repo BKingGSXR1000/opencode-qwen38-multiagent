@@ -206,6 +206,33 @@ class SharedLeafContractTests(unittest.TestCase):
         )
         self.assertTrue(any("server/service" in e for e in errors))
 
+    def test_flask_server_verify_via_embedded_python_subprocess_and_http(self):
+        command=(
+            "python3 -c \"import subprocess,atexit,time,urllib.request,json;"
+            "p=subprocess.Popen(['python3','app/server.py']);"
+            "atexit.register(p.terminate);time.sleep(2);"
+            "h=urllib.request.urlopen('http://localhost:8080/').read();"
+            "assert len(h)>0;"
+            "d=json.loads(urllib.request.urlopen("
+            "'http://localhost:8080/api/ephemeris?jd=2460000.5').read());"
+            "assert isinstance(d,dict) and len(d)>0\""
+        )
+        done=(
+            "python3 app/server.py starts a server on localhost:8080 "
+            "serving HTML at / and JSON at /api/ephemeris."
+        )
+        self.assertEqual(leaf_contract.validate_verify_adequacy(done,command),[])
+
+    def test_service_verify_rejects_static_server_name_in_python_string(self):
+        done="python3 app/server.py starts a localhost HTTP server."
+        for command in (
+            "python3 -c \"print('subprocess.Popen urllib.request.urlopen app/server.py')\"",
+            "python3 -c \"import subprocess; p=subprocess.Popen(['python3','app/server.py']); assert p.pid\"",
+            "python3 -c \"import urllib.request; assert urllib.request.urlopen('http://localhost:8080').status==200\"",
+        ):
+            errors=leaf_contract.validate_verify_adequacy(done,command)
+            self.assertTrue(any("server/service" in e for e in errors),command)
+
     def test_service_done_when_accepts_executable_test_script(self):
         self.assertEqual(
             leaf_contract.validate_verify_adequacy(

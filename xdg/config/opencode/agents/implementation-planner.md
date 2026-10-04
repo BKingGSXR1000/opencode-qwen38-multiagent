@@ -301,6 +301,15 @@ or `systemctl` remediation.
   execute that relevant behavior. Syntax checks, file existence, grep, and
   static source inspection alone are insufficient for a behavioral Done-when.
 - If Verify needs another leaf's artifact, declare the appropriate dependency.
+- A leaf's Verify must NOT require an artifact owned by a downstream leaf:
+  a server/API leaf must not require the final HTML UI if a later frontend
+  leaf creates it. Verify the server startup and API now; put complete HTML,
+  static-asset and browser integration assertions in a later dependent test leaf.
+  Keep each Done-when consistent with what is verifiable at its own stage.
+- When testing a long-running Python web server via a one-line Python -c
+  command, launch the actual server process and make a real HTTP request with
+  behavioral assertions. A string that merely names the server or checks its
+  source text is not sufficient.
 - Unknown current external API/SDK/CLI contracts must come from durable verified
   evidence or a bounded probe, never model memory.
 

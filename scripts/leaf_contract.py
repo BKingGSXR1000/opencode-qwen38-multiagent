@@ -339,11 +339,67 @@ RUNTIME_VERIFY_RE = re.compile(
 SERVICE_VERIFY_RE = re.compile(
     r"\b(?:npm|pnpm|yarn)\s+start\b|"
     r"\bnode(?:js)?\s+(?!--check\b)(?!-e\b|--eval\b)[^;&|\n]+\.js\b|"
-    r"\bpython3?\s+(?!-m\s+py_compile\b)[^;&|\n]+\.py\b(?!\s+--help\b)|"
+    r"\bpython3?\s+(?!-m\s+py_compile\b|-c\b)[^;&|\n]+\.py\b(?!\s+--help\b)|"
     r"\b(?:curl|wget|playwright|puppeteer)\b|"
     r"\.opencode-v2/bin/run-checks\b",
     re.I,
 )
+
+
+def embedded_python_server_http_verify(command: str) -> bool:
+    """Recognize an executed Python -c service start followed by an HTTP probe.
+
+    Do not count a service name appearing in a string or source text. The
+    actual top-level Python program must launch a Python server via Popen,
+    call urllib.request.urlopen, and make a runtime assertion.
+    """
+    try:
+        tokens=_shell_tokens(command)
+    except ValueError:
+        return False
+    for i in range(len(tokens)-2):
+        if tokens[i].rsplit("/",1)[-1] not in {"python","python3"}:
+            continue
+        if tokens[i+1]!="-c":
+            continue
+        try:
+            tree=ast.parse(tokens[i+2])
+        except SyntaxError:
+            continue
+        launches=False
+        http_probe=False
+        asserts=False
+        for statement in tree.body:
+            if isinstance(statement,ast.Assert):
+                asserts=True
+            if not isinstance(statement,(ast.Assign,ast.AnnAssign,ast.Expr,ast.Assert)):
+                continue
+            for node in ast.walk(statement):
+                if not isinstance(node,ast.Call) or not isinstance(node.func,ast.Attribute):
+                    continue
+                func=node.func
+                if (
+                    func.attr=="Popen"
+                    and isinstance(func.value,ast.Name)
+                    and func.value.id=="subprocess"
+                    and node.args
+                    and isinstance(node.args[0],(ast.List,ast.Tuple))
+                ):
+                    values=node.args[0].elts
+                    if any(isinstance(v,ast.Constant) and isinstance(v.value,str)
+                           and v.value.endswith(".py") for v in values):
+                        launches=True
+                if (
+                    func.attr=="urlopen"
+                    and isinstance(func.value,ast.Attribute)
+                    and func.value.attr=="request"
+                    and isinstance(func.value.value,ast.Name)
+                    and func.value.value.id=="urllib"
+                ):
+                    http_probe=True
+        if launches and http_probe and asserts:
+            return True
+    return False
 
 
 TEST_RUNNER_HUMAN_SUMMARY_RE = re.compile(
@@ -426,7 +482,11 @@ def validate_verify_adequacy(done_when: str, verify_command: str):
                     + chr(96) + required + chr(96)
                     + " but verify_command does not execute it"
                 )
-    if SERVICE_DONE_WHEN_RE.search(done) and not SERVICE_VERIFY_RE.search(command):
+    if (
+        SERVICE_DONE_WHEN_RE.search(done)
+        and not SERVICE_VERIFY_RE.search(command)
+        and not embedded_python_server_http_verify(command)
+    ):
         errors.append(
             "Verify command does not exercise the server/service behavior required by Done when"
         )
