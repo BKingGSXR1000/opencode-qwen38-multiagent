@@ -54,6 +54,30 @@ class NodeEmbeddedServiceVerifyTests(unittest.TestCase):
         self.assertFalse(leaf_contract.embedded_node_server_http_verify(bad))
         self.assertTrue(leaf_contract.validate_verify_adequacy(DONE,bad))
 
+    def test_r6_status_code_ternary_exit_is_fail_closed_service_evidence(self):
+        command=(
+            "node -e \"const{spawn}=require('child_process');"
+            "const p=spawn('node',['server.js'],{stdio:['ignore','pipe','pipe']});"
+            "let code=0;const t0=Date.now();(async()=>{"
+            "while(Date.now()-t0<8000){try{const r=await fetch("
+            "'http://127.0.0.1:8000/');code=r.status;if(code)break}catch(e){}"
+            "await new Promise(s=>setTimeout(s,150))}"
+            "p.kill();process.exit(code===200?0:1)})()\""
+        )
+        self.assertTrue(leaf_contract.embedded_node_server_http_verify(command))
+        self.assertEqual(leaf_contract.validate_verify_command(command),[])
+        self.assertEqual(leaf_contract.validate_verify_adequacy(DONE,command),[])
+
+    def test_unrelated_constant_ternary_exit_does_not_count(self):
+        bad=(
+            "node -e 'const{spawn}=require(\"child_process\");"
+            "const p=spawn(\"node\",[\"server.js\"]);"
+            "fetch(\"http://localhost:8787/\").then(()=>{"
+            "p.kill();process.exit(true?0:1)})'"
+        )
+        self.assertFalse(leaf_contract.embedded_node_server_http_verify(bad))
+        self.assertTrue(leaf_contract.validate_verify_adequacy(DONE,bad))
+
 
 if __name__=="__main__":
     unittest.main()

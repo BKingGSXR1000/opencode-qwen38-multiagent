@@ -461,7 +461,10 @@ def embedded_node_server_http_verify(command: str) -> bool:
         fetch_call=bool(re.search(r"\bfetch\s*\(",code))
         fail_closed=bool(re.search(
             r"\bthrow\s+new\s+Error\s*\(|"
-            r"\bprocess\s*\.\s*exit\s*\(\s*[1-9][0-9]*\s*\)",
+            r"\bprocess\s*\.\s*exit\s*\(\s*[1-9][0-9]*\s*\)|"
+            r"\bprocess\s*\.\s*exit\s*\(\s*"
+            r"[^?;()]{0,160}\b(?:code|status)\b[^?;()]{0,160}\?"
+            r"\s*0\s*:\s*[1-9][0-9]*\s*\)",
             code,
         ))
         server_arg=bool(re.search(
